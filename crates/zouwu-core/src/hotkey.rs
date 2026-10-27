@@ -40,7 +40,8 @@ impl fmt::Display for Key {
             Key::Down => f.write_str("Down"),
             Key::Left => f.write_str("Left"),
             Key::Right => f.write_str("Right"),
-            Key::Letter(c) => write!(f, "{c}"),
+            // 配置里统一存大写：`Ctrl+Q` 读起来像快捷键，`Ctrl+q` 像变量名。
+            Key::Letter(c) => write!(f, "{}", c.to_ascii_uppercase()),
             Key::Digit(c) => write!(f, "{c}"),
             Key::Function(n) => write!(f, "F{n}"),
         }

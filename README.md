@@ -107,7 +107,7 @@
 | 托盘 | `tray-icon` | 各平台原生 API | 与 Tauri 同源，成熟 |
 | 全局热键 | `global-hotkey` | Win32 `RegisterHotKey` / Carbon / portal | Linux Wayland 无原生全局热键，需 `xdg-desktop-portal` 的 GlobalShortcuts |
 | i18n | `fluent` + `fluent-bundle`（支持复数、性别、变量） | `rust-i18n`（YAML/TOML，更简单） | 若只要"中英日"简单键值，`rust-i18n` 更省事 |
-| 配置 | `serde` + `toml` + `figment`，`notify` 热重载 | `confy`、`ron` | 配置要有版本号与迁移逻辑 |
+| 配置 | `serde` + `toml`（版本号 + 迁移）；热重载靠**已有轮询节拍 + metadata**，不引 `notify` | `confy`、`ron` | 见 ADR-012：变更要按 `ChangeKind` 分类热应用，坏配置不能打断运行 |
 | 插件脚本 | 内置动作直接用 Rust trait；用户脚本用 `rhai`（轻、易嵌） | `wasmtime`（沙箱强、体积大）、`mlua` | 先支持"命令/HTTP/Shell"三类声明式动作，脚本作为 P2 |
 | 异步/任务 | `tokio`（网络、OCR、翻译等外部调用） | `smol` | 渲染线程与任务线程严格分离 |
 | 日志/诊断 | `tracing` + `tracing-appender` | | |
@@ -129,6 +129,7 @@
 | M0 · 探针（3~5 天） | 验证最大风险：透明异形窗 + 气泡环自绘 + 空闲 0 CPU | 一个能拖动的圆窗，悬停 150ms 弹出 6 颗气泡 |
 | ↑ **M0 已完成** | 透明异形窗 ✔ / 气泡环 ✔ / 空闲开销 ✔ / 悬停·点击链路 ✔ | 见 7.5「当前进度」 |
 | M1 · 骨架（2 周） | 托盘、全局热键、位置记忆、配置、i18n、主题加载 | 可日常挂着用的"壳" |
+| ↑ **M1 已完成** | 托盘 ✔ / 热键 ✔ / 单实例 ✔ / 配置热重载 ✔ / 主题+皮肤 ✔ / 设置面板 ✔ / 日志落盘 ✔ | 见 7.5 |
 | M2 · 变身（2 周） | 气泡环完整体验、动效打磨、选中/键盘/滚轮、贴边避让、子气泡 | 核心交互定稿 |
 | M3 · 首批能力（3 周） | 截图、翻译、二维码、剪贴板 | 有实际生产力的 MVP |
 | M4 · 可扩展（3 周） | 插件清单、外部程序接入、菜单自定义、设置面板 | 用户可自行编排 |
@@ -151,10 +152,17 @@
 | ADR-007 | **工具链：`x86_64-pc-windows-gnu` + `rust-lld`**（本机无 MSVC 的约束，不影响产品） |
 | ADR-008 | **帧调度：事件驱动 deadline + 自适应帧率**（交互 60fps / 空闲 20fps；眨眼呼吸的占空比就是常驻开销） |
 | ADR-009 | **输入：分层窗口命中不可靠 → 主动轮询光标**（窗口内 16ms、窗口外 100ms；间隔过大会漏点击） |
+| ADR-010 | **常驻形态：托盘 + 全局热键 + 单实例**；关窗 = 缩进托盘，退出只走托盘菜单 |
+| ADR-011 | **i18n：Fluent 内嵌资源**，BCP-47 标签，键名 `.` → `-` 归一 |
+| ADR-012 | **配置热重载：借输入轮询节拍做 metadata 轮询**，`ChangeKind` 分类热应用，坏配置不回退 |
+| ADR-013 | **拖动：屏幕物理坐标 + 4px 阈值**（判定做成纯函数，只靠单测验证） |
+| ADR-014 | **日志落盘：自研 `log::Log`**（双写 stderr + 文件，按大小轮转）；`env_logger` 会抢注，必须首行 init |
+| ADR-015 | **设置面板 = 第二个真窗口 + `softbuffer`**（分层窗口拿不到焦点/命中）；无"保存"按钮，改动即时落盘 |
+| ADR-016 | **文本用系统 GDI，不引字体库**（`fontdue` 解析 CJK 一个字面 175MB → 面板 RSS 879MB → 23MB） |
 
 ---
 
-## 7.5 当前进度（M0 完成，M1 进行中）
+## 7.5 当前进度（M0 / M1 完成）
 
 代码在 `crates/`（`zouwu-core` / `zouwu-platform` / `zouwu-ui` / `zouwu-app`），
 `cargo run --release -p zouwu-app` 就能跑出一只常驻屏幕角落的驺吾。
@@ -166,23 +174,29 @@
 | 悬停变形（气泡环） | ✔ 悬停 150ms 展开 8 颗气泡，弹簧错峰 24ms + 轨道浮动，选中态发光 |
 | 点击 / 右键 | ✔ 左键点气泡 → 动作入口；左键点本体 → 立即展开/收起；右键 → 收起 |
 | 输入保底 | ✔ 全局光标轮询（本机分层窗口收不到鼠标消息，见 ADR-009） |
-| 主题 | ✔ `Theme` 已抽出（`ZOUWU_WARM` / `ZOUWU_DARK`），M1.5 接配置与皮肤包 |
+| 主题 | ✔ 令牌化 `Theme` + 两个内置主题（`zouwu-warm` / `zouwu-dark`）；外部 `%APPDATA%\zouwu	hemes\*.toml` 覆盖同名 id，坏文件跳过并记日志 |
+| 皮肤加载器 | ✔ `skin.toml` + 图片资源（`%APPDATA%\zouwu\skins\<id>\`），保留 `procedural` 兜底；用户皮肤加载失败不会把画面搞挂 |
+| 设置面板 | ✔ 独立窗口 + `softbuffer` 呈现，4 个分页 / 7 种控件 / 键盘可达 / 热键录制；**无保存按钮，改动即时生效并写盘**（ADR-015） |
+| 日志 | ✔ `%APPDATA%\zouwu\logs\zouwu.log`，按大小轮转（2MB×3）；级别可运行时改；panic 也落盘（ADR-014） |
+| 文本渲染 | ✔ 系统 GDI 栅格化（中文/符号 fallback 免费，常驻增量≈0），面板 RSS 879MB → 23MB（ADR-016） |
 | 托盘常驻 | ✔ 左键切显隐，右键菜单（显示/隐藏、配置文件…、开机自启、语言、退出） |
 | 全局热键 | ✔ 默认 `Alt+Space`，可在 `config.toml` 改；解析失败回退默认 |
 | 单实例 | ✔ 命名内核事件：第二次启动把已有窗口叫出来，然后自己退出 |
 | 关窗语义 | ✔ 关窗 / Esc = 缩进托盘（**不是退出**），退出只走托盘菜单 |
 | 开机自启 | ✔ `HKCU\...\Run` 单值，写后读回校验，托盘可勾选 |
 | 多语言 | ✔ Fluent 中/英，托盘内即时切换，`language = "auto"` 跟随系统 |
-| 配置热重载 | ✖ 待做（改 `config.toml` 目前要重启） |
+| 配置热重载 | ✔ 改 `config.toml` 保存即生效（语言/主题/热键/自启/环/尺寸/置顶/日志），坏配置跳过并保留现状（ADR-012） |
 | 矢量图标字体 | ✖ 8 个 glyph 先程序化绘制，M2 换图标字体 |
 
 **可复现的验收方式**：
 
 ```bash
-cargo test --workspace                     # 34 个单测：几何 / 弹簧 / 布局 / 屏边避让 / 配置
+cargo test --workspace                     # 93 个单测：几何 / 弹簧 / 布局 / 屏边避让 / 配置 / 主题 / 皮肤 / 日志 / 面板
 cargo run -p zouwu-ui --example offscreen  # 离屏渲染 → target/zouwu-offscreen/*.png，直接看图
+cargo run -p zouwu-ui --example settings_shot   # 设置面板 4 个分页 → target/zouwu-settings/*.png（2×）
 cargo run -p zouwu-ui --example bench      # 单帧成本模型（release）
 ZOUWU_PERF=1 cargo run --release -p zouwu-app   # 每 60 帧报一次实际帧率
+ZOUWU_SETTINGS=1 cargo run --release -p zouwu-app   # 启动即开设置面板（托盘菜单没法脚本化）
 cargo run -p zouwu-platform --example autostart_check -- status   # 开机自启读写（有副作用，故不做成单测）
 ```
 

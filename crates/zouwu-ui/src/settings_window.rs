@@ -1,0 +1,542 @@
+//! 设置面板的窗口封装：winit 窗口 + softbuffer 呈现 + 输入分发。
+//!
+//! 为什么是**第二个真窗口**而不是在主窗口上"画一层"：
+//! 主窗口是 `WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE` 的分层挂件，
+//! 它按 alpha 做命中测试、拿不到键盘焦点（ADR-009 里已经吃过这个亏）。
+//! 设置面板要输入框、要 Tab 键、要标题栏，天生属于一个正常窗口。
+//!
+//! 这个文件只做"窗口与输入"，界面长什么样全在 [`crate::settings`] 里，
+//! 所以面板可以离屏渲染成 PNG 做验收（见 `examples/settings_shot.rs`）。
+
+use std::sync::Arc;
+
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use tiny_skia::Pixmap;
+use winit::dpi::LogicalSize;
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event_loop::ActiveEventLoop;
+use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
+use winit::window::{CursorIcon, Window, WindowId};
+use zouwu_core::config::{ChangeKind, Config};
+use zouwu_core::geom::Point;
+use zouwu_core::hotkey::{Hotkey, Key as HotkeyKey};
+use zouwu_core::theme::Theme;
+
+use crate::presenter::{create_soft, Presenter};
+use crate::settings::{self, Hit, Model, Paths};
+
+/// 面板对宿主（[`crate::app`]）说的事。
+pub enum Outcome {
+    /// 关掉面板（小兽继续跑）。
+    Close,
+    /// 配置有变，需要宿主落地到运行期对象与磁盘。
+    Changed(Vec<ChangeKind>),
+}
+
+pub struct SettingsWindow {
+    window: Arc<Window>,
+    presenter: Box<dyn Presenter>,
+    pixmap: Option<Pixmap>,
+    pub model: Model,
+    /// 最近一次布局：输入处理直接复用，保证"看到的"与"点到的"一致。
+    layout: Option<settings::Layout>,
+    hover: Option<usize>,
+    cursor: Point,
+    modifiers: ModifiersState,
+    /// 已提交的帧数（诊断"面板是不是在空转重绘"用）。
+    frames: u64,
+}
+
+impl SettingsWindow {
+    pub fn new(
+        event_loop: &ActiveEventLoop,
+        config: Config,
+        themes: Vec<Theme>,
+        skins: Vec<(String, String)>,
+    ) -> Result<Self, String> {
+        let (w, h) = settings::DEFAULT_SIZE;
+        let attrs = Window::default_attributes()
+            .with_title("zouwu")
+            .with_inner_size(LogicalSize::new(w, h))
+            .with_min_inner_size(LogicalSize::new(settings::MIN_SIZE.0, settings::MIN_SIZE.1))
+            .with_resizable(true)
+            .with_visible(true);
+
+        let window = Arc::new(
+            event_loop
+                .create_window(attrs)
+                .map_err(|e| format!("create settings window: {e}"))?,
+        );
+
+        let physical = window.inner_size();
+        let presenter = create_soft(window.clone(), physical.width, physical.height)?;
+
+        let paths = Paths {
+            config: zouwu_platform::config_path().display().to_string(),
+            log: zouwu_platform::logging::log_path().display().to_string(),
+        };
+        let model = Model::new(config, themes, skins, paths);
+        window.set_title(&model.i18n.t("settings.title"));
+        // 面板是暗色的，白标题栏很扎眼：让 DWM 一起变暗（失败也无所谓）。
+        if let Ok(handle) = window.window_handle() {
+            if let RawWindowHandle::Win32(win32) = handle.as_raw() {
+                zouwu_platform::layer::set_dark_title_bar(win32.hwnd.get(), true);
+            }
+        }
+        window.focus_window();
+
+        let mut this = Self {
+            window,
+            presenter,
+            pixmap: None,
+            model,
+            layout: None,
+            hover: None,
+            cursor: Point::new(0.0, 0.0),
+            modifiers: ModifiersState::empty(),
+            frames: 0,
+        };
+        this.rebuild_layout();
+        this.request_redraw();
+        log::info!("settings panel opened");
+        Ok(this)
+    }
+
+    pub fn id(&self) -> WindowId {
+        self.window.id()
+    }
+
+    pub fn focus(&self) {
+        self.window.focus_window();
+        self.request_redraw();
+    }
+
+    pub fn request_redraw(&self) {
+        self.window.request_redraw();
+    }
+
+    /// 面板也需要"Esc 关掉"之外的关闭入口：宿主（托盘再次点"设置"）用它。
+    pub fn close(&mut self) {
+        self.window.set_visible(false);
+    }
+
+    /// 当前逻辑尺寸。
+    fn logical_size(&self) -> (f32, f32) {
+        let size = self.window.inner_size();
+        let scale = self.window.scale_factor() as f32;
+        let scale = if scale > 0.01 { scale } else { 1.0 };
+        (size.width as f32 / scale, size.height as f32 / scale)
+    }
+
+    fn rebuild_layout(&mut self) {
+        let (w, h) = self.logical_size();
+        let layout = settings::layout(&self.model, w, h);
+        self.model.scroll = self.model.scroll.clamp(0.0, layout.max_scroll());
+        self.layout = Some(layout);
+    }
+
+    /// 画一帧并提交。返回是否成功（失败只记日志，面板不该因一次绘制失败而消失）。
+    pub fn redraw(&mut self) {
+        let size = self.window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
+        let need_new = match &self.pixmap {
+            Some(p) => p.width() != size.width || p.height() != size.height,
+            None => true,
+        };
+        if need_new {
+            self.pixmap = Pixmap::new(size.width, size.height);
+            self.presenter.resize(size.width.max(1), size.height.max(1));
+        }
+        self.rebuild_layout();
+        let Some(layout) = &self.layout else {
+            return;
+        };
+        let Some(pixmap) = self.pixmap.as_mut() else {
+            log::error!("settings: pixmap alloc failed");
+            return;
+        };
+        settings::draw(pixmap, layout, &self.model);
+        if let Err(err) = self.presenter.present(pixmap) {
+            log::error!("settings: present failed: {err}");
+            return;
+        }
+        self.frames += 1;
+        if self.frames <= 2 || self.frames % 120 == 0 {
+            log::debug!("settings: present #{}", self.frames);
+        }
+    }
+
+    pub fn window_event(&mut self, event: &WindowEvent) -> Vec<Outcome> {
+        match event {
+            WindowEvent::RedrawRequested => {
+                self.redraw();
+                Vec::new()
+            }
+            WindowEvent::Resized(size) => {
+                self.presenter.resize(size.width.max(1), size.height.max(1));
+                self.request_redraw();
+                Vec::new()
+            }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                self.request_redraw();
+                Vec::new()
+            }
+            WindowEvent::CloseRequested => vec![Outcome::Close],
+            WindowEvent::Focused(false) => {
+                // 切走时放弃热键捕获，否则回来会以为还在等键。
+                if self.model.capturing {
+                    self.model.capturing = false;
+                    self.request_redraw();
+                }
+                Vec::new()
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
+                Vec::new()
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let scale = self.window.scale_factor() as f32;
+                let scale = if scale > 0.01 { scale } else { 1.0 };
+                self.cursor = Point::new(position.x as f32 / scale, position.y as f32 / scale);
+                let hover = self
+                    .layout
+                    .as_ref()
+                    .and_then(|l| settings::hit(l, self.cursor))
+                    .and_then(|hit| match hit {
+                        Hit::Row(i) | Hit::Step(i, _) | Hit::Press(i) => Some(i),
+                        _ => None,
+                    });
+                let interactive = hover.is_some()
+                    || self
+                        .layout
+                        .as_ref()
+                        .and_then(|l| settings::hit(l, self.cursor))
+                        .is_some_and(|h| matches!(h, Hit::Tab(_) | Hit::Scrollbar));
+                self.window.set_cursor(if interactive {
+                    CursorIcon::Pointer
+                } else {
+                    CursorIcon::Default
+                });
+                if hover != self.hover {
+                    self.hover = hover;
+                    self.model.hover = hover;
+                    self.request_redraw();
+                }
+                Vec::new()
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.hover = None;
+                self.model.hover = None;
+                self.request_redraw();
+                Vec::new()
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let lines = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => *y,
+                    MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / 40.0,
+                };
+                self.scroll_by(-lines * 56.0);
+                Vec::new()
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => self.click(),
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.state == ElementState::Pressed && !event.repeat {
+                    self.key(event)
+                } else {
+                    Vec::new()
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn scroll_by(&mut self, delta: f32) {
+        let Some(layout) = &self.layout else {
+            return;
+        };
+        let max = layout.max_scroll();
+        let next = (self.model.scroll + delta).clamp(0.0, max);
+        if (next - self.model.scroll).abs() > 0.01 {
+            self.model.scroll = next;
+            self.request_redraw();
+        }
+    }
+
+    fn click(&mut self) -> Vec<Outcome> {
+        let Some(layout) = &self.layout else {
+            return Vec::new();
+        };
+        let p = self.cursor;
+        let Some(hit) = settings::hit(layout, p) else {
+            self.model.focus = None;
+            self.request_redraw();
+            return Vec::new();
+        };
+        self.model.keyboard_used = false;
+        match hit {
+            Hit::Tab(tab) => {
+                self.model.set_tab(tab);
+                self.request_redraw();
+                Vec::new()
+            }
+            Hit::Scrollbar => {
+                // 点轨道 = 翻一屏（不实现拖拽：面板内容通常只有一屏半）。
+                let page = layout.content.h * 0.9;
+                let before = self.model.scroll;
+                self.scroll_by(page);
+                if (self.model.scroll - before).abs() < 0.01 {
+                    self.model.scroll = 0.0;
+                }
+                Vec::new()
+            }
+            Hit::Step(i, dir) => {
+                self.model.focus = Some(i);
+                let Some(field) = layout.rows[i].0.field else {
+                    return Vec::new();
+                };
+                let kinds = settings::step(&mut self.model, field, dir);
+                self.after_change(kinds)
+            }
+            Hit::Press(i) => {
+                self.model.focus = Some(i);
+                let kinds = settings::activate(&mut self.model, layout, i);
+                self.after_change(kinds)
+            }
+            Hit::Row(i) => {
+                self.model.focus = Some(i);
+                // 点开关行的任意位置 = 切换（开关太小，不该要求精准命中）。
+                let is_toggle =
+                    matches!(layout.rows[i].0.control, settings::Control::Toggle { .. });
+                if is_toggle {
+                    let kinds = settings::activate(&mut self.model, layout, i);
+                    self.after_change(kinds)
+                } else {
+                    self.request_redraw();
+                    Vec::new()
+                }
+            }
+        }
+    }
+
+    fn key(&mut self, event: &winit::event::KeyEvent) -> Vec<Outcome> {
+        // ── 热键捕获模式：所有按键都归它 ──
+        if self.model.capturing {
+            match event.logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    self.model.capturing = false;
+                    self.request_redraw();
+                    return Vec::new();
+                }
+                Key::Named(NamedKey::Backspace) => {
+                    // 清除热键 = 关掉这个开关（而不是留下一个"按了就报错"的串）。
+                    self.model.capturing = false;
+                    self.model.config.general.hotkey.clear();
+                    self.request_redraw();
+                    return vec![Outcome::Changed(vec![ChangeKind::Hotkey])];
+                }
+                _ => {}
+            }
+            let Some(key) = hotkey_key(event) else {
+                return Vec::new();
+            };
+            let mods = self.modifiers;
+            if mods.is_empty() {
+                self.model.notice = Some(self.model.i18n.t("settings.hotkey.need-modifier"));
+                self.request_redraw();
+                return Vec::new();
+            }
+            let hotkey = Hotkey {
+                ctrl: mods.control_key(),
+                shift: mods.shift_key(),
+                alt: mods.alt_key(),
+                meta: mods.super_key(),
+                key,
+            };
+            let outcome =
+                settings::capture_hotkey(&mut self.model, Some(hotkey)).unwrap_or_default();
+            if let Some(notice) = &self.model.notice {
+                log::warn!("hotkey capture rejected: {notice}");
+            } else if !self.model.config.general.hotkey.is_empty() {
+                log::info!("hotkey captured: {}", self.model.config.general.hotkey);
+            }
+            return self.after_change(outcome);
+        }
+
+        match event.logical_key {
+            Key::Named(NamedKey::Escape) => vec![Outcome::Close],
+            Key::Named(NamedKey::Tab) => {
+                // Ctrl+Tab 切标签页：键盘用户不该为了换页去摸鼠标。
+                if self.modifiers.control_key() {
+                    self.cycle_tab(!self.modifiers.shift_key());
+                } else {
+                    self.move_focus(!self.modifiers.shift_key());
+                }
+                Vec::new()
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                self.move_focus(true);
+                Vec::new()
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                self.move_focus(false);
+                Vec::new()
+            }
+            Key::Named(NamedKey::ArrowLeft) => self.adjust_focus(-1),
+            Key::Named(NamedKey::ArrowRight) => self.adjust_focus(1),
+            Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => self.press_focus(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn cycle_tab(&mut self, forward: bool) {
+        let tabs = crate::settings::Tab::ALL;
+        let index = tabs.iter().position(|t| *t == self.model.tab).unwrap_or(0);
+        let len = tabs.len();
+        let next = if forward {
+            (index + 1) % len
+        } else {
+            (index + len - 1) % len
+        };
+        let tab = tabs[next];
+        self.model.set_tab(tab);
+        self.request_redraw();
+    }
+
+    fn move_focus(&mut self, forward: bool) {
+        let Some(layout) = &self.layout else {
+            return;
+        };
+        let Some(next) = layout.move_focus(forward) else {
+            return;
+        };
+        self.model.focus = Some(next);
+        self.model.keyboard_used = true;
+        self.ensure_focus_visible();
+        self.request_redraw();
+    }
+
+    fn ensure_focus_visible(&mut self) {
+        let (Some(layout), Some(focus)) = (&self.layout, self.model.focus) else {
+            return;
+        };
+        let Some((_, rl)) = layout.rows.get(focus) else {
+            return;
+        };
+        let (top, bottom) = (layout.content.y, layout.content.bottom());
+        if rl.rect.y < top {
+            self.model.scroll -= top - rl.rect.y;
+        } else if rl.rect.bottom() > bottom {
+            self.model.scroll += rl.rect.bottom() - bottom;
+        }
+        self.model.scroll = self.model.scroll.max(0.0);
+    }
+
+    fn adjust_focus(&mut self, dir: i32) -> Vec<Outcome> {
+        let Some(layout) = &self.layout else {
+            return Vec::new();
+        };
+        let Some(focus) = self.model.focus else {
+            return Vec::new();
+        };
+        let Some(field) = layout.rows.get(focus).and_then(|(row, _)| row.field) else {
+            return Vec::new();
+        };
+        let kinds = settings::step(&mut self.model, field, dir);
+        self.after_change(kinds)
+    }
+
+    fn press_focus(&mut self) -> Vec<Outcome> {
+        let Some(layout) = &self.layout else {
+            return Vec::new();
+        };
+        let Some(focus) = self.model.focus else {
+            return Vec::new();
+        };
+        let kinds = settings::activate(&mut self.model, layout, focus);
+        self.after_change(kinds)
+    }
+
+    fn after_change(&mut self, kinds: Vec<ChangeKind>) -> Vec<Outcome> {
+        self.request_redraw();
+        if kinds.is_empty() {
+            Vec::new()
+        } else {
+            vec![Outcome::Changed(kinds)]
+        }
+    }
+}
+
+/// winit 的物理键 → 领域层的热键主键。
+fn hotkey_key(event: &winit::event::KeyEvent) -> Option<HotkeyKey> {
+    let PhysicalKey::Code(code) = event.physical_key else {
+        return None;
+    };
+    let key = match code {
+        KeyCode::Space => HotkeyKey::Space,
+        KeyCode::Enter | KeyCode::NumpadEnter => HotkeyKey::Enter,
+        KeyCode::Tab => HotkeyKey::Tab,
+        KeyCode::Escape => HotkeyKey::Escape,
+        KeyCode::Backspace => HotkeyKey::Backspace,
+        KeyCode::Delete => HotkeyKey::Delete,
+        KeyCode::ArrowUp => HotkeyKey::Up,
+        KeyCode::ArrowDown => HotkeyKey::Down,
+        KeyCode::ArrowLeft => HotkeyKey::Left,
+        KeyCode::ArrowRight => HotkeyKey::Right,
+        KeyCode::KeyA => HotkeyKey::Letter('a'),
+        KeyCode::KeyB => HotkeyKey::Letter('b'),
+        KeyCode::KeyC => HotkeyKey::Letter('c'),
+        KeyCode::KeyD => HotkeyKey::Letter('d'),
+        KeyCode::KeyE => HotkeyKey::Letter('e'),
+        KeyCode::KeyF => HotkeyKey::Letter('f'),
+        KeyCode::KeyG => HotkeyKey::Letter('g'),
+        KeyCode::KeyH => HotkeyKey::Letter('h'),
+        KeyCode::KeyI => HotkeyKey::Letter('i'),
+        KeyCode::KeyJ => HotkeyKey::Letter('j'),
+        KeyCode::KeyK => HotkeyKey::Letter('k'),
+        KeyCode::KeyL => HotkeyKey::Letter('l'),
+        KeyCode::KeyM => HotkeyKey::Letter('m'),
+        KeyCode::KeyN => HotkeyKey::Letter('n'),
+        KeyCode::KeyO => HotkeyKey::Letter('o'),
+        KeyCode::KeyP => HotkeyKey::Letter('p'),
+        KeyCode::KeyQ => HotkeyKey::Letter('q'),
+        KeyCode::KeyR => HotkeyKey::Letter('r'),
+        KeyCode::KeyS => HotkeyKey::Letter('s'),
+        KeyCode::KeyT => HotkeyKey::Letter('t'),
+        KeyCode::KeyU => HotkeyKey::Letter('u'),
+        KeyCode::KeyV => HotkeyKey::Letter('v'),
+        KeyCode::KeyW => HotkeyKey::Letter('w'),
+        KeyCode::KeyX => HotkeyKey::Letter('x'),
+        KeyCode::KeyY => HotkeyKey::Letter('y'),
+        KeyCode::KeyZ => HotkeyKey::Letter('z'),
+        KeyCode::Digit0 => HotkeyKey::Digit('0'),
+        KeyCode::Digit1 => HotkeyKey::Digit('1'),
+        KeyCode::Digit2 => HotkeyKey::Digit('2'),
+        KeyCode::Digit3 => HotkeyKey::Digit('3'),
+        KeyCode::Digit4 => HotkeyKey::Digit('4'),
+        KeyCode::Digit5 => HotkeyKey::Digit('5'),
+        KeyCode::Digit6 => HotkeyKey::Digit('6'),
+        KeyCode::Digit7 => HotkeyKey::Digit('7'),
+        KeyCode::Digit8 => HotkeyKey::Digit('8'),
+        KeyCode::Digit9 => HotkeyKey::Digit('9'),
+        KeyCode::F1 => HotkeyKey::Function(1),
+        KeyCode::F2 => HotkeyKey::Function(2),
+        KeyCode::F3 => HotkeyKey::Function(3),
+        KeyCode::F4 => HotkeyKey::Function(4),
+        KeyCode::F5 => HotkeyKey::Function(5),
+        KeyCode::F6 => HotkeyKey::Function(6),
+        KeyCode::F7 => HotkeyKey::Function(7),
+        KeyCode::F8 => HotkeyKey::Function(8),
+        KeyCode::F9 => HotkeyKey::Function(9),
+        KeyCode::F10 => HotkeyKey::Function(10),
+        KeyCode::F11 => HotkeyKey::Function(11),
+        KeyCode::F12 => HotkeyKey::Function(12),
+        _ => return None,
+    };
+    Some(key)
+}

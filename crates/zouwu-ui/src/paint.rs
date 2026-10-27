@@ -6,10 +6,16 @@
 //! * 340×340 的画面 CPU 光栅成本极低（< 0.3ms）；
 //! * 空闲时根本不调用它。
 
-use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
+use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, PixmapPaint, Stroke, Transform};
 use zouwu_core::action::Glyph;
 use zouwu_core::geom::Point;
+use zouwu_core::skin::LayerRole;
 use zouwu_core::theme::{Rgba, Theme};
+
+use crate::skin::Skin;
+
+/// 代码绘制小兽的呼吸幅度（±3%）。位图皮肤用它自己的 `geometry.breath_amount`。
+pub const DEFAULT_BREATH_AMOUNT: f32 = 0.03;
 
 pub struct BubblePaint {
     pub center: Point,
@@ -34,8 +40,26 @@ pub struct Scene<'a> {
     pub buddy_alpha: f32,
     /// 眨眼量：0 = 睁眼，1 = 闭眼
     pub blink: f32,
+    /// 呼吸相位：0 = 常态，1 = 吸气顶点。**幅度**由皮肤决定，见 [`Scene::body_radius`]。
+    pub breath: f32,
     pub theme: &'a Theme,
     pub bubbles: &'a [BubblePaint],
+    /// 位图皮肤；`None` 或 `procedural` → 走代码绘制。
+    pub skin: Option<&'a Skin>,
+}
+
+impl Scene<'_> {
+    /// 本体当前半径 = 基础半径 × 悬停弹簧 × (1 + 呼吸幅度 × 呼吸相位)。
+    ///
+    /// 呼吸幅度交给皮肤决定：手绘形象与代码绘制小兽的体积感不一样，
+    /// 但"什么时候呼吸、呼多久"仍然是 App 统一管的（用户设置优先于皮肤）。
+    pub fn body_radius(&self) -> f32 {
+        let amp = match self.skin {
+            Some(skin) => skin.breath_amount(),
+            None => DEFAULT_BREATH_AMOUNT,
+        };
+        self.buddy_radius * self.buddy_scale * (1.0 + amp * self.breath)
+    }
 }
 
 struct Ctx<'a> {
@@ -219,8 +243,83 @@ pub fn render(scene: &Scene<'_>, pixmap: &mut Pixmap) {
         s: scene.scale,
     };
 
-    draw_buddy(&mut ctx, scene);
+    draw_skin_or_buddy(&mut ctx, scene);
     draw_bubbles(&mut ctx, scene, theme);
+}
+
+/// 本体：有位图皮肤就贴图层，否则代码绘制。
+fn draw_skin_or_buddy(ctx: &mut Ctx<'_>, scene: &Scene<'_>) {
+    match scene.skin {
+        Some(skin) if !skin.is_procedural() => draw_skin_buddy(ctx, scene, skin),
+        _ => draw_buddy(ctx, scene),
+    }
+}
+
+/// 地面投影：多层同心扁椭圆叠出柔和渐变（比模糊成本低一个数量级）。
+/// 代码绘制和位图皮肤共用它，所以两种形态看起来都"坐在桌面上"。
+fn draw_shadow(ctx: &mut Ctx<'_>, center: Point, radius: f32, alpha: f32, theme: &Theme) {
+    for i in (1..=12).rev() {
+        let k = i as f32 / 12.0;
+        ctx.fill_ellipse(
+            center,
+            radius * (0.42 + 0.62 * k),
+            1.0,
+            0.14,
+            col(theme.shadow, 0.055 * alpha),
+        );
+    }
+}
+
+/// 位图皮肤：按清单顺序从下往上叠图层。
+///
+/// 三层变换的关系（顺序不能乱）：
+/// 1. **整体**：呼吸 × 悬停弹簧 × 透明度（`Scene::body_radius`）；
+/// 2. **图层**：各自 `scale` / `offset` / `opacity`；
+/// 3. **眨眼**：只影响 `role = "blink"` 的图层，透明度随 `scene.blink` 淡入。
+fn draw_skin_buddy(ctx: &mut Ctx<'_>, scene: &Scene<'_>, skin: &Skin) {
+    let a = scene.buddy_alpha;
+    if a <= 0.001 {
+        return;
+    }
+    let c = scene.buddy_center;
+    let r = scene.body_radius();
+    // 偏移量是按设计尺寸写的，整体缩放时偏移也要跟着缩，否则放大时五官会散开。
+    let k = if scene.buddy_radius > 0.0 {
+        r / scene.buddy_radius
+    } else {
+        1.0
+    };
+
+    draw_shadow(ctx, Point::new(c.x, c.y + r * 0.94), r, a, scene.theme);
+
+    for layer in &skin.layers {
+        let alpha = a
+            * layer.opacity
+            * match layer.role {
+                LayerRole::Blink => scene.blink.clamp(0.0, 1.0),
+                _ => 1.0,
+            };
+        if alpha <= 0.001 {
+            continue;
+        }
+        let (w, h) = layer.draw_size(r);
+        if w <= 0.5 || h <= 0.5 {
+            continue;
+        }
+
+        let (pw, ph) = (layer.pixmap.width() as f32, layer.pixmap.height() as f32);
+        let tx = c.x + layer.offset_x * k - w * 0.5;
+        let ty = c.y + layer.offset_y * k - h * 0.5;
+        let transform = Transform::from_scale(w / pw, h / ph).post_translate(tx, ty);
+        let paint = PixmapPaint {
+            opacity: alpha,
+            blend_mode: tiny_skia::BlendMode::SourceOver,
+            quality: tiny_skia::FilterQuality::Bilinear,
+        };
+        ctx.pixmap
+            .as_mut()
+            .draw_pixmap(0, 0, layer.pixmap.as_ref(), &paint, transform, None);
+    }
 }
 
 /// 生成托盘图标用的**非预乘** RGBA 像素（Windows `NOTIFYICONDATA` 要的就是这个）。
@@ -230,21 +329,28 @@ pub fn render(scene: &Scene<'_>, pixmap: &mut Pixmap) {
 ///
 /// `alpha` 会就地做预乘 → 直通转换：tiny-skia 输出的是预乘 alpha，
 /// 直接拿去当图标会让边缘发黑（预乘值被当成直通值再乘一次）。
-pub fn tray_icon(theme: &Theme, size: u32) -> (Vec<u8>, u32, u32) {
+pub fn tray_icon(theme: &Theme, skin: Option<&Skin>, size: u32) -> (Vec<u8>, u32, u32) {
     let size = size.clamp(16, 256);
     let mut pixmap = Pixmap::new(size, size).expect("tray icon pixmap");
     let logical = size as f32;
+    let radius = logical * 0.40;
     let scene = Scene {
         width: logical,
         height: logical,
         scale: 1.0,
         buddy_center: Point::new(logical * 0.5, logical * 0.52),
-        buddy_radius: logical * 0.40,
+        // 托盘格子很小：位图皮肤按同一套几何缩小到 0.4 格，与代码绘制保持一致。
+        buddy_radius: skin
+            .filter(|s| !s.is_procedural())
+            .map(|s| radius * s.manifest.geometry.radius / 56.0)
+            .unwrap_or(radius),
         buddy_scale: 1.0,
         buddy_alpha: 1.0,
         blink: 0.0,
+        breath: 0.0,
         theme,
         bubbles: &[],
+        skin,
     };
     render(&scene, &mut pixmap);
 
@@ -271,21 +377,11 @@ fn draw_buddy(ctx: &mut Ctx<'_>, scene: &Scene<'_>) {
         return;
     }
     let c = scene.buddy_center;
-    let r = scene.buddy_radius * scene.buddy_scale;
+    let r = scene.body_radius();
     // 局部坐标：以本体中心为原点、以半径 r 为单位
     let p = |x: f32, y: f32| Point::new(c.x + r * x, c.y + r * y);
 
-    // ---- 地面投影：多层同心扁椭圆叠出柔和渐变（比模糊成本低一个数量级）
-    for i in (1..=12).rev() {
-        let k = i as f32 / 12.0;
-        ctx.fill_ellipse(
-            p(0.0, 0.94),
-            r * (0.42 + 0.62 * k),
-            1.0,
-            0.14,
-            col(theme.shadow, 0.055 * a),
-        );
-    }
+    draw_shadow(ctx, p(0.0, 0.94), r, a, theme);
 
     // ---- 尾巴（在身体后面），带三道虎纹
     ctx.polyline(

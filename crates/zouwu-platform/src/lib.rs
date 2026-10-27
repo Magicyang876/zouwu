@@ -3,31 +3,64 @@
 //! v1 只实现 Windows（见 `docs/decisions.md` ADR-001），但所有平台相关逻辑
 //! 都必须待在本 crate 里，UI 与领域层通过这里的函数/ trait 使用。
 
+pub mod assets;
 #[cfg(target_os = "windows")]
 pub mod autostart;
 #[cfg(target_os = "windows")]
 pub mod hotkey;
 #[cfg(target_os = "windows")]
 pub mod layer;
+pub mod logging;
 #[cfg(target_os = "windows")]
 pub mod single_instance;
+
+/// 文本栅格化：Windows 走 GDI（系统共享字体，常驻内存≈0）。
+#[cfg(target_os = "windows")]
+pub mod text_gdi;
+#[cfg(not(target_os = "windows"))]
+#[path = "text_gdi_stub.rs"]
+pub mod text_gdi;
 #[cfg(target_os = "windows")]
 pub mod tray;
+
+pub mod reload;
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use zouwu_core::config::{Config, WindowState};
 
-/// 打开配置目录（给"设置"入口用：M1 还没有面板，先把用户送到真正的地方）。
+/// 打开配置目录（"配置文件…"入口）。
 pub fn open_config_dir() -> bool {
+    open_dir(&config_dir())
+}
+
+/// 用系统文件管理器打开一个目录。
+///
+/// 故意用 `explorer` 而不是 `ShellExecuteW`：前者对"路径里有空格/中文"的
+/// 处理是系统自己做的，而且不需要我们再声明一堆 COM 相关的东西。
+pub fn open_dir(dir: &Path) -> bool {
+    let _ = fs::create_dir_all(dir);
     #[cfg(target_os = "windows")]
     {
-        autostart::open_config_dir()
+        match std::process::Command::new("explorer").arg(dir).spawn() {
+            Ok(_) => true,
+            Err(err) => {
+                log::warn!("explorer failed for {}: {err}", dir.display());
+                false
+            }
+        }
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     {
-        false
+        matches!(std::process::Command::new("open").arg(dir).spawn(), Ok(_))
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        matches!(
+            std::process::Command::new("xdg-open").arg(dir).spawn(),
+            Ok(_)
+        )
     }
 }
 

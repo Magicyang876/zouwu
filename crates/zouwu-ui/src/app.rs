@@ -23,17 +23,23 @@ use winit::platform::windows::WindowAttributesExtWindows;
 
 use zouwu_core::action::{default_ring, ActionItem};
 use zouwu_core::anim::Spring;
-use zouwu_core::config::{Config, WindowState};
+use zouwu_core::config::{ChangeKind, Config, WindowState};
+use zouwu_core::drag::{Drag, DragOutcome};
 use zouwu_core::geom::{Point, Rect};
 use zouwu_core::hotkey::Hotkey;
 use zouwu_core::i18n::I18n;
 use zouwu_core::ring::{solve_rotation, Bubble, RingConfig};
-use zouwu_core::theme::{Theme, ZOUWU_WARM};
+use zouwu_core::skin::PROCEDURAL_SKIN_ID;
+
+use crate::settings_window::{Outcome as SettingsOutcome, SettingsWindow};
+use crate::skin::Skin;
+use zouwu_core::theme::Theme;
 
 use zouwu_platform::autostart;
 use zouwu_platform::hotkey::HotkeyRegistrar;
+use zouwu_platform::reload::{ConfigWatcher, ReloadEvent};
 use zouwu_platform::single_instance::InstanceSignal;
-use zouwu_platform::tray::{Tray, TrayCommand};
+use zouwu_platform::tray::{Tray, TrayCommand, TrayOptions};
 
 use crate::paint::{render, BubblePaint, Scene};
 use crate::presenter::Presenter;
@@ -45,6 +51,16 @@ use crate::presenter::Presenter;
 ///    不应该出现两只驺吾）；
 /// 2. 再建事件循环；3. 读配置决定语言/热键/是否直接显示。
 pub fn run() -> Result<(), String> {
+    // 日志要**最先**起来：后面每一步都可能失败，而失败的原因只在这里留得下。
+    // 注意此时还没读配置，所以先按 RUST_LOG / 默认 info 起，读完配置再 apply。
+    zouwu_platform::logging::init();
+    log::info!(
+        "zouwu {} starting ({} / {})",
+        env!("CARGO_PKG_VERSION"),
+        zouwu_platform::platform_name(),
+        std::env::consts::ARCH
+    );
+
     let instance = InstanceSignal::acquire("zouwu")?;
     let Some(instance) = instance else {
         log::info!("another zouwu is running; asked it to show up");
@@ -55,12 +71,13 @@ pub fn run() -> Result<(), String> {
     event_loop.set_control_flow(ControlFlow::Wait);
 
     // 配置在启动时读一次（缺文件会写出一份默认配置，方便用户手改）
-    let mut app = App::new(
-        zouwu_platform::load_config(),
-        ZOUWU_WARM,
-        default_ring(),
-        instance,
-    );
+    let config = zouwu_platform::load_config();
+    // 配置里的日志级别/落盘策略现在才生效（RUST_LOG 仍然优先）。
+    zouwu_platform::logging::apply(&config.log);
+    // 主题/皮肤都是"用户可能写错"的输入：加载失败一律退回内置，不让程序打不开。
+    let themes = zouwu_platform::assets::load_themes();
+    let theme = zouwu_platform::assets::theme_by_id(&themes, &config.appearance.theme);
+    let mut app = App::new(config, theme, themes, default_ring(), instance);
     event_loop
         .run_app(&mut app)
         .map_err(|e| format!("run_app: {e}"))?;
@@ -87,9 +104,17 @@ const CURSOR_POLL_INSIDE: Duration = Duration::from_millis(16);
 /// 同一个物理点击被事件与轮询重复识别时的去重窗口。
 const CLICK_DEBOUNCE: Duration = Duration::from_millis(250);
 
+/// 单边物理像素上限：超过就缩窗口。
+/// 1200² ≈ 1.44 Mpx，一帧 RGBA 约 5.8 MB；再大光栅+合成会明显拖慢。
+const MAX_PHYSICAL_SIDE: u32 = 1200;
+
 struct App {
     config: Config,
     theme: Theme,
+    /// 全部可用主题（内置 + 外部）。托盘勾选、换主题都从这里取。
+    themes: Vec<Theme>,
+    /// 当前皮肤（`procedural` 时没有图层，走代码绘制）
+    skin: Skin,
     items: Vec<ActionItem>,
 
     window: Option<Arc<Window>>,
@@ -132,6 +157,8 @@ struct App {
     buttons_down: (bool, bool),
     /// 最近一次已处理的点击（事件与轮询去重）
     last_click: Option<Instant>,
+    /// 拖动进行中的状态（按住本体 → 越过阈值 → 窗口跟着光标走）
+    drag: Option<Drag>,
 
     /// 窗口位置：`Moved` 事件只记在这里，节流后再落盘（拖动会刷出大量事件）
     state_pos: Option<(i32, i32)>,
@@ -155,11 +182,59 @@ struct App {
     perf_frames: u32,
     perf_mark: Instant,
     perf_started: Instant,
+
+    /// 配置文件监视器。借已有的输入轮询节拍顺手看一眼 `config.toml`，
+    /// 不另开线程、不用 `notify`（理由见 `zouwu_platform::reload`）。
+    config_watcher: ConfigWatcher,
+
+    /// 设置面板。是**第二个真窗口**（托盘/热键可能把它叫出来，用户随手关掉）。
+    settings: Option<SettingsWindow>,
+    /// 托盘点了"设置"，但当时手里没有 `ActiveEventLoop`（不能在轮询里建窗口），
+    /// 于是先记个意愿，下一拍再开。
+    pending_settings: bool,
+    /// `ZOUWU_SETTINGS=1` 已消费过（一次性）。
+    settings_env_done: bool,
+}
+
+/// 读并解码当前皮肤。任何一步失败都退回 `procedural`：
+///
+/// 皮肤是用户的资源，坏了该少一层皮，不该让常驻程序起不来。
+fn load_skin(id: &str) -> Skin {
+    if id == PROCEDURAL_SKIN_ID {
+        return Skin::procedural();
+    }
+    let decoded = zouwu_platform::assets::load_skin(id).and_then(|pkg| Skin::decode(&pkg));
+    match decoded {
+        Ok(skin) => {
+            log::info!(
+                "skin loaded: {} ({})",
+                skin.manifest.id,
+                skin.manifest.display_name()
+            );
+            skin
+        }
+        Err(err) => {
+            log::warn!("skin `{id}` unavailable, using procedural: {err}");
+            Skin::procedural()
+        }
+    }
 }
 
 impl App {
-    fn new(config: Config, theme: Theme, items: Vec<ActionItem>, instance: InstanceSignal) -> Self {
+    /// 交给渲染层的皮肤引用（`procedural` 也照样传，由 paint 决定走哪条路）。
+    fn skin_for_paint(&self) -> Option<&Skin> {
+        Some(&self.skin)
+    }
+
+    fn new(
+        config: Config,
+        theme: Theme,
+        themes: Vec<Theme>,
+        items: Vec<ActionItem>,
+        instance: InstanceSignal,
+    ) -> Self {
         let ring = config.ring.to_ring_config();
+        let skin = load_skin(&config.appearance.skin);
         let n = items.len();
         let i18n = I18n::new(&config.general.language);
         let visible = config.general.show_on_start;
@@ -171,6 +246,8 @@ impl App {
             visible,
             config,
             theme,
+            themes,
+            skin,
             items,
             window: None,
             presenter: None,
@@ -195,6 +272,7 @@ impl App {
             next_poll: Instant::now(),
             buttons_down: (false, false),
             last_click: None,
+            drag: None,
             state_pos: None,
             state_pending: false,
             state_saved_at: Instant::now(),
@@ -202,6 +280,10 @@ impl App {
             perf_frames: 0,
             perf_mark: Instant::now(),
             perf_started: Instant::now(),
+            config_watcher: ConfigWatcher::new(zouwu_platform::config_path()),
+            settings: None,
+            pending_settings: false,
+            settings_env_done: false,
         }
     }
 
@@ -224,21 +306,202 @@ impl App {
 
     /// 用完就放：把配置写回磁盘（语言、热键、自启这些用户改动）。
     fn save_config(&self) {
+        // 我们正要覆盖磁盘上的文件：如果那上面还有没被读进来的手改，至少留个凭据。
+        if self.config_watcher.has_external_change() {
+            log::warn!("overwriting an external edit to config.toml");
+        }
         zouwu_platform::save_config(&self.config);
+        // 把监视器的戳对齐到“我刚写的内容”，否则下一次轮询会把我们自己的写
+        // 当成外部修改再应用一遍（结果虽然幂等，但会白重画一帧、白写一条日志）。
+        self.config_watcher.sync();
+    }
+
+    /// 把磁盘上新读到的配置应用到正在运行的对象上。
+    ///
+    /// 原则：**能热改的立刻改，改不了的安静跳过，坏文件一律不动现状**。
+    /// 每一步都幂等，也不因为某一步失败就回滚整体 —— 宁可热键没换成功，
+    /// 也不要让一只好好的驺吾退回旧配置。
+    fn reload_config(&mut self, next: Config, now: Instant) {
+        if self.config == next {
+            return;
+        }
+        let changed = self.config.diff(&next);
+        self.apply_config(next, &changed, now, "disk");
+    }
+
+    /// 把一份新配置接到运行期对象上。`origin` 只用于日志。
+    ///
+    /// 两条路径共用它：磁盘热重载（`reload_config`）与设置面板（用户在面板里
+    /// 改一个开关）。共用而不是各写一遍，是因为"哪些字段要热应用"是**同一份
+    /// 领域知识**，分叉两次必然有一边漏掉某个 `ChangeKind`。
+    fn apply_config(
+        &mut self,
+        mut next: Config,
+        changed: &[ChangeKind],
+        now: Instant,
+        origin: &str,
+    ) {
+        if changed.is_empty() {
+            // 只改了“启动期才读”的字段（`show_on_start` 之类）：接管配置即可。
+            log::debug!("config replaced from {origin} (no live effect)");
+            self.config = next;
+            return;
+        }
+
+        // 开机自启是唯一会把系统状态回填进配置的一项：先问系统真实结果，
+        // 再接管配置。回填只改内存，**不写盘**（写盘会整份重写用户的注释和格式）。
+        if changed.contains(&ChangeKind::Autostart) {
+            let actual = autostart::set_enabled(next.general.start_on_boot);
+            if actual != next.general.start_on_boot {
+                log::warn!(
+                    "autostart requested {} but system reports {}",
+                    next.general.start_on_boot,
+                    actual
+                );
+                next.general.start_on_boot = actual;
+            }
+        }
+
+        self.config = next;
+
+        if changed.contains(&ChangeKind::Language)
+            && self.i18n.set_language(&self.config.general.language)
+        {
+            if let Some(tray) = &self.tray {
+                tray.apply_language(&self.i18n, &self.config.general.language, self.visible);
+            }
+        }
+
+        if changed.contains(&ChangeKind::Hotkey) {
+            if let Some(registrar) = self.hotkeys.as_mut() {
+                if let Err(err) = apply_hotkey_setting(&self.config.general.hotkey, registrar) {
+                    log::warn!("{err}");
+                }
+            }
+        }
+
+        if changed.contains(&ChangeKind::Autostart) {
+            if let Some(tray) = &self.tray {
+                tray.set_autostart_checked(self.config.general.start_on_boot);
+            }
+        }
+
+        if changed.contains(&ChangeKind::Ring) {
+            self.ring = self.config.ring.to_ring_config();
+            if self.window.is_some() {
+                self.relayout();
+            }
+        }
+
+        if changed.contains(&ChangeKind::WindowSize) {
+            // 改尺寸交给窗口事件：`Resized` 会顺带 resize presenter。
+            if let Some(window) = &self.window {
+                let size = self.config.window.size;
+                let _ = window.request_inner_size(LogicalSize::new(size, size));
+            }
+        }
+
+        if changed.contains(&ChangeKind::WindowLevel) {
+            // 必须走 `layer::set_always_on_top`（`SetWindowPos` 改 Z 序），
+            // **不能**用 winit 的 `set_window_level`：后者会重建窗口、丢掉
+            // `WS_EX_LAYERED`，下一帧起 `UpdateLayeredWindow` 永久失败（实测
+            // 1172 条 render failed / CPU 66%）。
+            if let Some(hwnd) = self.hwnd() {
+                zouwu_platform::layer::set_always_on_top(hwnd, self.config.window.always_on_top);
+            }
+        }
+
+        if changed.contains(&ChangeKind::Appearance) {
+            // 手改 config.toml 里的 theme/skin 也要当场生效，不必重启。
+            self.set_theme(self.config.appearance.theme.clone(), now);
+            self.set_skin(self.config.appearance.skin.clone(), now);
+        }
+
+        if changed.contains(&ChangeKind::Log) {
+            // 日志是**唯一在配置之前就启动**的子系统（坏配置的排查线索全靠它），
+            // 所以这里不是"重启它"，而是把新级别/新落盘策略推给已在跑的那个。
+            zouwu_platform::logging::apply(&self.config.log);
+        }
+
+        let names: Vec<&str> = changed.iter().map(|k| k.as_str()).collect();
+        self.last_frame = now;
+        self.dirty = true;
+        log::info!("config applied from {origin}: {}", names.join(", "));
+    }
+
+    /// 打开（或唤到前面）设置面板。
+    fn open_settings(&mut self, event_loop: &ActiveEventLoop, _now: Instant) {
+        if let Some(panel) = self.settings.as_ref() {
+            panel.focus();
+            return;
+        }
+        // 皮肤列表每次都重扫：用户刚往 `skins/` 里丢了新形象，打开面板就该看得见。
+        let skins = zouwu_platform::assets::skin_choices(&self.i18n);
+        match SettingsWindow::new(event_loop, self.config.clone(), self.themes.clone(), skins) {
+            Ok(panel) => {
+                self.settings = Some(panel);
+                // 小兽是置顶窗口，会飘在设置面板上面。面板打开期间暂时放开置顶，
+                // 让小兽留在面板下方——但仍然看得见，改主题/皮肤能立刻看到效果。
+                if let Some(hwnd) = self.hwnd() {
+                    zouwu_platform::layer::set_always_on_top(hwnd, false);
+                }
+            }
+            Err(err) => log::error!("cannot open settings panel: {err}"),
+        }
+    }
+
+    /// 面板窗口的事件分发。返回的 [`SettingsOutcome`] 在这里落地。
+    fn settings_event(&mut self, _event_loop: &ActiveEventLoop, event: WindowEvent) {
+        let mut pending: Vec<(Config, Vec<ChangeKind>)> = Vec::new();
+        let mut close = false;
+        {
+            let Some(panel) = self.settings.as_mut() else {
+                return;
+            };
+            for outcome in panel.window_event(&event) {
+                match outcome {
+                    SettingsOutcome::Close => close = true,
+                    SettingsOutcome::Changed(kinds) => {
+                        pending.push((panel.model.config.clone(), kinds));
+                    }
+                }
+            }
+            if close {
+                panel.close();
+            }
+        }
+        for (next, kinds) in pending {
+            let now = Instant::now();
+            self.apply_config(next, &kinds, now, "settings");
+            // 面板里的改动是用户明确的意图，立即落盘（不像磁盘重载那样只接管内存）。
+            self.save_config();
+        }
+        if close {
+            self.settings = None;
+            // 恢复配置里的置顶状态（面板期间被临时放开了）。
+            if let Some(hwnd) = self.hwnd() {
+                zouwu_platform::layer::set_always_on_top(hwnd, self.config.window.always_on_top);
+            }
+            log::info!("settings panel closed");
+        }
     }
 
     /// 托盘图标 + 全局热键。只做一次，且必须**在主线程**上做（见 platform::tray）。
     fn init_shell(&mut self) {
         if self.tray.is_none() {
-            let (rgba, w, h) = crate::paint::tray_icon(&self.theme, 32);
+            let (rgba, w, h) = crate::paint::tray_icon(&self.theme, self.skin_for_paint(), 32);
             let autostart_on = autostart::is_enabled();
-            match Tray::new(
-                &self.i18n,
-                Some((rgba, w, h)),
-                &self.config.general.language,
-                autostart_on,
-                self.visible,
-            ) {
+            // 主题/皮肤列表在启动时扫一次：换外观不是高频操作，
+            // 为它挂目录监听不值得（新装的主题重启后出现）。
+            let opts = TrayOptions {
+                icon_rgba: Some((rgba, w, h)),
+                language_setting: &self.config.general.language,
+                autostart: autostart_on,
+                visible: self.visible,
+                theme_id: &self.config.appearance.theme,
+                skin_id: &self.config.appearance.skin,
+            };
+            match Tray::new(&self.i18n, &self.themes, opts) {
                 Ok(tray) => self.tray = Some(tray),
                 Err(err) => log::error!("tray init failed: {err}"),
             }
@@ -279,20 +542,7 @@ impl App {
 
     /// 按配置注册热键；解析失败时回退到默认值并记日志。
     fn apply_hotkey(&self, registrar: &mut HotkeyRegistrar) -> Result<(), String> {
-        let raw = self.config.general.hotkey.trim();
-        if raw.is_empty() {
-            registrar.clear();
-            log::info!("hotkey disabled by config");
-            return Ok(());
-        }
-        let spec = match Hotkey::parse(raw) {
-            Ok(spec) => spec,
-            Err(err) => {
-                log::warn!("invalid hotkey `{raw}` ({err}); falling back to default");
-                Hotkey::default_summon()
-            }
-        };
-        registrar.set(&spec)
+        apply_hotkey_setting(&self.config.general.hotkey, registrar)
     }
 
     /// 显示 / 隐藏小兽（隐藏 = 缩进托盘，不退出进程）。
@@ -362,18 +612,82 @@ impl App {
         log::info!("autostart -> {actual}");
     }
 
+    /// 换主题：只换调色板，不动几何/皮肤。
+    ///
+    /// 幂等：id 没变就直接返回，所以配置热重载也能无脑调它。
+    fn set_theme(&mut self, id: String, now: Instant) {
+        if self.theme.id == id {
+            return;
+        }
+        let Some(theme) = self.themes.iter().find(|t| t.id == id).cloned() else {
+            log::warn!("theme `{id}` is not available");
+            return;
+        };
+        self.theme = theme;
+        self.config.appearance.theme = id.clone();
+        if let Some(tray) = &self.tray {
+            tray.apply_theme(&id);
+        }
+        self.refresh_tray_icon();
+        self.save_config();
+        self.last_frame = now;
+        self.dirty = true;
+        log::info!("theme -> {id}");
+    }
+
+    /// 换皮肤：失败就**保持现状**（而不是悄悄退回 procedural——
+    /// 用户选了某张皮却看见代码绘制的小兽，会以为程序坏了）。
+    fn set_skin(&mut self, id: String, now: Instant) {
+        if self.skin.manifest.id == id {
+            return;
+        }
+        let skin = load_skin(&id);
+        if id != PROCEDURAL_SKIN_ID && skin.is_procedural() {
+            log::warn!(
+                "skin `{id}` failed to load; keeping `{}`",
+                self.skin.manifest.id
+            );
+            return;
+        }
+        self.skin = skin;
+        self.config.appearance.skin = id.clone();
+        if let Some(tray) = &self.tray {
+            tray.apply_skin(&id);
+        }
+        self.refresh_tray_icon();
+        self.save_config();
+        self.last_frame = now;
+        self.dirty = true;
+        log::info!("skin -> {id}");
+    }
+
+    /// 托盘那一小格用的是同一套画笔：换了颜色/形象要重画，否则托盘和窗口不一样。
+    fn refresh_tray_icon(&self) {
+        let Some(tray) = &self.tray else { return };
+        let (rgba, w, h) = crate::paint::tray_icon(&self.theme, self.skin_for_paint(), 32);
+        tray.set_icon(Some((rgba, w, h)));
+    }
+
     /// 处理托盘命令；返回 `true` 表示要退出程序。
     fn handle_tray(&mut self, cmd: TrayCommand, now: Instant) -> bool {
         match cmd {
             TrayCommand::Toggle => self.toggle_visible(now),
             TrayCommand::Show => self.set_visible(true, now),
             TrayCommand::Hide => self.set_visible(false, now),
-            TrayCommand::Settings => {
-                // M1 还没有独立设置面板：先把用户送到真正能改东西的地方（配置文件）。
+            TrayCommand::Settings => self.pending_settings = true,
+            TrayCommand::OpenConfigDir => {
+                // 手改配置的老路留着：面板不可能覆盖所有字段（注释、外部主题等）。
                 if !zouwu_platform::open_config_dir() {
                     log::warn!("config dir: {}", zouwu_platform::config_dir().display());
                 }
             }
+            TrayCommand::OpenLogs => {
+                if !zouwu_platform::logging::open_log_dir() {
+                    log::warn!("log dir: {}", zouwu_platform::logging::log_dir().display());
+                }
+            }
+            TrayCommand::SetTheme(id) => self.set_theme(id, now),
+            TrayCommand::SetSkin(id) => self.set_skin(id, now),
             TrayCommand::SetAutostart(on) => self.set_autostart(on),
             TrayCommand::SetLanguage(code) => self.set_language(code),
             TrayCommand::Quit => return true,
@@ -381,13 +695,23 @@ impl App {
         false
     }
 
-    /// 一次"外壳"轮询：托盘菜单、全局热键、第二实例信号。
+    /// 一次"外壳"轮询：托盘菜单、全局热键、第二实例信号、配置文件。
     ///
-    /// 三者都不用"回调 → 通知 UI"那套线程模型，而是在这里非阻塞地取一次。
+    /// 它们都不用"回调 → 通知 UI"那套线程模型，而是在这里非阻塞地取一次。
     /// 原因：它们的唤醒都在别处（托盘自己的线程、消息队列、system event），
-    /// 我们已经有 100ms 的轮询节拍在跑，借它一次把三件事问完，省掉跨线程唤醒。
+    /// 我们已经有 100ms 的轮询节拍在跑，借它一次把这几件事问完，省掉跨线程唤醒。
     fn poll_shell(&mut self, now: Instant) -> bool {
         let mut exit = false;
+
+        // 配置文件热重载：内部按 500ms 节流，所以每拍都问一次也不贵。
+        match self.config_watcher.poll() {
+            ReloadEvent::Changed(next) => self.reload_config(*next, now),
+            ReloadEvent::Invalid(err) => {
+                // 坏的配置绝不能打断运行：用户可能正敲到一半。旧配置继续生效。
+                log::warn!("config reload skipped: {err}");
+            }
+            ReloadEvent::Unchanged => {}
+        }
 
         if self
             .instance
@@ -449,6 +773,11 @@ impl App {
         }
         self.expanded = expanded;
         self.expand_started = Some(now);
+        log::debug!(
+            "ring {} (hover delay {} ms)",
+            if expanded { "expanded" } else { "collapsed" },
+            self.config.interaction.hover_delay_ms
+        );
         self.dirty = true;
     }
 
@@ -730,7 +1059,9 @@ impl App {
 
     /// 按自适应间隔轮询一次光标，并安排下一次轮询。
     fn poll_now(&mut self, now: Instant) {
-        let inside = self.poll_pointer(now);
+        // 设置面板打开时，小兽被压在面板下面，点不到它 —— 这时候还按 16ms
+        // 轮询就只是白白吃掉 1~4% CPU（面板开着的实测值）。降到后台频率。
+        let inside = self.settings.is_none() && self.poll_pointer(now);
         // 窗口内高频（不漏点击）、窗口外低频（省 CPU）
         self.next_poll = now
             + if inside {
@@ -766,12 +1097,43 @@ impl App {
         let size = window.inner_size();
         let (w, h) = (size.width as f32 / scale, size.height as f32 / scale);
         let inside = local.x >= 0.0 && local.y >= 0.0 && local.x < w && local.y < h;
+        log::trace!("poll: screen {sx},{sy} origin {},{} size {w:.0}x{h:.0} local {:.1},{:.1} inside {inside}", origin.x, origin.y, local.x, local.y);
+
+        let left = zouwu_platform::layer::left_button_down();
+        let right = zouwu_platform::layer::right_button_down();
+
+        // 拖动优先，而且必须在 `inside` 判定之前：拖快了光标一定跑到窗口外面，
+        // 那时候如果先走“光标离开”分支，窗口会卡在半路。
+        if let Some(mut drag) = self.drag.take() {
+            if left {
+                if let Some((nx, ny)) = drag.track((sx, sy)) {
+                    window.set_outer_position(PhysicalPosition::new(nx, ny));
+                    self.state_pos = Some((nx, ny));
+                    log::trace!("drag: cursor {sx},{sy} -> {nx},{ny}");
+                }
+                self.drag = Some(drag);
+                self.buttons_down = (left, right);
+                // 拖动期间保持高频轮询：跟手比省 CPU 重要。
+                return true;
+            }
+            // 松手：动过 = 搬完了；没动过 = 这就是一次点击。
+            self.buttons_down = (left, right);
+            let last = window.outer_position().unwrap_or_default();
+            match drag.finish((last.x, last.y)) {
+                DragOutcome::Moved { x, y } => {
+                    self.state_pos = Some((x, y));
+                    self.state_pending = true;
+                    log::debug!("drag finished at {x},{y}");
+                }
+                DragOutcome::Click => self.toggle_from_click(now),
+            }
+        }
 
         if !inside {
             if self.cursor.is_some() {
                 self.on_cursor_left();
             }
-            self.buttons_down = (false, false);
+            self.buttons_down = (left, right);
             return false;
         }
 
@@ -784,8 +1146,6 @@ impl App {
         }
 
         // 点击兑底：窗口收不到 `MouseInput` 时靠 `GetAsyncKeyState` 识别按下沿
-        let left = zouwu_platform::layer::left_button_down();
-        let right = zouwu_platform::layer::right_button_down();
         if left && !self.buttons_down.0 {
             self.click(MouseButton::Left, now);
         }
@@ -815,6 +1175,40 @@ impl App {
         }
     }
 
+    /// 按住本体：记下起点，等后续轮询判断是「点击」还是「拖动」。
+    fn begin_drag(&mut self) {
+        let (Some((sx, sy)), Some(window)) = (
+            zouwu_platform::layer::cursor_position(),
+            self.window.clone(),
+        ) else {
+            return;
+        };
+        let origin = window.outer_position().unwrap_or_default();
+        self.drag = Some(Drag::begin((sx, sy), (origin.x, origin.y)));
+        log::debug!(
+            "drag start: cursor {sx},{sy} window {}x{} at {},{} scale {}",
+            window.inner_size().width,
+            window.inner_size().height,
+            origin.x,
+            origin.y,
+            window.scale_factor()
+        );
+        // 握住它的那一刻先把圈收起来，否则气泡会追着窗口跑，看着很脏。
+        self.set_expanded(false, Instant::now());
+        self.hover_since = None;
+    }
+
+    /// 一次真正的点击（按下与松开之间没有越过拖动阈值）。
+    fn toggle_from_click(&mut self, now: Instant) {
+        if self.cursor.is_none() {
+            return;
+        }
+        self.set_expanded(!self.expanded, now);
+        // 重置计时：刚收起时不该因为光标还停在那里又立刻展开。
+        self.hover_since = Some(now);
+        log::debug!("click: expanded -> {}", self.expanded);
+    }
+
     fn on_click(&mut self, button: MouseButton, now: Instant) {
         let Some(pos) = self.cursor else { return };
         let center = self.center();
@@ -828,9 +1222,9 @@ impl App {
                         log::info!("bubble activated: {} ({})", item.id, item.label_key);
                     }
                 } else if on_buddy {
-                    // 点击 = 立即展开/收起（ADR-002）
-                    self.set_expanded(!self.expanded, now);
-                    self.hover_since = Some(now);
+                    // 按住本体先别急着展开：这次按住可能是想**搬动**它。
+                    // 松手时若没越过拖动阈值，才当作一次点击（见 `toggle_from_click`）。
+                    self.begin_drag();
                 }
             }
             MouseButton::Right => {
@@ -906,11 +1300,14 @@ impl App {
             scale,
             buddy_center: center,
             buddy_radius: self.config.buddy.radius,
-            buddy_scale: self.buddy_scale.value + self.breath_amount(now),
+            // 呼吸拆成两半：**幅度**归皮肤（`body_radius` 里乘），相位归这里。
+            buddy_scale: self.buddy_scale.value,
             buddy_alpha: 1.0,
             blink: self.blink_amount(now),
+            breath: self.breath_amount(now),
             theme: &self.theme,
             bubbles: &paints,
+            skin: Some(&self.skin),
         };
         let Some(pixmap) = self.pixmap.as_mut() else {
             return Err("pixmap alloc failed".into());
@@ -927,15 +1324,55 @@ impl App {
     }
 }
 
+/// 注册 `raw`（形如 `"Alt+Space"`）描述的全局热键。
+///
+/// 单独抽出来是因为它同时被“启动”和“热重载”两条路径使用。
+/// 配置里的热键写错时**不能**让用户失去唤醒手段，所以回退到默认热键；
+/// 空串是合法的“我不要热键”，不注册也不抱怨。
+fn apply_hotkey_setting(raw: &str, registrar: &mut HotkeyRegistrar) -> Result<(), String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        registrar.clear();
+        log::info!("hotkey disabled by config");
+        return Ok(());
+    }
+    let spec = match Hotkey::parse(raw) {
+        Ok(spec) => spec,
+        Err(err) => {
+            log::warn!("invalid hotkey `{raw}` ({err}); falling back to default");
+            Hotkey::default_summon()
+        }
+    };
+    registrar.set(&spec)
+}
+
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
         }
         let size = self.config.window.size;
+        // 高 DPI 下"逻辑 340"会变成上千物理像素，光栅成本按面积涨。
+        // 超过上限就按上限开窗（画布变小、内容等比不变形——只是整个小工具小一点），
+        // 4K × 400% 这种极端缩放才可能触发。
+        let max_phys = MAX_PHYSICAL_SIDE as f64;
+        let scale = event_loop
+            .primary_monitor()
+            .map(|m| m.scale_factor())
+            .unwrap_or(1.0);
+        let desired = size as f64 * scale;
+        let logical = if desired > max_phys {
+            let capped = max_phys / scale;
+            log::warn!(
+                "window {size} logical at {scale}x = {desired:.0} px exceeds cap {max_phys:.0};                  opening at {capped:.0} logical instead"
+            );
+            capped
+        } else {
+            size as f64
+        };
         let attrs = Window::default_attributes()
             .with_title("zouwu")
-            .with_inner_size(LogicalSize::new(size, size))
+            .with_inner_size(LogicalSize::new(logical, logical))
             .with_transparent(true)
             .with_decorations(false)
             .with_resizable(false)
@@ -1014,7 +1451,12 @@ impl ApplicationHandler for App {
         log::info!("zouwu exiting");
     }
 
-    fn window_event(&mut self, _event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // 面板是另一个窗口：按 id 分流，别把它的鼠标事件当成分层窗口的。
+        if self.settings.as_ref().is_some_and(|p| p.id() == id) {
+            self.settings_event(event_loop, event);
+            return;
+        }
         let now = Instant::now();
         match event {
             WindowEvent::RedrawRequested => {
@@ -1041,6 +1483,23 @@ impl ApplicationHandler for App {
             WindowEvent::MouseInput { state, button, .. } => {
                 if state == ElementState::Pressed {
                     self.click(button, now);
+                } else if button == MouseButton::Left {
+                    // 事件与轮询两条路都会到达这里；先动手的那个把 `drag` 取走，
+                    // 后到的就 naturally no-op（免去再加一个去重窗口）。
+                    if let Some(drag) = self.drag.take() {
+                        let last = self
+                            .window
+                            .as_ref()
+                            .and_then(|w| w.outer_position().ok())
+                            .unwrap_or_default();
+                        match drag.finish((last.x, last.y)) {
+                            DragOutcome::Moved { x, y } => {
+                                self.state_pos = Some((x, y));
+                                self.state_pending = true;
+                            }
+                            DragOutcome::Click => self.toggle_from_click(now),
+                        }
+                    }
                 }
             }
             WindowEvent::Resized(new_size) => {
@@ -1093,6 +1552,20 @@ impl ApplicationHandler for App {
         }
 
         self.flush_state(now);
+
+        // `ZOUWU_SETTINGS=1` 启动即开面板：托盘菜单没法脚本化，而"面板能不能
+        // 打开"是回归时最该被一键验证的一条。**只触发一次**——否则用户关掉
+        // 面板后它会被立刻重新打开，看起来就像关不掉。
+        // 只认非空值：`ZOUWU_SETTINGS=`（空字符串）在 shell 里很常见，
+        // 不该因此弹出一个用户没要的面板。
+        let want_panel = std::env::var_os("ZOUWU_SETTINGS").is_some_and(|v| !v.is_empty());
+        if !self.settings_env_done && want_panel {
+            self.settings_env_done = true;
+            self.pending_settings = true;
+        }
+        if std::mem::take(&mut self.pending_settings) {
+            self.open_settings(event_loop, now);
+        }
 
         match self.next_deadline(now) {
             Some(t) if t <= now => {

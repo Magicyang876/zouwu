@@ -6,19 +6,23 @@
 pub mod action;
 pub mod anim;
 pub mod config;
+pub mod drag;
 pub mod geom;
 pub mod hotkey;
 pub mod i18n;
 pub mod ring;
+pub mod skin;
 pub mod theme;
 
 pub use action::{default_ring, ActionItem, Glyph};
 pub use anim::Spring;
-pub use config::Config;
+pub use config::{Appearance, Config};
+pub use drag::{Drag, DragOutcome, DRAG_THRESHOLD_SQ};
 pub use geom::{Point, Rect};
 pub use hotkey::Hotkey;
 pub use i18n::I18n;
 pub use ring::{Bubble, RingConfig};
+pub use skin::{Layer, LayerRole, SkinManifest};
 pub use theme::Theme;
 
 /// 一个便于复用的逻辑像素常量：60fps 帧间隔。

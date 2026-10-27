@@ -84,6 +84,12 @@ struct BitmapInfo {
     colors: [RgbQuad; 1],
 }
 
+#[link(name = "kernel32")]
+extern "system" {
+    fn LoadLibraryA(name: *const u8) -> *mut c_void;
+    fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
+}
+
 #[link(name = "user32")]
 extern "system" {
     fn GetDC(hwnd: Hwnd) -> Hdc;
@@ -232,6 +238,7 @@ const SW_SHOWNOACTIVATE: i32 = 4;
 const WS_EX_TOOLWINDOW: isize = 0x0000_0080;
 const WS_EX_NOACTIVATE: isize = 0x0800_0000;
 const HWND_TOPMOST: Hwnd = -1isize as Hwnd;
+const HWND_NOTOPMOST: Hwnd = -2isize as Hwnd;
 const SWP_NOSIZE: u32 = 0x0001;
 const SWP_NOMOVE: u32 = 0x0002;
 const SWP_NOACTIVATE: u32 = 0x0010;
@@ -265,6 +272,45 @@ pub fn is_visible(hwnd: isize) -> bool {
 }
 
 /// 呼出时贴回最前层，但不激活（不打断当前输入焦点）。
+/// 让标题栏跟随系统暗色（设置面板是暗色的，白标题栏很扎眼）。
+///
+/// `dwmapi.dll` 是**运行时加载**的：`x86_64-w64-mingw32` 工具链没有 `libdwmapi`
+/// 导入库（链接期 `ld: cannot find -ldwmapi`），而这条调用纯属观感，
+/// 用 `LoadLibrary` + `GetProcAddress` 拿一下最省事，也顺带兼容没有 DWM 的老系统
+/// （Win7 上直接拿不到符号，跳过即可）。
+///
+/// `DWMWA_USE_IMMERSIVE_DARK_MODE` 在 Win10 1809~1903 上是 19、1909 之后是 20，
+/// 两个都试一次，失败不报错。
+pub fn set_dark_title_bar(hwnd: isize, dark: bool) {
+    type SetAttr = unsafe extern "system" fn(Hwnd, Dword, *const c_void, Dword) -> i32;
+
+    static PROC: std::sync::OnceLock<Option<SetAttr>> = std::sync::OnceLock::new();
+    let proc = *PROC.get_or_init(|| unsafe {
+        let lib = LoadLibraryA(c"dwmapi.dll".as_ptr() as *const u8);
+        if lib.is_null() {
+            return None;
+        }
+        let addr = GetProcAddress(lib, c"DwmSetWindowAttribute".as_ptr() as *const u8);
+        if addr.is_null() {
+            return None;
+        }
+        Some(std::mem::transmute::<*mut c_void, SetAttr>(addr))
+    });
+
+    let Some(set_attr) = proc else { return };
+    let value: i32 = i32::from(dark);
+    unsafe {
+        for attribute in [20u32, 19u32] {
+            set_attr(
+                hwnd as Hwnd,
+                attribute,
+                &value as *const i32 as *const c_void,
+                std::mem::size_of::<i32>() as u32,
+            );
+        }
+    }
+}
+
 pub fn bring_to_front(hwnd: isize) {
     let hwnd = hwnd as Hwnd;
     unsafe {
@@ -279,6 +325,27 @@ pub fn bring_to_front(hwnd: isize) {
         );
         // 有些 shell 组合（比如全屏游戏退出后）需要显式再问一次前台。
         SetForegroundWindow(hwnd);
+    }
+}
+
+/// 置顶 / 取消置顶。
+///
+/// 不能用 winit 的 `set_window_level`：它会把窗口重建一遍，重建后的窗口
+/// **丢掉 `WS_EX_LAYERED`**，于是下一帧 `UpdateLayeredWindow` 就永久失败（实测
+/// 1172 条 render failed，CPU 直接跑到 66%）。用 `SetWindowPos` 改 Z 序才是
+/// 无创的，分层属性、位置、尺寸、激活状态全都不动。
+pub fn set_always_on_top(hwnd: isize, on_top: bool) {
+    let hwnd = hwnd as Hwnd;
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            if on_top { HWND_TOPMOST } else { HWND_NOTOPMOST },
+            0,
+            0,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
+        );
     }
 }
 
