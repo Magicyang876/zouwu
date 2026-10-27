@@ -5,12 +5,14 @@
 use crate::ring::{RingConfig, DEG};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub schema_version: u32,
+    /// 放在最前面：这是用户最常手改的一段（语言、热键、自启）。
+    pub general: General,
     pub interaction: Interaction,
     pub ring: RingCfg,
     pub buddy: BuddyCfg,
@@ -21,6 +23,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
+            general: General::default(),
             interaction: Interaction::default(),
             ring: RingCfg::default(),
             buddy: BuddyCfg::default(),
@@ -136,6 +139,34 @@ impl Default for WindowCfg {
     }
 }
 
+/// 常驻形态相关的开关：托盘、热键、语言、开机自启。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct General {
+    /// 界面语言：`"auto"` = 跟随系统，或 `"zh-CN"` / `"en-US"`。
+    pub language: String,
+    /// 全局热键，形如 `"Alt+Space"`；空串 = 不注册。
+    pub hotkey: String,
+    /// 开机自启（Windows 注册表 Run 键）。
+    pub start_on_boot: bool,
+    /// 启动后是否直接显示小兽（false = 先待在托盘里）。
+    pub show_on_start: bool,
+    /// 呼出时是否把窗口带到最前。
+    pub bring_to_front: bool,
+}
+
+impl Default for General {
+    fn default() -> Self {
+        Self {
+            language: "auto".to_string(),
+            hotkey: "Alt+Space".to_string(),
+            start_on_boot: false,
+            show_on_start: true,
+            bring_to_front: true,
+        }
+    }
+}
+
 impl Config {
     pub fn from_toml(text: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(text)
@@ -180,6 +211,27 @@ mod tests {
         assert_eq!(cfg.interaction.hover_delay_ms, 0);
         assert_eq!(cfg.interaction.collapse_delay_ms, 250);
         assert_eq!(cfg.window.size, 340.0);
+    }
+
+    #[test]
+    fn general_defaults_and_roundtrip() {
+        let cfg = Config::default();
+        assert_eq!(cfg.general.language, "auto");
+        assert_eq!(cfg.general.hotkey, "Alt+Space");
+        let back = Config::from_toml(&cfg.to_toml()).expect("parse");
+        assert_eq!(back.general.hotkey, "Alt+Space");
+        assert_eq!(back.schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn v1_config_migrates_to_latest() {
+        let cfg = Config::from_toml(
+            "[general]
+",
+        )
+        .expect("parse");
+        assert_eq!(cfg.general.language, "auto");
+        assert_eq!(cfg.migrated().schema_version, SCHEMA_VERSION);
     }
 
     #[test]

@@ -92,6 +92,18 @@ extern "system" {
     fn GetAsyncKeyState(vkey: i32) -> i16;
     fn GetWindowLongPtrW(hwnd: Hwnd, index: i32) -> isize;
     fn SetWindowLongPtrW(hwnd: Hwnd, index: i32, value: isize) -> isize;
+    fn ShowWindow(hwnd: Hwnd, cmd: i32) -> Bool;
+    fn IsWindowVisible(hwnd: Hwnd) -> Bool;
+    fn SetForegroundWindow(hwnd: Hwnd) -> Bool;
+    fn SetWindowPos(
+        hwnd: Hwnd,
+        insert_after: Hwnd,
+        x: i32,
+        y: i32,
+        cx: i32,
+        cy: i32,
+        flags: u32,
+    ) -> Bool;
     fn UpdateLayeredWindow(
         hwnd: Hwnd,
         hdc_dst: Hdc,
@@ -212,6 +224,64 @@ impl Drop for Surface {
 }
 
 /// 一个绑定到 winit 窗口的分层绘制目标。
+// ---- 窗口显隐与置前 ----
+// 托盘模式的两个关键 API：ShowWindow 负责"从托盘回来/躲进托盘"，
+// SetWindowPos 负责"回到最前但不抢焦点"（SWP_NOACTIVATE）。
+const SW_HIDE: i32 = 0;
+const SW_SHOWNOACTIVATE: i32 = 4;
+const WS_EX_TOOLWINDOW: isize = 0x0000_0080;
+const WS_EX_NOACTIVATE: isize = 0x0800_0000;
+const HWND_TOPMOST: Hwnd = -1isize as Hwnd;
+const SWP_NOSIZE: u32 = 0x0001;
+const SWP_NOMOVE: u32 = 0x0002;
+const SWP_NOACTIVATE: u32 = 0x0010;
+
+/// 把窗口从任务栏/Alt-Tab 列表里摘掉，并声明"不抢焦点"。
+///
+/// 小工具的行为准则：它出现在桌面上，但**不应该打断你正在做的事**。
+/// `WS_EX_TOOLWINDOW` 去掉任务栏与 Alt-Tab 项，`WS_EX_NOACTIVATE` 让点击它
+/// 不抢走当前窗口的激活状态与焦点。
+pub fn hide_from_taskbar(hwnd: isize) {
+    let hwnd = hwnd as Hwnd;
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let wanted = ex | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+        if wanted != ex {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, wanted);
+        }
+    }
+}
+
+/// 显示 / 隐藏（"缩进托盘"就是隐藏窗口，不是退出进程）。
+pub fn set_visible(hwnd: isize, visible: bool) {
+    let hwnd = hwnd as Hwnd;
+    unsafe {
+        ShowWindow(hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
+    }
+}
+
+pub fn is_visible(hwnd: isize) -> bool {
+    unsafe { IsWindowVisible(hwnd as Hwnd) != 0 }
+}
+
+/// 呼出时贴回最前层，但不激活（不打断当前输入焦点）。
+pub fn bring_to_front(hwnd: isize) {
+    let hwnd = hwnd as Hwnd;
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
+        );
+        // 有些 shell 组合（比如全屏游戏退出后）需要显式再问一次前台。
+        SetForegroundWindow(hwnd);
+    }
+}
+
 pub struct LayeredTarget {
     hwnd: Hwnd,
     surface: Surface,
@@ -221,13 +291,8 @@ impl LayeredTarget {
     /// `hwnd` 来自 winit 的 raw window handle。
     pub fn new(hwnd: isize, width: u32, height: u32) -> Result<Self, String> {
         let hwnd = hwnd as Hwnd;
-        // 让窗口走"分层"合成路径：这是逐像素 alpha 的前提。
-        unsafe {
-            let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-            if ex & WS_EX_LAYERED == 0 {
-                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED);
-            }
-        }
+        // 让窗口走"分层"合成路径（逐像素 alpha 的前提），顺手摘掉任务栏项。
+        hide_from_taskbar(hwnd as isize);
         Ok(Self {
             hwnd,
             surface: Surface::new(width.max(1), height.max(1))?,

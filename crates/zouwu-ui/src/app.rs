@@ -14,23 +14,53 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId, WindowLevel};
 
+use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+// 托盘应用的窗口不该占任务栏位置。winit 把这条挂在 Windows 扩展 trait 上，
+// 只能按平台引入（ADR-001 允许在“窗口属性”这种边界上做最小 cfg）。
+#[cfg(target_os = "windows")]
+use winit::platform::windows::WindowAttributesExtWindows;
+
 use zouwu_core::action::{default_ring, ActionItem};
 use zouwu_core::anim::Spring;
 use zouwu_core::config::{Config, WindowState};
 use zouwu_core::geom::{Point, Rect};
+use zouwu_core::hotkey::Hotkey;
+use zouwu_core::i18n::I18n;
 use zouwu_core::ring::{solve_rotation, Bubble, RingConfig};
 use zouwu_core::theme::{Theme, ZOUWU_WARM};
+
+use zouwu_platform::autostart;
+use zouwu_platform::hotkey::HotkeyRegistrar;
+use zouwu_platform::single_instance::InstanceSignal;
+use zouwu_platform::tray::{Tray, TrayCommand};
 
 use crate::paint::{render, BubblePaint, Scene};
 use crate::presenter::Presenter;
 
-/// 启动 M0 演示窗口。
+/// 启动 zouwu。
+///
+/// 顺序有讲究：
+/// 1. **先抢单实例**，抢不到就通知已在跑的那个并立刻返回（用户双击两次时
+///    不应该出现两只驺吾）；
+/// 2. 再建事件循环；3. 读配置决定语言/热键/是否直接显示。
 pub fn run() -> Result<(), String> {
+    let instance = InstanceSignal::acquire("zouwu")?;
+    let Some(instance) = instance else {
+        log::info!("another zouwu is running; asked it to show up");
+        return Ok(());
+    };
+
     let event_loop = EventLoop::new().map_err(|e| format!("event loop: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
     // 配置在启动时读一次（缺文件会写出一份默认配置，方便用户手改）
-    let mut app = App::new(zouwu_platform::load_config(), ZOUWU_WARM, default_ring());
+    let mut app = App::new(
+        zouwu_platform::load_config(),
+        ZOUWU_WARM,
+        default_ring(),
+        instance,
+    );
     event_loop
         .run_app(&mut app)
         .map_err(|e| format!("run_app: {e}"))?;
@@ -111,6 +141,16 @@ struct App {
     state_saved_at: Instant,
 
     /// 诊断开关（环境变量 `ZOUWU_PERF=1`）：周期性上报实际帧率与单帧耗时
+    // ---- 常驻形态（M1）：托盘、热键、单实例、语言 ----
+    i18n: I18n,
+    /// 单实例守卫：放着别动，drop 就等于放开"我在跑"的声明。
+    instance: Option<InstanceSignal>,
+    /// 下一次启动的信号（第二实例 → 呼出窗口）。
+    tray: Option<Tray>,
+    hotkeys: Option<HotkeyRegistrar>,
+    /// 窗口当前是否可见（隐藏 = 缩进托盘，进程仍在）。
+    visible: bool,
+
     perf_trace: bool,
     perf_frames: u32,
     perf_mark: Instant,
@@ -118,10 +158,17 @@ struct App {
 }
 
 impl App {
-    fn new(config: Config, theme: Theme, items: Vec<ActionItem>) -> Self {
+    fn new(config: Config, theme: Theme, items: Vec<ActionItem>, instance: InstanceSignal) -> Self {
         let ring = config.ring.to_ring_config();
         let n = items.len();
+        let i18n = I18n::new(&config.general.language);
+        let visible = config.general.show_on_start;
         Self {
+            i18n,
+            instance: Some(instance),
+            tray: None,
+            hotkeys: None,
+            visible,
             config,
             theme,
             items,
@@ -160,6 +207,212 @@ impl App {
 
     fn window_arc(&self) -> Option<Arc<Window>> {
         self.window.clone()
+    }
+
+    /// 平台的原始窗口句柄（Windows 下是 HWND）。
+    ///
+    /// 托盘/显隐/置前这些都是**原生窗口概念**，所以在这里取一次句柄交给
+    /// `zouwu-platform`，UI 层不直接碰 win32。
+    fn hwnd(&self) -> Option<isize> {
+        let window = self.window.as_ref()?;
+        let handle = window.window_handle().ok()?;
+        match handle.as_raw() {
+            RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
+            _ => None,
+        }
+    }
+
+    /// 用完就放：把配置写回磁盘（语言、热键、自启这些用户改动）。
+    fn save_config(&self) {
+        zouwu_platform::save_config(&self.config);
+    }
+
+    /// 托盘图标 + 全局热键。只做一次，且必须**在主线程**上做（见 platform::tray）。
+    fn init_shell(&mut self) {
+        if self.tray.is_none() {
+            let (rgba, w, h) = crate::paint::tray_icon(&self.theme, 32);
+            let autostart_on = autostart::is_enabled();
+            match Tray::new(
+                &self.i18n,
+                Some((rgba, w, h)),
+                &self.config.general.language,
+                autostart_on,
+                self.visible,
+            ) {
+                Ok(tray) => self.tray = Some(tray),
+                Err(err) => log::error!("tray init failed: {err}"),
+            }
+        }
+
+        if self.hotkeys.is_none() {
+            match HotkeyRegistrar::new() {
+                Ok(mut registrar) => {
+                    if let Err(err) = self.apply_hotkey(&mut registrar) {
+                        log::warn!("{err}");
+                    }
+                    self.hotkeys = Some(registrar);
+                }
+                Err(err) => log::error!("{err}"),
+            }
+        }
+
+        // 配置说"要自启"但注册表里没有（比如换了路径）→ 补上
+        if self.config.general.start_on_boot && !autostart::is_enabled() {
+            let actual = autostart::set_enabled(true);
+            if actual != self.config.general.start_on_boot {
+                self.config.general.start_on_boot = actual;
+                self.save_config();
+            }
+        }
+
+        // 一行交代清楚"以什么姿态在跑"：排查问题时先看这一行。
+        log::info!(
+            "ready: lang {} (setting `{}`), hotkey `{}`, autostart {}, window {} (tray {})",
+            self.i18n.language(),
+            self.config.general.language,
+            self.config.general.hotkey,
+            if autostart::is_enabled() { "on" } else { "off" },
+            if self.visible { "visible" } else { "hidden" },
+            if self.tray.is_some() { "ok" } else { "missing" },
+        );
+    }
+
+    /// 按配置注册热键；解析失败时回退到默认值并记日志。
+    fn apply_hotkey(&self, registrar: &mut HotkeyRegistrar) -> Result<(), String> {
+        let raw = self.config.general.hotkey.trim();
+        if raw.is_empty() {
+            registrar.clear();
+            log::info!("hotkey disabled by config");
+            return Ok(());
+        }
+        let spec = match Hotkey::parse(raw) {
+            Ok(spec) => spec,
+            Err(err) => {
+                log::warn!("invalid hotkey `{raw}` ({err}); falling back to default");
+                Hotkey::default_summon()
+            }
+        };
+        registrar.set(&spec)
+    }
+
+    /// 显示 / 隐藏小兽（隐藏 = 缩进托盘，不退出进程）。
+    fn set_visible(&mut self, visible: bool, now: Instant) {
+        if self.visible == visible {
+            return;
+        }
+        self.visible = visible;
+        if visible {
+            // 隐藏期间时间照样在走，dt 会很大：把帧节拍对齐到现在。
+            self.last_frame = now;
+            self.dirty = true;
+            if let Some(hwnd) = self.hwnd() {
+                zouwu_platform::layer::set_visible(hwnd, true);
+                if self.config.general.bring_to_front {
+                    zouwu_platform::layer::bring_to_front(hwnd);
+                }
+            }
+            log::info!("zouwu shown");
+            if let Some(w) = self.window_arc() {
+                w.request_redraw();
+            }
+        } else {
+            // 先收起再躲起来，下次呼出时是"干净"的收起态。
+            self.set_expanded(false, now);
+            self.on_cursor_left();
+            self.buttons_down = (false, false);
+            self.save_state();
+            if let Some(hwnd) = self.hwnd() {
+                zouwu_platform::layer::set_visible(hwnd, false);
+            }
+            log::info!("zouwu hidden to tray");
+        }
+        if let Some(tray) = &self.tray {
+            tray.set_visible_state(&self.i18n, self.visible);
+        }
+    }
+
+    fn toggle_visible(&mut self, now: Instant) {
+        self.set_visible(!self.visible, now);
+    }
+
+    fn set_language(&mut self, setting: &str) {
+        if self.config.general.language == setting {
+            return;
+        }
+        self.config.general.language = setting.to_string();
+        self.i18n.set_language(setting);
+        if let Some(tray) = &self.tray {
+            tray.apply_language(&self.i18n, &self.config.general.language, self.visible);
+        }
+        self.save_config();
+        self.dirty = true;
+        log::info!(
+            "language setting `{setting}` resolved to {}",
+            self.i18n.language()
+        );
+    }
+
+    fn set_autostart(&mut self, on: bool) {
+        let actual = autostart::set_enabled(on);
+        self.config.general.start_on_boot = actual;
+        if let Some(tray) = &self.tray {
+            tray.set_autostart_checked(actual);
+        }
+        self.save_config();
+        log::info!("autostart -> {actual}");
+    }
+
+    /// 处理托盘命令；返回 `true` 表示要退出程序。
+    fn handle_tray(&mut self, cmd: TrayCommand, now: Instant) -> bool {
+        match cmd {
+            TrayCommand::Toggle => self.toggle_visible(now),
+            TrayCommand::Show => self.set_visible(true, now),
+            TrayCommand::Hide => self.set_visible(false, now),
+            TrayCommand::Settings => {
+                // M1 还没有独立设置面板：先把用户送到真正能改东西的地方（配置文件）。
+                if !zouwu_platform::open_config_dir() {
+                    log::warn!("config dir: {}", zouwu_platform::config_dir().display());
+                }
+            }
+            TrayCommand::SetAutostart(on) => self.set_autostart(on),
+            TrayCommand::SetLanguage(code) => self.set_language(code),
+            TrayCommand::Quit => return true,
+        }
+        false
+    }
+
+    /// 一次"外壳"轮询：托盘菜单、全局热键、第二实例信号。
+    ///
+    /// 三者都不用"回调 → 通知 UI"那套线程模型，而是在这里非阻塞地取一次。
+    /// 原因：它们的唤醒都在别处（托盘自己的线程、消息队列、system event），
+    /// 我们已经有 100ms 的轮询节拍在跑，借它一次把三件事问完，省掉跨线程唤醒。
+    fn poll_shell(&mut self, now: Instant) -> bool {
+        let mut exit = false;
+
+        if self
+            .instance
+            .as_ref()
+            .map(|i| i.take_signal())
+            .unwrap_or(false)
+        {
+            log::info!("second instance launched -> showing window");
+            self.set_visible(true, now);
+        }
+
+        if let Some(cmd) = self.tray.as_ref().and_then(|t| t.poll()) {
+            exit |= self.handle_tray(cmd, now);
+        }
+
+        if self
+            .hotkeys
+            .as_ref()
+            .map(|h| h.poll_pressed())
+            .unwrap_or(false)
+        {
+            self.toggle_visible(now);
+        }
+
+        exit
     }
 
     fn logical_size(&self) -> (f32, f32) {
@@ -335,6 +588,11 @@ impl App {
     /// 但这些都不是"画面变了"。空闲时的低开销承诺靠这道门守着：没有脏标记、
     /// 没有在跑的弹簧/眨眼/呼吸、没有待出场的气泡 → 直接跳过光栅化。
     fn needs_render(&self, now: Instant) -> bool {
+        // 缩进托盘时不光"看不见"，连光栅化都不做：隐藏的窗口没有输出，
+        // 画了也是白算（分层窗口的内容不会自己留着）。
+        if !self.visible {
+            return false;
+        }
         self.interactive_animation(now) || self.ambient_animation(now)
     }
 
@@ -357,6 +615,11 @@ impl App {
     /// 于是 request_redraw 一次都不发、动画卡死、循环却空转在 60Hz。
     /// 所以节拍锚在 `last_frame`（上一次真正渲染的时刻），它只在渲染时前进。
     fn next_deadline(&self, now: Instant) -> Option<Instant> {
+        // 藏在托盘里：只有一个闹钟有意义 —— 轮询外壳（热键/托盘/第二实例）。
+        // 眨眼、呼吸、悬停计时全部停摆，否则一个"看不见"的程序还在按 20fps 空转。
+        if !self.visible {
+            return Some(self.next_poll);
+        }
         if self.dirty {
             return Some(now);
         }
@@ -481,6 +744,12 @@ impl App {
     /// 返回光标是否落在窗口矩形内。坐标换算：`GetCursorPos` 给的是屏幕物理像素，
     /// 减去窗口左上角（也是物理像素）再除以 DPI 缩放就是本地逻辑坐标。
     fn poll_pointer(&mut self, now: Instant) -> bool {
+        if !self.visible {
+            // 窗口藏着的时候，光标相对窗口的位置没有意义（也不该触发悬停/点击）。
+            self.on_cursor_left();
+            self.buttons_down = (false, false);
+            return false;
+        }
         let (Some((sx, sy)), Some(window)) = (
             zouwu_platform::layer::cursor_position(),
             self.window.clone(),
@@ -671,6 +940,7 @@ impl ApplicationHandler for App {
             .with_decorations(false)
             .with_resizable(false)
             .with_window_level(WindowLevel::AlwaysOnTop)
+            .with_skip_taskbar(true)
             .with_visible(true);
 
         let window = match event_loop.create_window(attrs) {
@@ -719,12 +989,32 @@ impl ApplicationHandler for App {
         self.relayout();
         self.last_frame = Instant::now();
         self.dirty = true;
-        if let Some(w) = self.window_arc() {
-            w.request_redraw();
+
+        // 窗口存在之后才能拿 HWND：托盘、隐藏态、置前都依赖它。
+        if !self.visible {
+            if let Some(hwnd) = self.hwnd() {
+                zouwu_platform::layer::set_visible(hwnd, false);
+            }
+        }
+        self.init_shell();
+
+        if self.visible {
+            if let Some(w) = self.window_arc() {
+                w.request_redraw();
+            }
+        } else {
+            log::info!("zouwu started hidden (tray only)");
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    /// 事件循环收尾：位置与配置都落盘（托盘"退出"、Ctrl+C、系统注销都会走到这里）。
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.save_state();
+        self.save_config();
+        log::info!("zouwu exiting");
+    }
+
+    fn window_event(&mut self, _event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let now = Instant::now();
         match event {
             WindowEvent::RedrawRequested => {
@@ -762,8 +1052,9 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state == ElementState::Pressed {
                     if let Key::Named(NamedKey::Escape) = event.logical_key {
-                        self.save_state();
-                        event_loop.exit();
+                        // 小工具的心智：Esc 是"收起来"，不是"杀掉我"。
+                        // 真的退出走托盘菜单（上面写着"退出"）。
+                        self.set_visible(false, now);
                     }
                 }
             }
@@ -774,8 +1065,8 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CloseRequested => {
-                self.save_state();
-                event_loop.exit();
+                // 关窗 = 缩进托盘（ADR-010）
+                self.set_visible(false, now);
             }
             _ => {}
         }
@@ -791,6 +1082,14 @@ impl ApplicationHandler for App {
         // 开一枪 GetCursorPos 几微秒，醒来发现画面没变就直接接着睡。
         if now >= self.next_poll {
             self.poll_now(now);
+        }
+
+        // 外壳（托盘/热键/第二实例）与光标轮询同节拍：一次唤醒问完所有事。
+        if self.poll_shell(now) {
+            self.save_state();
+            self.save_config();
+            event_loop.exit();
+            return;
         }
 
         self.flush_state(now);

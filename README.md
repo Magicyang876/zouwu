@@ -66,6 +66,7 @@
 
 - **空闲零开销**：静置时 CPU ≈ 0%。渲染采用「脏标记 + deadline 调度 + 自适应帧率」，无动画时**一帧都不画**，而非固定 60fps 空转。
   > M0 实测（release）：空闲 **0.2~0.6% of one core**（60s 采样典型 0.31%）、常驻帧率 3.4~5fps（只有眨眼/呼吸）、交互时 60fps、RSS **~16 MB**。
+  > M1 追加：**隐藏到托盘后 15s 内 CPU 0 ms（真零）**；可见空闲 0.31~0.63%、RSS 17.7 MB。
 - **动画优雅但克制**：统一动效曲线（弹簧 / 缓动），展开收起 180~260ms，落点精准；支持"减少动效"无障碍设置与低性能降级（关闭毛玻璃/粒子）。
 - **内存目标**：常驻 < 60MB（视皮肤资源而定）。
 - **冷启动**：托盘常驻，唤出响应 < 50ms（纯本地绘制，不创建 webview）。
@@ -153,7 +154,7 @@
 
 ---
 
-## 7.5 当前进度（M0 已完成）
+## 7.5 当前进度（M0 完成，M1 进行中）
 
 代码在 `crates/`（`zouwu-core` / `zouwu-platform` / `zouwu-ui` / `zouwu-app`），
 `cargo run --release -p zouwu-app` 就能跑出一只常驻屏幕角落的驺吾。
@@ -165,17 +166,24 @@
 | 悬停变形（气泡环） | ✔ 悬停 150ms 展开 8 颗气泡，弹簧错峰 24ms + 轨道浮动，选中态发光 |
 | 点击 / 右键 | ✔ 左键点气泡 → 动作入口；左键点本体 → 立即展开/收起；右键 → 收起 |
 | 输入保底 | ✔ 全局光标轮询（本机分层窗口收不到鼠标消息，见 ADR-009） |
-| 主题 | ✔ `Theme` 已抽出（`ZOUWU_WARM` / `ZOUWU_DARK`），M1 接配置与皮肤包 |
-| 托盘 / 全局热键 / i18n | ✖ M1 |
+| 主题 | ✔ `Theme` 已抽出（`ZOUWU_WARM` / `ZOUWU_DARK`），M1.5 接配置与皮肤包 |
+| 托盘常驻 | ✔ 左键切显隐，右键菜单（显示/隐藏、配置文件…、开机自启、语言、退出） |
+| 全局热键 | ✔ 默认 `Alt+Space`，可在 `config.toml` 改；解析失败回退默认 |
+| 单实例 | ✔ 命名内核事件：第二次启动把已有窗口叫出来，然后自己退出 |
+| 关窗语义 | ✔ 关窗 / Esc = 缩进托盘（**不是退出**），退出只走托盘菜单 |
+| 开机自启 | ✔ `HKCU\...\Run` 单值，写后读回校验，托盘可勾选 |
+| 多语言 | ✔ Fluent 中/英，托盘内即时切换，`language = "auto"` 跟随系统 |
+| 配置热重载 | ✖ 待做（改 `config.toml` 目前要重启） |
 | 矢量图标字体 | ✖ 8 个 glyph 先程序化绘制，M2 换图标字体 |
 
 **可复现的验收方式**：
 
 ```bash
-cargo test --workspace                     # 18 个单测：几何 / 弹簧 / 布局 / 屏边避让 / 配置
+cargo test --workspace                     # 34 个单测：几何 / 弹簧 / 布局 / 屏边避让 / 配置
 cargo run -p zouwu-ui --example offscreen  # 离屏渲染 → target/zouwu-offscreen/*.png，直接看图
 cargo run -p zouwu-ui --example bench      # 单帧成本模型（release）
 ZOUWU_PERF=1 cargo run --release -p zouwu-app   # 每 60 帧报一次实际帧率
+cargo run -p zouwu-platform --example autostart_check -- status   # 开机自启读写（有副作用，故不做成单测）
 ```
 
 ---

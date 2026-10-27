@@ -8,3 +8,7 @@ license.workspace = true
 [dependencies]
 serde = { workspace = true }
 toml = { workspace = true }
+fluent = { workspace = true }
+sys-locale = { workspace = true }
+unic-langid = { workspace = true }
+log = { workspace = true }

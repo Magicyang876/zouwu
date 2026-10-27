@@ -7,6 +7,8 @@ pub mod action;
 pub mod anim;
 pub mod config;
 pub mod geom;
+pub mod hotkey;
+pub mod i18n;
 pub mod ring;
 pub mod theme;
 
@@ -14,6 +16,8 @@ pub use action::{default_ring, ActionItem, Glyph};
 pub use anim::Spring;
 pub use config::Config;
 pub use geom::{Point, Rect};
+pub use hotkey::Hotkey;
+pub use i18n::I18n;
 pub use ring::{Bubble, RingConfig};
 pub use theme::Theme;
 

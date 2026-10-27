@@ -223,6 +223,47 @@ pub fn render(scene: &Scene<'_>, pixmap: &mut Pixmap) {
     draw_bubbles(&mut ctx, scene, theme);
 }
 
+/// 生成托盘图标用的**非预乘** RGBA 像素（Windows `NOTIFYICONDATA` 要的就是这个）。
+///
+/// 复用桌面上的同一套画笔，所以托盘里那一小格和屏幕上的小兽是同一只，
+/// 不需要另做一份图标资源（皮肤换掉时调色板变了，托盘也跟着变）。
+///
+/// `alpha` 会就地做预乘 → 直通转换：tiny-skia 输出的是预乘 alpha，
+/// 直接拿去当图标会让边缘发黑（预乘值被当成直通值再乘一次）。
+pub fn tray_icon(theme: &Theme, size: u32) -> (Vec<u8>, u32, u32) {
+    let size = size.clamp(16, 256);
+    let mut pixmap = Pixmap::new(size, size).expect("tray icon pixmap");
+    let logical = size as f32;
+    let scene = Scene {
+        width: logical,
+        height: logical,
+        scale: 1.0,
+        buddy_center: Point::new(logical * 0.5, logical * 0.52),
+        buddy_radius: logical * 0.40,
+        buddy_scale: 1.0,
+        buddy_alpha: 1.0,
+        blink: 0.0,
+        theme,
+        bubbles: &[],
+    };
+    render(&scene, &mut pixmap);
+
+    let mut rgba = pixmap.data().to_vec();
+    for px in rgba.chunks_exact_mut(4) {
+        let a = px[3] as u32;
+        if a == 0 {
+            px[0] = 0;
+            px[1] = 0;
+            px[2] = 0;
+            continue;
+        }
+        for c in &mut px[..3] {
+            *c = (((*c as u32) * 255 + a / 2) / a).min(255) as u8;
+        }
+    }
+    (rgba, size, size)
+}
+
 fn draw_buddy(ctx: &mut Ctx<'_>, scene: &Scene<'_>) {
     let theme = scene.theme;
     let a = scene.buddy_alpha;

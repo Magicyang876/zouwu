@@ -4,12 +4,32 @@
 //! 都必须待在本 crate 里，UI 与领域层通过这里的函数/ trait 使用。
 
 #[cfg(target_os = "windows")]
+pub mod autostart;
+#[cfg(target_os = "windows")]
+pub mod hotkey;
+#[cfg(target_os = "windows")]
 pub mod layer;
+#[cfg(target_os = "windows")]
+pub mod single_instance;
+#[cfg(target_os = "windows")]
+pub mod tray;
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use zouwu_core::config::{Config, WindowState};
+
+/// 打开配置目录（给"设置"入口用：M1 还没有面板，先把用户送到真正的地方）。
+pub fn open_config_dir() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        autostart::open_config_dir()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
 
 /// 配置根目录：Windows `%APPDATA%\zouwu`，其它平台 `$XDG_CONFIG_HOME/zouwu`。
 pub fn config_dir() -> PathBuf {
