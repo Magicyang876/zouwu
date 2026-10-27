@@ -41,6 +41,19 @@ impl Rect {
         Point::new(self.x + self.w * 0.5, self.y + self.h * 0.5)
     }
 
+    pub fn intersection(&self, other: &Rect) -> Option<Rect> {
+        let (x0, y0) = (self.x.max(other.x), self.y.max(other.y));
+        let (x1, y1) = (
+            self.right().min(other.right()),
+            self.bottom().min(other.bottom()),
+        );
+        if x1 <= x0 || y1 <= y0 {
+            None
+        } else {
+            Some(Rect::new(x0, y0, x1 - x0, y1 - y0))
+        }
+    }
+
     pub fn contains(&self, p: Point) -> bool {
         p.x >= self.x && p.x < self.right() && p.y >= self.y && p.y < self.bottom()
     }
@@ -379,9 +392,21 @@ impl<'a> Painter<'a> {
         self.text(text, rect.right() - width, baseline, size, color, weight);
     }
 
+    /// 让文字在 `rect` 里垂直居中所需的**基线** y。
+    ///
+    /// 标准做法：把 `line_height` 的框在矩形里居中，再往下走一个 `ascent` 到基线。
+    ///
+    /// 这里原先写的是 `(rect.h + ascent) * 0.5 - size * 0.16`——一个经验式，
+    /// 它假设 `ascent ≈ line_height / 2`，再补一个"看着差不多"的 -0.08em。
+    /// 后果：11pt 与 14pt、中文与英文、100% 与 150% 各自偏 1~3px，
+    /// 于是"删了某个字体的字距"这类微调永远调不干净（行高、hint、section 全都受它影响）。
+    /// 用真实度量算，偏移就一次归零。
     fn centered_baseline(&self, rect: Rect, size: f32) -> f32 {
-        let ascent = TextEngine::with(|engine| engine.ascent(size * self.scale)) / self.scale;
-        rect.y + (rect.h + ascent) * 0.5 - size * 0.5 * 0.16
+        let px = size * self.scale;
+        let (ascent, line_height) =
+            TextEngine::with(|engine| (engine.ascent(px), engine.line_height(px)));
+        let (ascent, line_height) = (ascent / self.scale, line_height / self.scale);
+        rect.y + (rect.h - line_height) * 0.5 + ascent
     }
 
     pub fn measure(&mut self, text: &str, size: f32, weight: Weight) -> f32 {

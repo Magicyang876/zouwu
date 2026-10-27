@@ -39,7 +39,15 @@ const ROW_H: f32 = 46.0;
 const HINT_ROW_EXTRA: f32 = 18.0;
 /// 标签与提示之间的间隙。
 const HINT_GAP: f32 = 2.0;
-const SECTION_H: f32 = 34.0;
+/// section 标题占的高度：上方留白 + 一行小字 + 一条分隔线。
+///
+/// 原来是 34，标题压在行底、分隔线紧跟其后，紧贴上一个控件行，
+/// 视觉上像"标题被上一行吃掉了一半"。
+const SECTION_H: f32 = 44.0;
+/// section 标题上方额外留白（和上一个控件行拉开距离）。
+const SECTION_TOP_GAP: f32 = 10.0;
+/// 分隔线距 section 底边的距离。
+const SECTION_RULE_INSET: f32 = 8.0;
 const TEXT_ROW_H: f32 = 34.0;
 const CONTROL_W: f32 = 210.0;
 const BUTTON_W: f32 = 170.0;
@@ -874,6 +882,36 @@ pub struct Layout {
     pub footer: Rect,
 }
 
+/// 把滚动位置吸附到「行边界」上。
+///
+/// 不吸附的话，内容带的上下边缘会随机切过某一行文字——看起来就像字被挡住了一半
+/// （用户报的"文字遮挡"里有一半是这个）。吸附之后，边缘永远落在两行之间。
+///
+/// 例外：滚到底时直接给 `max_scroll`，让最后一行完整可见（否则最后一行永远差几像素）。
+fn snap_scroll(rows: &[Row], raw: f32, max_scroll: f32) -> f32 {
+    if raw <= 0.5 {
+        return 0.0;
+    }
+    if raw >= max_scroll - 1.0 {
+        return max_scroll;
+    }
+    let mut acc = 0.0f32;
+    let mut best = 0.0f32;
+    let mut best_dist = f32::MAX;
+    for row in rows {
+        // 往上、往下都试：吸到"离得最近的那条边界"。
+        for cand in [acc, acc + row.height()] {
+            let d = (cand - raw).abs();
+            if d < best_dist {
+                best_dist = d;
+                best = cand;
+            }
+        }
+        acc += row.height();
+    }
+    best.clamp(0.0, max_scroll)
+}
+
 pub fn layout(model: &Model, w: f32, h: f32) -> Layout {
     let content = Rect::new(0.0, HEADER_H, w, (h - HEADER_H - FOOTER_H).max(0.0));
 
@@ -892,7 +930,7 @@ pub fn layout(model: &Model, w: f32, h: f32) -> Layout {
     let rows = build_rows(model);
     let rows_h: f32 = rows.iter().map(|r| r.height()).sum::<f32>() + MARGIN * 2.0;
     let max_scroll = (rows_h - content.h).max(0.0);
-    let scroll = model.scroll.clamp(0.0, max_scroll);
+    let scroll = snap_scroll(&rows, model.scroll.clamp(0.0, max_scroll), max_scroll);
 
     let mut out_rows = Vec::with_capacity(rows.len());
     let mut y = content.y + MARGIN - scroll;
@@ -1420,7 +1458,18 @@ pub fn draw(pixmap: &mut tiny_skia::Pixmap, layout: &Layout, model: &Model) {
     // 内容（裁剪到可视带）
     p.set_clip(layout.content);
     for (i, (row, rl)) in layout.rows.iter().enumerate() {
-        if !rl.rect.intersects(&layout.content) {
+        // 只画基本完整的行：被内容带边缘切掉一半的行，宁可整行不画
+        // （画一半的文字比留白更像"渲染坏了"）。滚动已吸附到行边界，
+        // 正常情况下这里最多有一行被跳过。
+        let visible = rl
+            .rect
+            .intersection(&layout.content)
+            .map(|r| r.h)
+            .unwrap_or(0.0);
+        // 整行可见才画：半行会被内容带的裁剪线从字中间切开。
+        // 顶部边缘已经被 `snap_scroll` 吸附到行边界，所以正常情况下
+        // 只有最下面那一行会因此不画。
+        if visible + 0.5 < rl.rect.h {
             continue;
         }
         let focused = model.focus == Some(i) && model.keyboard_used;
@@ -1468,18 +1517,21 @@ fn draw_row(p: &mut Painter<'_>, pal: &Palette, model: &Model, row: &Row, rl: &R
         rl.rect.h,
     );
     if let Control::Section { text } = &row.control {
-        p.text(
-            text,
+        // 文字活在一段明确的带子里（上留白之下、分隔线之上），居中；
+        // 这样"字压线"就不会再因为行高调整而回归。
+        let rule_y = rl.rect.bottom() - SECTION_RULE_INSET;
+        let band = Rect::new(
             rl.rect.x + 4.0,
-            rl.rect.y + rl.rect.h - 10.0,
-            11.0,
-            pal.muted,
-            Weight::Bold,
+            rl.rect.y + SECTION_TOP_GAP,
+            (rl.rect.w - 8.0).max(40.0),
+            (rule_y - rl.rect.y - SECTION_TOP_GAP - 4.0).max(p.line_height(11.0)),
         );
+        let text = p.truncate(text, 11.0, band.w);
+        p.text_in(&text, band, 11.0, pal.muted, Weight::Bold);
         p.hline(
             rl.rect.x + 4.0,
             rl.rect.right(),
-            rl.rect.y + rl.rect.h - 4.0,
+            rule_y,
             pal.line.with_alpha(0.3),
         );
         return;

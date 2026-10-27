@@ -320,13 +320,20 @@ fn draw_with(
     bold: bool,
     clip: Option<(f32, f32, f32, f32)>,
 ) -> Option<Vec<u8>> {
-    let width = gdi.text_width(text, px, bold).ceil() as i32 + 2;
-    let (ascent, _, height) = {
-        let (a, _, h) = gdi.vmetrics(px, bold);
-        (a.ceil() as i32, 0, h.ceil() as i32)
-    };
-    let height = height.max(1) + 2;
-    if !gdi.scratch.prepare(width, height) {
+    // 关键：**自己把字体选进 DC**。
+    //
+    // 原来这里不选字体，靠"上一步 `text_width` 刚好替我们选过同一个字号"——
+    // 那是个隐式假设，而 `text_width` 有宽度缓存，命中缓存就直接返回、不碰 DC。
+    // 于是一旦相邻两次文字的字号不同（12pt 的页脚 → 11pt 的按键提示），
+    // 后一次就用前一次的字号画，而且擦洗缓冲区按**当前**字号的宽度分配：
+    // 画得比缓冲区宽 → 右边一两个字被切掉，看起来就是"文字遮挡/被裁"。
+    let (font, ascent, _, line_height) = gdi.font(px, bold)?;
+    unsafe { SelectObject(gdi.scratch.dc, font) };
+    // 留几像素余量：CJK 全角字距与字形外扩在取整后可能略微超出行宽。
+    let width = gdi.text_width(text, px, bold).ceil() as i32 + 6;
+    let height = line_height.ceil() as i32 + 4;
+    let ascent = ascent.ceil() as i32;
+    if !gdi.scratch.prepare(width, height.max(1)) {
         return None;
     }
 
@@ -494,5 +501,95 @@ impl Gdi {
         }
         self.widths.insert(key, width);
         width
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const W: usize = 800;
+    const H: usize = 200;
+
+    /// 在空缓冲上画一次，返回整张缓冲（预乘 RGBA）。
+    fn render(text: &str, px: f32) -> Vec<u8> {
+        let blank = vec![0u8; W * H * 4];
+        draw(
+            &blank,
+            W,
+            H,
+            text,
+            0.0,
+            150.0,
+            px,
+            [255, 255, 255, 255],
+            false,
+            None,
+        )
+        .expect("draw must succeed")
+    }
+
+    /// 墨迹包围盒：x0, y0, x1, y1（闭区间）。
+    fn bbox(out: &[u8]) -> (usize, usize, usize, usize) {
+        let (mut x0, mut y0, mut x1, mut y1) = (W, H, 0usize, 0usize);
+        for y in 0..H {
+            for x in 0..W {
+                if out[(y * W + x) * 4] > 0 {
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x);
+                    y1 = y1.max(y);
+                }
+            }
+        }
+        (x0, y0, x1, y1)
+    }
+
+    /// 一笔绘制的结果不能取决于"上一笔是多大字号"。
+    ///
+    /// 守的是一个隐式假设：`draw_with` 曾经不自己 `SelectObject`，而是指望
+    /// "上一步 `text_width` 刚好替我们选过同一个字号"。宽度缓存一命中，
+    /// DC 上留的还是上一笔的字体 —— 18px 的文字用 24px 的字形画出来，
+    /// 既变宽（超出按 18px 分配的擦洗缓冲，右边被裁）又整体下移，
+    /// 面板上看到的就是"文字被遮挡 / 缺字"。
+    ///
+    /// 判据用**墨迹包围盒**：先按 18px 量一遍作基准，再分别用 24/32/12px 预热后
+    /// 画同一段 18px 文字，三次必须一样。实测三种预热分别得到高 16 / 21 / 19，
+    /// 所以这条测试确实能抓住它（缓冲区裁剪会让"墨迹右边界"看不出来，别用那个）。
+    #[test]
+    fn output_does_not_depend_on_the_previous_draw() {
+        let text = "国";
+        let prime = |px: f32| {
+            let _ = render(text, px);
+        };
+
+        prime(18.0);
+        let (x0, y0, x1, y1) = bbox(&render(text, 18.0));
+        let base = (x1 - x0, y1 - y0, y0);
+
+        for other in [24.0f32, 32.0, 12.0] {
+            prime(other);
+            let (x0, y0, x1, y1) = bbox(&render(text, 18.0));
+            assert_eq!(
+                (x1 - x0, y1 - y0, y0),
+                base,
+                "{other}px 预热后画的 18px 字形与基准不同：字体没有被显式选进 DC"
+            );
+        }
+    }
+
+    /// 墨迹宽度必须与 `measure` 相称（防"字号没生效"这类退化）。
+    #[test]
+    fn ink_width_tracks_measure_across_sizes() {
+        let text = "打开配置文件";
+        for px in [12.0f32, 14.0, 18.0, 24.0] {
+            let (x0, _, x1, _) = bbox(&render(text, px));
+            let ink = (x1 - x0 + 1) as f32;
+            let measured = measure(text, px, false);
+            assert!(
+                (ink - measured).abs() < px * 0.6,
+                "{px}px: ink {ink} px vs measured {measured:.1} px"
+            );
+        }
     }
 }

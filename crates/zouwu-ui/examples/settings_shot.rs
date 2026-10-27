@@ -58,15 +58,43 @@ fn main() -> Result<(), String> {
         }
 
         let (lw, lh) = settings::DEFAULT_SIZE;
-        let scale = 2.0;
+        // `ZOUWU_DPI` 用来复现真机缩放：文字排版对「逻辑像素 × 整数倍」很敏感，
+        // 2.0 下正常的布局在 1.25/1.5 下可能有细微差（ADR-029 就是这么漏掉的）。
+        let scale = std::env::var("ZOUWU_DPI")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| (0.75..=4.0).contains(v))
+            .unwrap_or(2.0);
         let layout = settings::layout(&model, lw, lh);
         model.focus = layout.rows.iter().position(|(row, _)| row.field.is_some());
         let layout = settings::layout(&model, lw, lh);
+
+        if std::env::var("ZOUWU_DUMP").is_ok() {
+            println!("-- rows. h={:.0} content={:?}", lh, layout.content);
+            for (row, rl) in &layout.rows {
+                let text = match &row.control {
+                    settings::Control::Section { text } => format!("SECTION {text}"),
+                    _ => row.label.clone(),
+                };
+                println!(
+                    "  y={:6.1} h={:5.1} bottom={:6.1}  {}",
+                    rl.rect.y,
+                    rl.rect.h,
+                    rl.rect.bottom(),
+                    text
+                );
+            }
+        }
 
         let mut pixmap =
             Pixmap::new((lw * scale) as u32, (lh * scale) as u32).ok_or("pixmap alloc failed")?;
         settings::draw(&mut pixmap, &layout, &model);
 
+        let file = if (scale - 2.0).abs() < f32::EPSILON {
+            file.to_string()
+        } else {
+            file.replace(".png", &format!("@{scale}x.png"))
+        };
         let path = out.join(file);
         pixmap.save_png(&path).map_err(|e| e.to_string())?;
         println!("{}", path.display());
