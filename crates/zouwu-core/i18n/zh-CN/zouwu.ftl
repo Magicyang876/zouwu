@@ -106,7 +106,12 @@ settings-skin-import = 导入皮肤包…
 settings-skin-export = 导出当前形象…
 settings-skin-open-dir = 打开形象目录
 settings-skin-delete = 删除这套形象
+settings-skin-overwrite = 覆盖已安装的同名皮肤
+settings-skin-overwrite-hint = 勾上后导入会整个替换掉同名皮肤（会弹窗确认这套皮肤被换掉）；不勾则拒绝导入已存在的皮肤
+settings-skin-overwrite-confirm = 覆盖已安装的皮肤？
 settings-skin-delete-hint = 内置形象删掉后，下次启动会自动补回来
 settings-skin-delete-failed = 删除失败
 settings-skin-imported = 已导入「{$id}」
 settings-skin-broken = 打不开（清单或图片有问题）
+
+skin-import-overwrite-hint = 如果这是同一个皮肤的新版本，在「形象」页勾上「覆盖已安装的同名皮肤」再导入。

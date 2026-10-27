@@ -106,7 +106,12 @@ settings-skin-import = Import skin package…
 settings-skin-export = Export current skin…
 settings-skin-open-dir = Open skins folder
 settings-skin-delete = Delete this skin
+settings-skin-overwrite = Overwrite the installed skin with the same id
+settings-skin-overwrite-hint = When checked, importing replaces that skin entirely (you get a confirmation); unchecked, an existing skin is refused
+settings-skin-overwrite-confirm = Overwrite the installed skin?
 settings-skin-delete-hint = Built-in skins come back on the next launch
 settings-skin-delete-failed = Delete failed
 settings-skin-imported = Imported "{$id}"
 settings-skin-broken = cannot be opened (bad manifest or image)
+
+skin-import-overwrite-hint = If this is a newer version of the same skin, tick "Overwrite the installed skin with the same id" on the Skins tab and import again.

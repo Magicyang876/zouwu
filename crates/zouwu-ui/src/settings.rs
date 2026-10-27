@@ -320,6 +320,12 @@ pub enum Control {
     },
     /// 主题色板（只读装饰）。
     Swatches,
+    /// 带方框的勾选项。与 `Toggle` 的区别：它背后**不是一个配置字段**，
+    /// 而是一个一次性意图（比如"这次导入允许覆盖"），所以状态存在 `Model` 里。
+    Checkbox {
+        on: bool,
+        action: Action,
+    },
     /// 皮肤缩略图网格。`selected`/`hover` 是 `Model::skins` 的下标。
     Gallery {
         count: usize,
@@ -344,6 +350,8 @@ pub enum Action {
     OpenSkinsDir,
     /// 删掉当前这套皮肤。
     DeleteSkin,
+    /// 切换"导入时覆盖已安装皮肤"。
+    ToggleOverwrite,
 }
 
 #[derive(Clone, Debug)]
@@ -365,7 +373,11 @@ impl Row {
     }
 
     fn focusable(&self) -> bool {
-        self.field.is_some() || matches!(self.control, Control::Button { .. })
+        self.field.is_some()
+            || matches!(
+                self.control,
+                Control::Button { .. } | Control::Checkbox { .. }
+            )
     }
 
     fn height(&self) -> f32 {
@@ -406,6 +418,11 @@ pub struct Model {
     pub thumbs: Vec<Option<Thumb>>,
     /// 鼠标悬停在第几个缩略图上（仅视觉反馈）。
     pub hover_skin: Option<usize>,
+    /// 导入时是否覆盖同名皮肤。
+    ///
+    /// **故意不持久化**：覆盖是破坏性动作，每次打开面板都要重新表态，
+    /// 而不是上周勾过一次、这周就默认覆盖掉别人的皮肤。
+    pub overwrite_skin: bool,
     /// 缩略图缓存键：主题或皮肤列表变了才重算。
     thumbs_key: String,
 }
@@ -439,6 +456,7 @@ impl Model {
             i18n,
             thumbs: Vec::new(),
             hover_skin: None,
+            overwrite_skin: false,
             thumbs_key: String::new(),
         }
     }
@@ -587,6 +605,15 @@ pub fn build_rows(model: &Model) -> Vec<Row> {
                 },
             });
             rows.push(Row::section(i18n.t("settings.section.skinpack")));
+            rows.push(Row {
+                field: None,
+                label: i18n.t("settings.skin.overwrite"),
+                hint: Some(i18n.t("settings.skin.overwrite.hint")),
+                control: Control::Checkbox {
+                    on: model.overwrite_skin,
+                    action: Action::ToggleOverwrite,
+                },
+            });
             for (text_key, action) in [
                 ("settings.skin.import", Action::ImportSkin),
                 ("settings.skin.export", Action::ExportSkin),
@@ -863,6 +890,9 @@ pub fn layout(model: &Model, w: f32, h: f32) -> Layout {
                 BUTTON_W,
                 30.0,
             ),
+            Control::Checkbox { .. } => {
+                Rect::new(rect.right() - 24.0, y + (rh - 24.0) * 0.5, 24.0, 24.0)
+            }
             // 缩略图墙占满整行宽度：格子要尽量大，缩略图才有辨识度。
             Control::Gallery { .. } => Rect::new(rect.x, y + 6.0, rect.w, rh - 12.0),
             _ => control,
@@ -1035,6 +1065,9 @@ pub fn activate(model: &mut Model, layout: &Layout, index: usize) -> Vec<ChangeK
             }
             Action::OpenSkinsDir => zouwu_platform::assets::reveal_skins_dir(),
             Action::DeleteSkin => return delete_skin(model),
+            Action::ToggleOverwrite => {
+                model.overwrite_skin = !model.overwrite_skin;
+            }
         }
         return Vec::new();
     }
@@ -1077,7 +1110,20 @@ fn import_skin(model: &mut Model) -> Vec<ChangeKind> {
     let Some(path) = zouwu_platform::dialogs::pick_skin_package() else {
         return Vec::new();
     };
-    match zouwu_platform::skinpack::import(&path) {
+    // 勾了"覆盖"且确实会覆盖到东西时，再问一次：这一步是不可逆的文件删除。
+    if model.overwrite_skin {
+        if let Ok(id) = zouwu_platform::skinpack::peek_id(&path) {
+            if zouwu_platform::skinpack::installed(&id)
+                && !zouwu_platform::dialogs::confirm(
+                    &model.i18n.t("settings.skin.overwrite.confirm"),
+                    &id,
+                )
+            {
+                return Vec::new();
+            }
+        }
+    }
+    match zouwu_platform::skinpack::import_with(&path, model.overwrite_skin) {
         Ok(id) => {
             model.refresh_skins();
             model.notice = Some(model.i18n.t_args("settings.skin.imported", &[("id", &id)]));
@@ -1085,7 +1131,18 @@ fn import_skin(model: &mut Model) -> Vec<ChangeKind> {
             vec![ChangeKind::Appearance]
         }
         Err(err) => {
-            zouwu_platform::dialogs::warn(&model.i18n.t("skin.import.failed"), &err);
+            // 最常见的一种失败值得一句话指路：同名皮肤已装，去勾上面那个框。
+            let text = if err.contains("already installed") {
+                format!(
+                    "{err}
+
+{}",
+                    model.i18n.t("skin.import.overwrite.hint")
+                )
+            } else {
+                err
+            };
+            zouwu_platform::dialogs::warn(&model.i18n.t("skin.import.failed"), &text);
             Vec::new()
         }
     }
@@ -1422,6 +1479,23 @@ fn draw_row(p: &mut Painter<'_>, pal: &Palette, model: &Model, row: &Row, rl: &R
                 r.x + 3.0 + knob
             };
             p.circle(Point::new(cx, r.y + r.h * 0.5), knob, pal.text);
+        }
+        Control::Checkbox { on, .. } => {
+            let r = rl.hit;
+            let radius = 6.0;
+            if *on {
+                p.fill(r, radius, pal.accent);
+                // 对勾：两段折线。比例按框宽的 0.24/0.52/0.78 取，
+                // 换 DPI / 换字号都落在视觉中心。
+                let (x0, y0) = (r.x + r.w * 0.24, r.y + r.h * 0.52);
+                let (x1, y1) = (r.x + r.w * 0.43, r.y + r.h * 0.70);
+                let (x2, y2) = (r.x + r.w * 0.78, r.y + r.h * 0.30);
+                p.line(x0, y0, x1, y1, pal.on_accent, 2.0);
+                p.line(x1, y1, x2, y2, pal.on_accent, 2.0);
+            } else {
+                p.fill(r, radius, pal.raised);
+                p.stroke(r, radius, 1.0, pal.line);
+            }
         }
         Control::Step {
             text,

@@ -4,6 +4,7 @@
 //! cargo run -p zouwu-platform --example skinpack_tool -- list
 //! cargo run -p zouwu-platform --example skinpack_tool -- export zouwu-ink /tmp/a.zwskin
 //! cargo run -p zouwu-platform --example skinpack_tool -- import /tmp/a.zwskin
+//! cargo run -p zouwu-platform --example skinpack_tool -- import --force /tmp/a.zwskin
 //! ```
 //!
 //! 存在意义有两个：① 导入导出逻辑必须能脱离 GUI 验证（托盘菜单里点两下
@@ -60,20 +61,27 @@ fn main() {
                 2
             }
         },
-        Some("import") => match args.get(1) {
-            Some(path) => match zouwu_platform::skinpack::import(std::path::Path::new(path)) {
-                Ok(id) => {
-                    println!("imported `{id}`");
-                    0
+        Some("import") => {
+            // `--force` = 面板里那个「覆盖已安装」勾选框的命令行版本
+            let force = args.get(1).map(|s| s == "--force").unwrap_or(false);
+            let path = if force { args.get(2) } else { args.get(1) };
+            match path {
+                Some(path) => {
+                    match zouwu_platform::skinpack::import_with(std::path::Path::new(path), force) {
+                        Ok(id) => {
+                            println!("imported `{id}`");
+                            0
+                        }
+                        Err(err) => {
+                            eprintln!("import failed: {err}");
+                            1
+                        }
+                    }
                 }
-                Err(err) => {
-                    eprintln!("import failed: {err}");
-                    1
+                None => {
+                    eprintln!("usage: skinpack_tool import [--force] <package.zwskin>");
+                    2
                 }
-            },
-            None => {
-                eprintln!("usage: skinpack_tool import <package.zwskin>");
-                2
             }
         },
         _ => {

@@ -209,6 +209,35 @@ pub fn export_to(id: &str, path: &Path) -> Result<(), String> {
 /// 目标目录已存在时**不覆盖**：皮肤可能正在被用，静默覆盖会让人以为"导入了但没变"。
 /// 想升级就先在托盘里删掉/改名，或者用 `--force`（未来设置面板里给）。
 pub fn import(path: &Path) -> Result<String, String> {
+    import_with(path, false)
+}
+
+/// 同 [`import`]，但允许**覆盖**已安装的同名皮肤。
+///
+/// 为什么覆盖要单独一个参数而不是默认行为：作者的日常是"改一版重导"，
+/// 但用户点错一个包就换掉正在用的皮肤，是难以自己察觉的损坏。
+/// 覆盖必须来自一次**显式**的意图（面板里勾上那个框），而不是默认路径。
+pub fn import_with(path: &Path, overwrite: bool) -> Result<String, String> {
+    import_at(&assets::skins_dir(), path, overwrite)
+}
+
+/// 只读清单、取出包里的皮肤 id（不落盘）。
+///
+/// 面板要"覆盖前先问一句"，就得在真正写盘之前知道这次会覆盖到谁。
+pub fn peek_id(path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|err| format!("read {}: {err}", path.display()))?;
+    let files = decode(&bytes)?;
+    Ok(zouwu_core::skin::SkinManifest::parse(&files.manifest_toml)?.id)
+}
+
+/// 某个 id 的皮肤是否已经装在盘上。
+pub fn installed(id: &str) -> bool {
+    is_plain_name(id) && assets::skins_dir().join(id).is_dir()
+}
+
+/// 装到指定根目录下。抽出来只有一个目的：**能在临时目录里测试覆盖语义**，
+/// 不必去动用户真实的 `skins/`。
+fn import_at(root: &Path, path: &Path, overwrite: bool) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|err| format!("read {}: {err}", path.display()))?;
     let files = decode(&bytes)?;
 
@@ -236,13 +265,18 @@ pub fn import(path: &Path) -> Result<String, String> {
         }
     }
 
-    let dir = assets::skins_dir().join(&manifest.id);
+    let dir = root.join(&manifest.id);
     if dir.exists() {
-        return Err(format!(
-            "skin `{}` already installed ({})",
-            manifest.id,
-            dir.display()
-        ));
+        if !overwrite {
+            return Err(format!(
+                "skin `{}` already installed ({})",
+                manifest.id,
+                dir.display()
+            ));
+        }
+        // 先整个删掉再重建：包里这一版删掉的图层不能残留在目录里，
+        // 否则会留下一份清单里没提、却仍在磁盘上的旧文件。
+        fs::remove_dir_all(&dir).map_err(|err| format!("replace {}: {err}", dir.display()))?;
     }
     fs::create_dir_all(&dir).map_err(|err| format!("create {}: {err}", dir.display()))?;
 
@@ -369,6 +403,37 @@ image = "body.png"
         push_entry(&mut out, "body.png", b"a").unwrap();
         push_entry(&mut out, "body.png", b"b").unwrap();
         assert!(decode(&out).unwrap_err().contains("duplicate"));
+    }
+
+    #[test]
+    fn import_refuses_then_replaces_when_asked() {
+        let root = std::env::temp_dir().join(format!("zw-skinpack-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("temp root");
+
+        let pkg = root.join("v1.zwskin");
+        fs::write(&pkg, sample()).expect("write pkg");
+
+        let id = import_at(&root, &pkg, false).expect("first import");
+        assert_eq!(id, "t");
+        assert!(root.join("t").join("body.png").is_file());
+
+        // 不勾"覆盖"时第二次必须失败，且不能把已装的弄坏
+        let err = import_at(&root, &pkg, false).expect_err("second import must fail");
+        assert!(err.contains("already installed"), "unexpected: {err}");
+        assert!(root.join("t").join("body.png").is_file());
+
+        // 勾了覆盖：目录被整体重建（旧的多余文件不该留下）
+        fs::write(root.join("t").join("stale.png"), b"old").expect("stale");
+        let id = import_at(&root, &pkg, true).expect("overwrite");
+        assert_eq!(id, "t");
+        assert!(
+            !root.join("t").join("stale.png").exists(),
+            "overwrite must rebuild the folder, not patch it"
+        );
+        assert!(root.join("t").join("skin.toml").is_file());
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

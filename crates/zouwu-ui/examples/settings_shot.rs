@@ -53,6 +53,8 @@ fn main() -> Result<(), String> {
         if tab == Tab::Skins {
             model.ensure_thumbs();
             model.hover_skin = Some(1);
+            // 勾上「覆盖已安装」：这一页的重点控件，图里必须能看见它的两种状态之一。
+            model.overwrite_skin = true;
         }
 
         let (lw, lh) = settings::DEFAULT_SIZE;

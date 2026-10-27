@@ -298,6 +298,29 @@ impl<'a> Painter<'a> {
         self.fill(Rect::new(x0, y, (x1 - x0).max(0.0), t), 0.0, color);
     }
 
+    /// 任意两点之间的直线（对勾、滑块手柄、斜线装饰）。
+    pub fn line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, color: Rgba, width: f32) {
+        if color.a == 0 {
+            return;
+        }
+        let mut pb = PathBuilder::new();
+        pb.move_to(self.px(x0), self.px(y0));
+        pb.line_to(self.px(x1), self.px(y1));
+        let Some(path) = pb.finish() else {
+            return;
+        };
+        let mut paint = Paint::default();
+        paint.set_color(to_color(color));
+        paint.anti_alias = true;
+        let stroke = Stroke {
+            width: self.px(width.max(self.border_px())),
+            ..Stroke::default()
+        };
+        let mask = self.mask.as_ref();
+        self.pixmap
+            .stroke_path(&path, &paint, &stroke, Transform::identity(), mask);
+    }
+
     /// 画一行文本，`baseline` 为基线（逻辑像素）。
     pub fn text(
         &mut self,
