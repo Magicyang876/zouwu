@@ -159,6 +159,40 @@
 | ADR-014 | **日志落盘：自研 `log::Log`**（双写 stderr + 文件，按大小轮转）；`env_logger` 会抢注，必须首行 init |
 | ADR-015 | **设置面板 = 第二个真窗口 + `softbuffer`**（分层窗口拿不到焦点/命中）；无"保存"按钮，改动即时落盘 |
 | ADR-016 | **文本用系统 GDI，不引字体库**（`fontdue` 解析 CJK 一个字面 175MB → 面板 RSS 879MB → 23MB） |
+| ADR-017 | **主题：TOML 增量覆盖**（`base` + `palette` 14 个令牌）；拼错字段报 `palette.<field>` |
+| ADR-018 | **皮肤加载器：目录即身份、图层即职责**（`body`/`blink`/`overlay`，长边等比归一；实测位图只比过程化快 1.5×） |
+| ADR-019 | **皮肤包 `.zwskin`：自定义单文件容器**（不引 zip；先验后读三条校验；导入不覆盖；失败弹窗） |
+| ADR-020 | **官方第二套皮肤由代码生成**（生成器与产物都进仓库；断言可见像素下限防「图塌了」） |
+| ADR-021 | **皮肤页复用主渲染管线出缩略图**（画什么就是什么；缓存键懒加载） |
+| ADR-023 | **设置面板第 5 页**：缩略图墙 + 皮肤包操作，点击即换、删除二次确认 |
+| ADR-024 | **「覆盖已安装」是勾选框**（每会话复位、勾了再确认、整目录重建、托盘不覆盖） |
+| ADR-025 | **分发：便携 zip + 自带安装**（`--install`/`--uninstall`；`%LOCALAPPDATA%`；卸载用 `Wait-Process` 等进程退出，不靠 sleep） |
+
+---
+
+## 7.4 怎么装（给用户看的）
+
+```powershell
+# 便携：解压即用，双击 zouwu.exe
+# 想要开始菜单入口：
+.\zouwu.exe --install
+
+# 卸载（保留配置）
+.\zouwu.exe --uninstall
+# 卸载并清空配置/皮肤/日志
+.\zouwu.exe --uninstall --purge
+```
+
+发布物是 `dist/zouwu-<version>-win64.zip`（约 1.9 MB），由
+`powershell -File packaging/package.ps1` 生成，同时打印 sha256。
+
+为什么不是 MSI / 安装向导：见 [ADR-025](docs/decisions.md)。一句话——
+三种"安装才能做的事"（开始菜单、可卸载项、静默部署）都不需要安装器框架，
+而少一个安装器就少一份要签名的东西。
+
+> 已知：当前包**没有代码签名**，Windows 可能提示"未知发布者"；
+> exe 本身也不带图标资源（gnu 工具链限制），安装后快捷方式的图标由
+> 安装目录里的 `zouwu.ico` 提供。
 
 ---
 
@@ -189,6 +223,8 @@
 | 开机自启 | ✔ `HKCU\...\Run` 单值，写后读回校验，托盘可勾选 |
 | 多语言 | ✔ Fluent 中/英，托盘内即时切换，`language = "auto"` 跟随系统 |
 | 配置热重载 | ✔ 改 `config.toml` 保存即生效（语言/主题/热键/自启/环/尺寸/置顶/日志），坏配置跳过并保留现状（ADR-012） |
+| 安装 / 卸载 | ✔ 便携 zip + `zouwu --install`（复制到 `%LOCALAPPDATA%\Programs\zouwu`、开始菜单快捷方式、设置→应用里的卸载项、`--uninstall --purge` 清用户数据）；不做安装器框架（ADR-025） |
+| exe 图标 | ◐ `examples/make_icon.rs` 自写 ICO；gnu 工具链下 exe 不嵌资源，安装时把 `zouwu.ico` 落到安装目录供快捷方式引用（ADR-025） |
 | 矢量图标字体 | ✖ 8 个 glyph 先程序化绘制，M2 换图标字体 |
 
 **可复现的验收方式**：
@@ -206,6 +242,9 @@ cargo run -p zouwu-platform --example skinpack_tool -- list       # 皮肤包：
 ZOUWU_PERF=1 cargo run --release -p zouwu-app   # 每 60 帧报一次实际帧率
 ZOUWU_SETTINGS=1 cargo run --release -p zouwu-app   # 启动即开设置面板（托盘菜单没法脚本化）
 cargo run -p zouwu-platform --example autostart_check -- status   # 开机自启读写（有副作用，故不做成单测）
+powershell -File packaging/package.ps1     # 打包 → dist/zouwu-<ver>-win64.zip + sha256（约 1.9 MB）
+target/release/zouwu.exe --install         # 装到 %LOCALAPPDATA%\Programs\zouwu（退出码 0/1，可脚本化）
+target/release/zouwu.exe --uninstall --purge   # 卸载，连配置/皮肤/日志一起删
 ```
 
 ---

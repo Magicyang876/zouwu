@@ -661,6 +661,14 @@ pub fn build_rows(model: &Model) -> Vec<Row> {
             });
             rows.push(Row {
                 field: None,
+                label: i18n.t("settings.about.install"),
+                hint: None,
+                control: Control::Value {
+                    text: install_label(i18n),
+                },
+            });
+            rows.push(Row {
+                field: None,
                 label: i18n.t("settings.about.platform"),
                 hint: None,
                 control: Control::Value {
@@ -1185,6 +1193,25 @@ fn delete_skin(model: &mut Model) -> Vec<ChangeKind> {
             Vec::new()
         }
     }
+}
+
+/// 「装在哪」：便携运行 / 就是安装的那份 / 装过但当前在跑别的副本。
+///
+/// 三种状态都值得显示：用户从 zip 里双击时看到的应该是"便携运行"，
+/// 而不是一个让人以为已经装好的路径。
+fn install_label(i18n: &I18n) -> String {
+    #[cfg(windows)]
+    {
+        if zouwu_platform::install::running_installed_copy() {
+            return zouwu_platform::install::installed_exe()
+                .display()
+                .to_string();
+        }
+        if zouwu_platform::install::is_installed() {
+            return i18n.t("settings.about.install.other");
+        }
+    }
+    i18n.t("settings.about.install.portable")
 }
 
 /// 缩略图网格的列数与格子宽度。

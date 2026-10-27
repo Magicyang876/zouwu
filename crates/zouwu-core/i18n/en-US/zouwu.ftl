@@ -115,3 +115,7 @@ settings-skin-imported = Imported "{$id}"
 settings-skin-broken = cannot be opened (bad manifest or image)
 
 skin-import-overwrite-hint = If this is a newer version of the same skin, tick "Overwrite the installed skin with the same id" on the Skins tab and import again.
+
+settings-about-install = Installed at
+settings-about-install-portable = Portable (not installed)
+settings-about-install-other = Installed elsewhere

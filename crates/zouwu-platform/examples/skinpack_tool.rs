@@ -83,7 +83,7 @@ fn main() {
                     2
                 }
             }
-        },
+        }
         _ => {
             eprintln!("usage: skinpack_tool <list|export|import> ...");
             2

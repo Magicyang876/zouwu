@@ -9,8 +9,12 @@ pub mod autostart;
 #[cfg(target_os = "windows")]
 pub mod hotkey;
 #[cfg(target_os = "windows")]
+pub mod install;
+#[cfg(target_os = "windows")]
 pub mod layer;
 pub mod logging;
+#[cfg(target_os = "windows")]
+pub(crate) mod reg;
 #[cfg(target_os = "windows")]
 pub mod single_instance;
 

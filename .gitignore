@@ -1,2 +1,5 @@
 /target
 **/*.rs.bk
+
+# 发布产物（用 packaging/package.ps1 生成）
+/dist

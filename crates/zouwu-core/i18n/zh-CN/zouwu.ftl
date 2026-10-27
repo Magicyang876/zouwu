@@ -115,3 +115,7 @@ settings-skin-imported = 已导入「{$id}」
 settings-skin-broken = 打不开（清单或图片有问题）
 
 skin-import-overwrite-hint = 如果这是同一个皮肤的新版本，在「形象」页勾上「覆盖已安装的同名皮肤」再导入。
+
+settings-about-install = 安装位置
+settings-about-install-portable = 便携运行（未安装）
+settings-about-install-other = 已安装到另一个位置
