@@ -110,7 +110,11 @@ impl SkinManifest {
     ///
     /// 只序列化清单本身：图片路径原样保留，由调用方负责把 PNG 放到同位。
     pub fn to_toml(&self) -> String {
-        toml::to_string_pretty(self).unwrap_or_else(|_| String::new())
+        // 手写的 skin.toml 常常不写 schema_version（默认 0）。导出的包不能这样：
+        // 它是给**别人**读的，必须自带"我按哪一版格式写的"。
+        let mut copy = self.clone();
+        copy.schema_version = SKIN_SCHEMA_VERSION;
+        toml::to_string_pretty(&copy).unwrap_or_default()
     }
 
     pub fn display_name(&self) -> &str {
@@ -286,6 +290,20 @@ opacity = 0.8
             let text = format!("id = \"{bad}\"");
             assert!(SkinManifest::parse(&text).is_err(), "`{bad}` should fail");
         }
+    }
+
+    #[test]
+    fn exported_manifest_carries_current_schema_version() {
+        // 手写清单没写版本号时解析出来是 0；导出必须补成当前版本
+        let manifest = SkinManifest::parse("id = \"x\"").expect("parse");
+        assert_eq!(manifest.schema_version, 0);
+        let text = manifest.to_toml();
+        assert!(
+            text.contains("schema_version = 1"),
+            "exported toml missing version: {text}"
+        );
+        let again = SkinManifest::parse(&text).expect("reparse");
+        assert_eq!(again.id, "x");
     }
 
     #[test]

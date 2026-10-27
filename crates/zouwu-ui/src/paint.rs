@@ -255,17 +255,55 @@ fn draw_skin_or_buddy(ctx: &mut Ctx<'_>, scene: &Scene<'_>) {
     }
 }
 
+/// 投影的形状参数。位图皮肤要更"贴地"一点：
+///
+/// 代码绘制的小兽自带一圈宽身体，影子拉开看很自然；
+/// 位图皮肤常常是**黑/深色**的角色（比如水墨驺吾），
+/// 影子一拉开就变成"角色脚下飘着一条红带子"——所以收窄、贴紧、减淡。
+#[derive(Clone, Copy)]
+struct ShadowStyle {
+    /// 相对半径的垂直偏移
+    offset: f32,
+    /// 椭圆的横向半宽（× 半径）
+    spread: f32,
+    /// 椭圆的纵向半高（× 半径）
+    height: f32,
+    /// 整体浓度
+    strength: f32,
+}
+
+impl ShadowStyle {
+    const PROCEDURAL: Self = Self {
+        offset: 0.94,
+        spread: 1.04,
+        height: 0.14,
+        strength: 1.0,
+    };
+    const BITMAP: Self = Self {
+        offset: 0.80,
+        spread: 0.92,
+        height: 0.09,
+        strength: 0.70,
+    };
+}
+
 /// 地面投影：多层同心扁椭圆叠出柔和渐变（比模糊成本低一个数量级）。
-/// 代码绘制和位图皮肤共用它，所以两种形态看起来都"坐在桌面上"。
-fn draw_shadow(ctx: &mut Ctx<'_>, center: Point, radius: f32, alpha: f32, theme: &Theme) {
+fn draw_shadow(
+    ctx: &mut Ctx<'_>,
+    center: Point,
+    radius: f32,
+    alpha: f32,
+    theme: &Theme,
+    style: ShadowStyle,
+) {
     for i in (1..=12).rev() {
         let k = i as f32 / 12.0;
         ctx.fill_ellipse(
             center,
-            radius * (0.42 + 0.62 * k),
+            radius * (style.spread * k),
             1.0,
-            0.14,
-            col(theme.shadow, 0.055 * alpha),
+            style.height,
+            col(theme.shadow, 0.055 * alpha * style.strength),
         );
     }
 }
@@ -290,7 +328,14 @@ fn draw_skin_buddy(ctx: &mut Ctx<'_>, scene: &Scene<'_>, skin: &Skin) {
         1.0
     };
 
-    draw_shadow(ctx, Point::new(c.x, c.y + r * 0.94), r, a, scene.theme);
+    draw_shadow(
+        ctx,
+        Point::new(c.x, c.y + r * ShadowStyle::BITMAP.offset),
+        r,
+        a,
+        scene.theme,
+        ShadowStyle::BITMAP,
+    );
 
     for layer in &skin.layers {
         let alpha = a
@@ -381,7 +426,14 @@ fn draw_buddy(ctx: &mut Ctx<'_>, scene: &Scene<'_>) {
     // 局部坐标：以本体中心为原点、以半径 r 为单位
     let p = |x: f32, y: f32| Point::new(c.x + r * x, c.y + r * y);
 
-    draw_shadow(ctx, p(0.0, 0.94), r, a, theme);
+    draw_shadow(
+        ctx,
+        p(0.0, ShadowStyle::PROCEDURAL.offset),
+        r,
+        a,
+        theme,
+        ShadowStyle::PROCEDURAL,
+    );
 
     // ---- 尾巴（在身体后面），带三道虎纹
     ctx.polyline(

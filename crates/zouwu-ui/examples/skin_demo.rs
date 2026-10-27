@@ -335,7 +335,55 @@ fn install(package: &SkinPackage) {
     }
 }
 
+/// 直接预览一个**皮肤目录**（作者改完图就能看，不必先装进 `%APPDATA%`）。
+///
+/// 走的是和运行时完全相同的 `SkinPackage` → `Skin::decode` 路径，
+/// 唯一的区别是目录由参数给定、图层文件从磁盘读。
+fn load_dir(dir: &std::path::Path) -> Result<SkinPackage, String> {
+    let text = std::fs::read_to_string(dir.join("skin.toml"))
+        .map_err(|err| format!("{}: {err}", dir.join("skin.toml").display()))?;
+    let manifest = SkinManifest::parse(&text)?;
+    let mut images = Vec::new();
+    for layer in &manifest.layers {
+        let path = dir.join(&layer.image);
+        let bytes =
+            std::fs::read(&path).map_err(|err| format!("layer `{}`: {err}", path.display()))?;
+        images.push((layer.image.clone(), bytes));
+    }
+    Ok(SkinPackage {
+        manifest,
+        dir: dir.to_path_buf(),
+        images,
+    })
+}
+
 fn main() {
+    if let Some(dir) = std::env::args()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find(|w| w[0] == "--preview")
+        .map(|w| PathBuf::from(&w[1]))
+    {
+        let package = match load_dir(&dir) {
+            Ok(pkg) => pkg,
+            Err(err) => {
+                eprintln!("cannot load {}: {err}", dir.display());
+                std::process::exit(1);
+            }
+        };
+        let skin = Skin::decode(&package).expect("decode preview skin");
+        println!(
+            "previewing `{}` from {}: {} layers",
+            skin.manifest.display_name(),
+            dir.display(),
+            skin.layers.len()
+        );
+        shoot("preview-collapsed", &skin, 0.0, 0.0, 0.0);
+        shoot("preview-expanded", &skin, 1.0, 0.0, 0.0);
+        shoot("preview-blink", &skin, 1.0, 1.0, 0.0);
+        return;
+    }
+
     let package = demo_package(256);
     if std::env::args().any(|a| a == "--install") {
         install(&package);

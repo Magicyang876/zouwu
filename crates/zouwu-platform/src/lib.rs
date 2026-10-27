@@ -16,7 +16,9 @@ pub mod single_instance;
 #[cfg(target_os = "windows")]
 pub mod tray;
 
+pub mod dialogs;
 pub mod reload;
+pub mod skinpack;
 
 use std::fs;
 use std::path::{Path, PathBuf};

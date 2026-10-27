@@ -168,6 +168,8 @@
 | 输入保底 | ✔ 全局光标轮询（本机分层窗口收不到鼠标消息，见 ADR-009） |
 | 主题 | ✔ `themes/<id>.toml`：`base` + 增量调色板；内置暖橙/夜行；托盘菜单切换即时生效（ADR-013） |
 | 皮肤加载器 | ✔ `skins/<id>/skin.toml` + PNG 图层（body/blink/overlay）；目录名须等于 id；解码失败保留当前皮肤（ADR-014） |
+| 官方第二套皮肤 | ✔ 「水墨驺吾」——由 `examples/make_skins.rs` 代码生成（含 blink/overlay 两个角色），内嵌进二进制，首启落地到磁盘（ADR-017） |
+| 皮肤包导入导出 | ✔ `.zwskin` 单文件容器（自定格式，不引 zip）：托盘菜单 → 系统文件对话框 → 校验 → 落地；路径穿越/超长/重复/覆盖全部拒绝（ADR-016） |
 | 托盘常驻 | ✔ 左键切显隐，右键菜单（显示/隐藏、配置文件…、开机自启、语言、退出） |
 | 全局热键 | ✔ 默认 `Alt+Space`，可在 `config.toml` 改；解析失败回退默认 |
 | 单实例 | ✔ 命名内核事件：第二次启动把已有窗口叫出来，然后自己退出 |
@@ -180,11 +182,14 @@
 **可复现的验收方式**：
 
 ```bash
-cargo test --workspace                     # 95 个单测：几何 / 弹簧 / 布局 / 屏边避让 / 配置 / 主题 / 皮肤 / i18n
+cargo test --workspace                     # 104 个单测：几何 / 弹簧 / 布局 / 屏边避让 / 配置 / 主题 / 皮肤 / 皮肤包 / i18n
 cargo run -p zouwu-ui --example offscreen  # 离屏渲染 → target/zouwu-offscreen/*.png，直接看图
 cargo run -p zouwu-ui --example bench      # 单帧成本模型（release）
 cargo run --release -p zouwu-ui --example skin_demo            # 造一份皮肤 → 走真实解码 → 导出 4 张图 + 三种路径耗时
 cargo run --release -p zouwu-ui --example skin_demo -- --install  # 真的装进 %APPDATA%/zouwu/skins/，托盘里就能选
+cargo run --release -p zouwu-ui --example skin_demo -- --preview assets/skins/zouwu-ink  # 预览某个皮肤目录（改图即看）
+cargo run --release -p zouwu-ui --example make_skins              # 重新生成官方第二套皮肤（assets/skins/zouwu-ink/，产物要提交）
+cargo run -p zouwu-platform --example skinpack_tool -- list       # 皮肤包：list / export <id> [dest] / import <file>（无 GUI，可脚本化）
 ZOUWU_PERF=1 cargo run --release -p zouwu-app   # 每 60 帧报一次实际帧率
 cargo run -p zouwu-platform --example autostart_check -- status   # 开机自启读写（有副作用，故不做成单测）
 ```

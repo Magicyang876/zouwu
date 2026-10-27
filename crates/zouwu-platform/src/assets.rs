@@ -87,6 +87,89 @@ pub fn skins_dir() -> PathBuf {
     crate::config_dir().join("skins")
 }
 
+/// `%APPDATA%\zouwu\exports` —— 导出皮肤包的默认目录。
+///
+/// 不用系统下载目录：那里什么都有，多一个 `.zwskin` 谁也不会注意；
+/// 放在自己的目录里，`open_config_dir` 一点就能找到。
+pub fn exports_dir() -> PathBuf {
+    crate::config_dir().join("exports")
+}
+
+/// 随程序发布的官方皮肤（内嵌进二进制）。
+///
+/// 为什么内嵌而不直接读 `assets/`：发布版是单个 exe，没有 `assets` 目录；
+/// 但内嵌后又要能被用户改，所以**首次启动时落到磁盘**，之后就以磁盘为准。
+/// 删掉会被下次启动补回来（自愈），但要改配色/换图，改磁盘上那份就够了。
+struct BuiltinSkin {
+    id: &'static str,
+    manifest: &'static str,
+    layers: &'static [(&'static str, &'static [u8])],
+}
+
+const BUILTIN_SKINS: &[BuiltinSkin] = &[BuiltinSkin {
+    id: "zouwu-ink",
+    manifest: include_str!("../../../assets/skins/zouwu-ink/skin.toml"),
+    layers: &[
+        (
+            "body.png",
+            include_bytes!("../../../assets/skins/zouwu-ink/body.png"),
+        ),
+        (
+            "blink.png",
+            include_bytes!("../../../assets/skins/zouwu-ink/blink.png"),
+        ),
+        (
+            "seal.png",
+            include_bytes!("../../../assets/skins/zouwu-ink/seal.png"),
+        ),
+    ],
+}];
+
+/// 官方皮肤 id 列表（托盘里可以标出来，未来也可做"修复"按钮）。
+pub fn builtin_skin_ids() -> Vec<&'static str> {
+    BUILTIN_SKINS.iter().map(|s| s.id).collect()
+}
+
+/// 把缺少的官方皮肤写到 `skins/`，返回这次实际写入了几个。
+///
+/// 幂等：已存在的目录一律不动（用户在改我们发布的皮肤，不能被启动覆盖）。
+pub fn ensure_builtin_skins() -> usize {
+    let root = skins_dir();
+    let mut installed = 0;
+    for skin in BUILTIN_SKINS {
+        let dir = root.join(skin.id);
+        if dir.is_dir() {
+            continue;
+        }
+        if let Err(err) = fs::create_dir_all(&dir) {
+            log::warn!("cannot create {}: {err}", dir.display());
+            continue;
+        }
+        let mut ok = true;
+        for (name, bytes) in skin.layers {
+            let path = dir.join(name);
+            if let Err(err) = fs::write(&path, bytes) {
+                log::warn!("cannot write {}: {err}", path.display());
+                ok = false;
+            }
+        }
+        let manifest = dir.join("skin.toml");
+        if let Err(err) = fs::write(&manifest, skin.manifest) {
+            log::warn!("cannot write {}: {err}", manifest.display());
+            ok = false;
+        }
+        if ok {
+            installed += 1;
+            log::info!(
+                "installed built-in skin `{}` into {}",
+                skin.id,
+                dir.display()
+            );
+        }
+    }
+    installed
+}
+
 /// 全部可用主题：内置在前，外部在后（同名 id 时外部覆盖内置）。
 ///
 /// 外部主题按 `*.toml` 文件名排序，保证每次启动菜单顺序一致——
