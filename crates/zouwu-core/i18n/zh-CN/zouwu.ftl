@@ -120,3 +120,19 @@ skin-import-overwrite-hint = 如果这是同一个皮肤的新版本，在「形
 settings-about-install = 安装位置
 settings-about-install-portable = 便携运行（未安装）
 settings-about-install-other = 已安装到另一个位置
+
+# ── 字体包 ────────────────────────────────────────────────
+tray-font-dir = 字体目录…
+settings-font = 字体
+settings-font-hint = 导入 .ttf / .otf / .ttc，整个面板立刻换成该字体
+settings-font-family = 家族名
+settings-font-family-system = 系统默认字体
+settings-font-system = 系统默认
+settings-font-import = 导入字体…
+settings-font-import-failed = 字体导入失败
+settings-font-open-dir = 打开字体目录
+settings-font-delete = 删除字体…
+settings-font-delete-hint = 删掉后立即回到系统默认字体
+settings-font-delete-confirm = 确定删除字体包“{$name}”吗？字体文件会被删掉，无法撤销。
+settings-font-delete-failed = 字体删除失败
+settings-font-no-cjk = 该字体没有中文字形：中文会退回系统字体（宽度仍按它算，可能显得偏窄）

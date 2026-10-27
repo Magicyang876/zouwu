@@ -6,6 +6,9 @@
 pub mod assets;
 #[cfg(target_os = "windows")]
 pub mod autostart;
+/// 字体文件的 `name` 表解析（纯 Rust，可测）。
+pub mod fontfile;
+pub mod fontpack;
 #[cfg(target_os = "windows")]
 pub mod hotkey;
 #[cfg(target_os = "windows")]

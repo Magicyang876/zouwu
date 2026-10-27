@@ -120,3 +120,19 @@ skin-import-overwrite-hint = If this is a newer version of the same skin, tick "
 settings-about-install = Installed at
 settings-about-install-portable = Portable (not installed)
 settings-about-install-other = Installed elsewhere
+
+# ── font packs ────────────────────────────────────────────
+tray-font-dir = Fonts folder…
+settings-font = Font
+settings-font-hint = Import .ttf / .otf / .ttc and the whole panel switches at once
+settings-font-family = Family
+settings-font-family-system = System default
+settings-font-system = System default
+settings-font-import = Import font…
+settings-font-import-failed = Could not import the font
+settings-font-open-dir = Open fonts folder
+settings-font-delete = Delete font…
+settings-font-delete-hint = Deleting falls back to the system font right away
+settings-font-delete-confirm = Delete the font pack "{$name}"? The files are removed and this cannot be undone.
+settings-font-delete-failed = Could not delete the font
+settings-font-no-cjk = This font has no Chinese glyphs: Chinese text falls back to the system font (but keeps this font's widths, so it may look squeezed)

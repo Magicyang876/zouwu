@@ -77,6 +77,8 @@ pub fn run() -> Result<(), String> {
     // 之后就以磁盘那份为准——用户改配色/换图不会被下一次启动覆盖。
     // 必须排在读配置之前：配置里可能就指名了某个内置皮肤。
     zouwu_platform::assets::ensure_builtin_skins();
+    // 字体包必须在任何文本绘制之前注册（设置面板、托盘提示都要用）。
+    zouwu_platform::fontpack::register_all();
 
     // 配置在启动时读一次（缺文件会写出一份默认配置，方便用户手改）
     let config = zouwu_platform::load_config();
@@ -448,9 +450,10 @@ impl App {
         }
 
         if changed.contains(&ChangeKind::Appearance) {
-            // 手改 config.toml 里的 theme/skin 也要当场生效，不必重启。
+            // 手改 config.toml 里的 theme/skin/font_pack 也要当场生效，不必重启。
             self.set_theme(self.config.appearance.theme.clone(), now);
             self.set_skin(self.config.appearance.skin.clone(), now);
+            self.set_font_pack(self.config.appearance.font_pack.clone(), now);
         }
 
         if changed.contains(&ChangeKind::Log) {
@@ -555,6 +558,24 @@ impl App {
     fn init_shell(&mut self) {
         if self.tray.is_none() {
             self.init_tray();
+        }
+
+        // 配置里的字体包在这里装上：字体文件已在 `run()` 里注册进本进程，
+        // 但"用哪个家族"要等文本引擎第一次被问到之前定下来。
+        let pack_id = self.config.appearance.font_pack.clone();
+        if pack_id.is_empty() {
+            log::debug!("font -> system default");
+        } else {
+            match zouwu_platform::fontpack::get(&pack_id) {
+                Some(pack) => {
+                    crate::text::set_family(Some(pack.family.clone()));
+                    log::info!("font -> {} (pack `{pack_id}`)", pack.family);
+                }
+                None => {
+                    log::warn!("font pack `{pack_id}` is missing; using the system font");
+                    self.config.appearance.font_pack.clear();
+                }
+            }
         }
 
         if self.hotkeys.is_none() {
@@ -711,6 +732,47 @@ impl App {
         log::info!("skin -> {id}");
     }
 
+    /// 换字体包：`""` = 系统默认字体。
+    ///
+    /// 字体是**全局状态**（平台层的字体缓存），所以这里不需要碰 pixmap 之外的东西，
+    /// 但必须把整幅重画：连气泡环里的数字、面板里的每个字都要换。
+    /// 包不存在时退回系统字体并记日志——字体不像皮肤，退回去至少还是能读的。
+    fn set_font_pack(&mut self, id: String, now: Instant) {
+        if self.config.appearance.font_pack == id {
+            return;
+        }
+        let family = if id.is_empty() {
+            None
+        } else {
+            match zouwu_platform::fontpack::get(&id) {
+                Some(pack) => {
+                    // 运行期新导入的包还没注册进本进程，用之前先补一次。
+                    let dir = zouwu_platform::fontpack::fonts_dir().join(&pack.id);
+                    for file in &pack.files {
+                        zouwu_platform::text_gdi::add_font_file(&dir.join(file));
+                    }
+                    Some(pack.family)
+                }
+                None => {
+                    log::warn!("font pack `{id}` not found; falling back to the system font");
+                    None
+                }
+            }
+        };
+        if !crate::text::set_family(family.clone()) {
+            log::debug!("font family unchanged");
+        }
+        self.config.appearance.font_pack = if family.is_some() {
+            id.clone()
+        } else {
+            String::new()
+        };
+        self.save_config();
+        self.last_frame = now;
+        self.dirty = true;
+        log::info!("font -> {}", family.as_deref().unwrap_or("system default"));
+    }
+
     /// 导入 `.zwskin`：选文件 → 校验 → 落盘 → 重建菜单 → 立刻换上。
     ///
     /// 成功后**不给弹窗**：小兽当场变了个样，比任何提示都直接。
@@ -773,6 +835,9 @@ impl App {
                 if !zouwu_platform::open_config_dir() {
                     log::warn!("config dir: {}", zouwu_platform::config_dir().display());
                 }
+            }
+            TrayCommand::OpenFontsDir => {
+                zouwu_platform::fontpack::reveal_dir();
             }
             TrayCommand::OpenLogs => {
                 if !zouwu_platform::logging::open_log_dir() {

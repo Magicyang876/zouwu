@@ -18,6 +18,15 @@ pub fn pick_skin_package() -> Option<PathBuf> {
         .pick_file()
 }
 
+/// 选一个字体文件（`.ttf` / `.otf` / `.ttc`）。
+pub fn pick_font_file() -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .set_title("zouwu — open font file")
+        .add_filter("font", &["ttf", "otf", "ttc"])
+        .add_filter("all files", &["*"])
+        .pick_file()
+}
+
 /// 「另存为」皮肤包。`default_name` 建议是 `<皮肤 id>.zwskin`。
 pub fn pick_export_path(default_name: &str) -> Option<PathBuf> {
     let mut dialog = rfd::FileDialog::new()

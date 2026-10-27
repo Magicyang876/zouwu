@@ -169,6 +169,7 @@
 | ADR-026 | **位置安全**：面积比例判可见（≥50% 才算活着）、启动/运行期/托盘三处归位 |
 | ADR-027 | **内置素材带版本戳**：`.zouwu-builtin` + `BUILTIN_ASSET_REVISION`，改素材必须 +1 |
 | ADR-028 | **行高按字体度量算；皮肤 `scale` 由素材占比反推**（不手调，否则口径漂移） |
+| ADR-031 | **字体包：读字体自己的 `name` 表，`AddFontResourceEx(FR_PRIVATE)` 进程私有注册**；配置 schema 4，空串 = 系统字体 |
 | ADR-030 | **面板文字被遮挡的四个成因**：半行、section 贴线、经验式基线、GDI 不选字体 |
 | ADR-029 | **贴图路径必须乘 DPI 缩放**：只有非 100% DPI 才复现，离屏验证全在 1.0 下跑 |
 | ADR-025 | **分发：便携 zip + 自带安装**（`--install`/`--uninstall`；`%LOCALAPPDATA%`；卸载用 `Wait-Process` 等进程退出，不靠 sleep） |
@@ -220,6 +221,7 @@
 | 官方第二套皮肤 | ✔ 「水墨驺吾」——由 `examples/make_skins.rs` 代码生成（含 blink/overlay 两个角色），内嵌进二进制，首启落地到磁盘；重心断言 + 左右对称，改版靠 `BUILTIN_ASSET_REVISION` 推送到老用户（ADR-020、ADR-027） |
 | 皮肤包导入导出 | ✔ `.zwskin` 单文件容器（自定格式，不引 zip）：托盘菜单 → 系统文件对话框 → 校验 → 落地；路径穿越/超长/重复/覆盖全部拒绝（ADR-019） |
 | 皮肤页 | ✔ 设置面板第 5 页：缩略图墙（复用主渲染管线，画什么就是什么）、导入/导出/删除/打开目录；点击即换、删除需确认且默认「否」（ADR-021） |
+| 自定义字体包 | ✔ 设置面板「外观」→「字体」：导入 `.ttf/.otf/.ttc`，家族名从字体自身读出，进程私有注册；缺中文字形会提示 |
 | 设置面板 | ✔ 独立窗口 + `softbuffer` 呈现，5 个分页 / 8 种控件 / 键盘可达 / 热键录制；**无保存按钮，改动即时生效并写盘**（ADR-015） |
 | 日志 | ✔ `%APPDATA%\zouwu\logs\zouwu.log`，按大小轮转（2MB×3）；级别可运行时改；panic 也落盘（ADR-014） |
 | 文本渲染 | ✔ 系统 GDI 栅格化（中文/符号 fallback 免费，常驻增量≈0），面板 RSS 879MB → 23MB（ADR-016） |
@@ -238,7 +240,7 @@
 **可复现的验收方式**：
 
 ```bash
-cargo test --workspace                     # 123 个单测：几何 / 弹簧 / 布局 / 屏边避让 / 配置 / 主题 / 皮肤 / 皮肤包 / 日志 / 面板 / 文本 / i18n
+cargo test --workspace                     # 134 个单测：几何 / 弹簧 / 布局 / 屏边避让 / 配置 / 主题 / 皮肤 / 皮肤包 / 字体包 / 日志 / 面板 / 文本 / i18n
 cargo run -p zouwu-ui --example offscreen  # 离屏渲染 → target/zouwu-offscreen/*.png，直接看图
 cargo run -p zouwu-ui --example settings_shot   # 设置面板 4 个分页 → target/zouwu-settings/*.png（2×）
 cargo run -p zouwu-ui --example bench      # 单帧成本模型（release）

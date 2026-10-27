@@ -120,6 +120,7 @@ pub enum Field {
     ExpandStagger,
     Theme,
     Skin,
+    FontPack,
     LogLevel,
     LogToFile,
 }
@@ -163,6 +164,7 @@ impl Field {
             Field::ExpandStagger => "settings.expand-stagger",
             Field::Theme => "settings.theme",
             Field::Skin => "settings.skin",
+            Field::FontPack => "settings.font",
             Field::LogLevel => "settings.log-level",
             Field::LogToFile => "settings.log-to-file",
         }
@@ -370,6 +372,12 @@ pub enum Action {
     DeleteSkin,
     /// 切换"导入时覆盖已安装皮肤"。
     ToggleOverwrite,
+    /// 导入字体文件（`.ttf` / `.otf` / `.ttc`）。
+    ImportFont,
+    /// 删掉当前字体包。
+    DeleteFont,
+    /// 在资源管理器里打开 `fonts/`。
+    OpenFontsDir,
 }
 
 #[derive(Clone, Debug)]
@@ -431,6 +439,11 @@ pub struct Model {
     pub config: Config,
     pub themes: Vec<Theme>,
     pub skins: Vec<(String, String)>,
+    /// 字体包选项：`("" , 系统默认)` + 每个已安装的包。
+    /// 由 `refresh_fonts()` 从磁盘扫出来（不在 `new` 里做，测试就不必碰磁盘）。
+    pub fonts: Vec<(String, String)>,
+    /// 字体包的完整信息（与 `fonts` 一一对应，用于"有没有中文字形"这类提示）。
+    font_packs: Vec<zouwu_platform::fontpack::FontPack>,
     pub cwd_paths: Paths,
     pub tab: Tab,
     /// 键盘焦点（`Layout::rows` 的下标）。
@@ -473,6 +486,8 @@ impl Model {
             config,
             themes,
             skins,
+            fonts: Vec::new(),
+            font_packs: Vec::new(),
             cwd_paths: paths,
             tab: Tab::General,
             focus: None,
@@ -487,6 +502,54 @@ impl Model {
             overwrite_skin: false,
             thumbs_key: String::new(),
         }
+    }
+
+    /// 重扫字体包（导入/删除之后要调；面板打开时也调一次）。
+    pub fn refresh_fonts(&mut self) {
+        self.font_packs = zouwu_platform::fontpack::list();
+        self.fonts = std::iter::once((String::new(), self.i18n.t("settings.font.system")))
+            .chain(
+                self.font_packs
+                    .iter()
+                    .map(|p| (p.id.clone(), p.display_name().to_string())),
+            )
+            .collect();
+        // 设置里的包可能已经被删掉（在资源管理器里手删目录），
+        // 这时下拉框找不到当前值，显示会是裸 id。把配置拉回空串 = 系统字体。
+        if !self.config.appearance.font_pack.is_empty()
+            && !self
+                .fonts
+                .iter()
+                .any(|(id, _)| *id == self.config.appearance.font_pack)
+        {
+            self.config.appearance.font_pack = String::new();
+        }
+    }
+
+    /// 当前字体家族的显示名（`None` = 系统默认字体）。
+    pub fn font_family(&self) -> Option<String> {
+        self.current_font_pack().map(|p| p.family.clone())
+    }
+
+    /// 当前选中的字体包（系统字体时是 `None`）。
+    pub fn current_font_pack(&self) -> Option<&zouwu_platform::fontpack::FontPack> {
+        let id = &self.config.appearance.font_pack;
+        if id.is_empty() {
+            return None;
+        }
+        self.font_packs.iter().find(|p| &p.id == id)
+    }
+
+    /// 选中字体包的提醒文案：只有"缺中文字形"这一种值得打断用户。
+    ///
+    /// 不说清楚的话，用户会看到中文突然变成宋体点阵、还比拉丁字窄，
+    /// 只会以为是渲染坏了。
+    fn font_note(&self) -> Option<String> {
+        let pack = self.current_font_pack()?;
+        if pack.has_cjk {
+            return None;
+        }
+        Some(self.i18n.t("settings.font.no.cjk"))
     }
 
     pub fn theme(&self) -> Theme {
@@ -607,6 +670,56 @@ pub fn build_rows(model: &Model) -> Vec<Row> {
                 control: Control::Swatches,
             });
             rows.push(choice_row(model, Field::Skin, model.skins.clone()));
+            rows.push(Row {
+                field: Some(Field::FontPack),
+                label: i18n.t("settings.font"),
+                // 缺中文字形时把"说明"换成"警告"：这一条会影响整个界面观感，
+                // 比"怎么导入"重要得多。
+                hint: model
+                    .font_note()
+                    .or_else(|| Some(i18n.t("settings.font.hint"))),
+                control: Control::Choice {
+                    text: model
+                        .fonts
+                        .iter()
+                        .find(|(id, _)| *id == model.config.appearance.font_pack)
+                        .map(|(_, label)| label.clone())
+                        .unwrap_or_else(|| i18n.t("settings.font.system")),
+                },
+            });
+            rows.push(Row {
+                field: None,
+                label: i18n.t("settings.font.family"),
+                hint: None,
+                control: Control::Value {
+                    text: model
+                        .font_family()
+                        .unwrap_or_else(|| i18n.t("settings.font.family.system")),
+                },
+            });
+            for (text_key, action) in [
+                ("settings.font.import", Action::ImportFont),
+                ("settings.font.open.dir", Action::OpenFontsDir),
+            ] {
+                rows.push(Row {
+                    field: None,
+                    label: String::new(),
+                    hint: None,
+                    control: Control::Button {
+                        text: i18n.t(text_key),
+                        action,
+                    },
+                });
+            }
+            rows.push(Row {
+                field: None,
+                label: String::new(),
+                hint: Some(i18n.t("settings.font.delete.hint")),
+                control: Control::Button {
+                    text: i18n.t("settings.font.delete"),
+                    action: Action::DeleteFont,
+                },
+            });
         }
         Tab::Skins => {
             let current = model.skin_index();
@@ -837,6 +950,7 @@ fn current_choice(model: &Model, field: Field) -> String {
         Field::Language => model.config.general.language.clone(),
         Field::Theme => model.config.appearance.theme.clone(),
         Field::Skin => model.config.appearance.skin.clone(),
+        Field::FontPack => model.config.appearance.font_pack.clone(),
         Field::LogLevel => model.config.log.level.clone(),
         _ => String::new(),
     }
@@ -847,6 +961,7 @@ fn choice_options(model: &Model, field: Field) -> Vec<(String, String)> {
         Field::Language => language_options(&model.i18n),
         Field::Theme => theme_options(model),
         Field::Skin => model.skins.clone(),
+        Field::FontPack => model.fonts.clone(),
         Field::LogLevel => log_level_options(),
         _ => Vec::new(),
     }
@@ -1131,6 +1246,9 @@ pub fn activate(model: &mut Model, layout: &Layout, index: usize) -> Vec<ChangeK
             }
             Action::OpenSkinsDir => zouwu_platform::assets::reveal_skins_dir(),
             Action::DeleteSkin => return delete_skin(model),
+            Action::ImportFont => return import_font(model),
+            Action::DeleteFont => return delete_font(model),
+            Action::OpenFontsDir => zouwu_platform::fontpack::reveal_dir(),
             Action::ToggleOverwrite => {
                 model.overwrite_skin = !model.overwrite_skin;
             }
@@ -1253,6 +1371,59 @@ fn delete_skin(model: &mut Model) -> Vec<ChangeKind> {
     }
 }
 
+fn import_font(model: &mut Model) -> Vec<ChangeKind> {
+    let Some(path) = zouwu_platform::dialogs::pick_font_file() else {
+        return Vec::new();
+    };
+    match zouwu_platform::fontpack::import(&path) {
+        Ok(pack) => {
+            // 立刻注册进本进程：不注册的话"换字体"要等下次启动才看得见。
+            let dir = zouwu_platform::fontpack::fonts_dir().join(&pack.id);
+            for file in &pack.files {
+                zouwu_platform::text_gdi::add_font_file(&dir.join(file));
+            }
+            model.config.appearance.font_pack = pack.id.clone();
+            model.refresh_fonts();
+            // 面板自己的字也要立刻换（不然用户在一个旧字体里选新字体，看着像没生效）
+            crate::text::set_family(Some(pack.family));
+            vec![ChangeKind::Appearance]
+        }
+        Err(err) => {
+            zouwu_platform::dialogs::warn(&model.i18n.t("settings.font.import.failed"), &err);
+            Vec::new()
+        }
+    }
+}
+
+fn delete_font(model: &mut Model) -> Vec<ChangeKind> {
+    let id = model.config.appearance.font_pack.clone();
+    if id.is_empty() {
+        return Vec::new();
+    }
+    let Some(pack) = zouwu_platform::fontpack::get(&id) else {
+        return Vec::new();
+    };
+    let question = model.i18n.t_args(
+        "settings.font.delete.confirm",
+        &[("name", pack.display_name())],
+    );
+    if !zouwu_platform::dialogs::confirm(&model.i18n.t("settings.font.delete"), &question) {
+        return Vec::new();
+    }
+    match zouwu_platform::fontpack::delete(&id) {
+        Ok(()) => {
+            model.config.appearance.font_pack = String::new();
+            model.refresh_fonts();
+            crate::text::set_family(None);
+            vec![ChangeKind::Appearance]
+        }
+        Err(err) => {
+            zouwu_platform::dialogs::warn(&model.i18n.t("settings.font.delete.failed"), &err);
+            Vec::new()
+        }
+    }
+}
+
 /// 「装在哪」：便携运行 / 就是安装的那份 / 装过但当前在跑别的副本。
 ///
 /// 三种状态都值得显示：用户从 zip 里双击时看到的应该是"便携运行"，
@@ -1327,6 +1498,7 @@ pub fn step(model: &mut Model, field: Field, dir: i32) -> Vec<ChangeKind> {
         Field::Language => model.config.general.language = value,
         Field::Theme => model.config.appearance.theme = value,
         Field::Skin => model.config.appearance.skin = value,
+        Field::FontPack => model.config.appearance.font_pack = value,
         Field::LogLevel => model.config.log.level = value,
         _ => return Vec::new(),
     }
@@ -1342,7 +1514,7 @@ fn changed(model: &mut Model, field: Field) -> Vec<ChangeKind> {
         }
         Field::Hotkey => kinds.push(ChangeKind::Hotkey),
         Field::StartOnBoot => kinds.push(ChangeKind::Autostart),
-        Field::Theme | Field::Skin => kinds.push(ChangeKind::Appearance),
+        Field::Theme | Field::Skin | Field::FontPack => kinds.push(ChangeKind::Appearance),
         Field::LogLevel | Field::LogToFile => kinds.push(ChangeKind::Log),
         Field::AlwaysOnTop => kinds.push(ChangeKind::WindowLevel),
         Field::WindowSize => kinds.push(ChangeKind::WindowSize),

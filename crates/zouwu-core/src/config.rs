@@ -5,7 +5,7 @@
 use crate::ring::{RingConfig, DEG};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -201,6 +201,12 @@ pub struct Appearance {
     /// 皮肤 id：`procedural`（代码绘制）或
     /// `%APPDATA%/zouwu/skins/<id>/skin.toml` 里声明的 id。
     pub skin: String,
+    /// 字体包 id：空串 = 用系统默认字体（`text_gdi::DEFAULT_FAMILY`），
+    /// 非空时指向 `%APPDATA%/zouwu/fonts/<id>/font.toml` 里声明的 id。
+    ///
+    /// 没选字体包时不去写死一个 id：用户可能一辈子不换字体，
+    /// 而"空 = 系统"让老配置天然等价于"从未设置过"。
+    pub font_pack: String,
 }
 
 impl Default for Appearance {
@@ -208,6 +214,7 @@ impl Default for Appearance {
         Self {
             theme: "zouwu-warm".to_string(),
             skin: crate::skin::PROCEDURAL_SKIN_ID.to_string(),
+            font_pack: String::new(),
         }
     }
 }
@@ -400,6 +407,25 @@ mod tests {
         )
         .expect("parse");
         assert_eq!(cfg.general.language, "auto");
+        assert_eq!(cfg.migrated().schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn v3_config_without_font_pack_uses_the_system_font() {
+        // 老配置（schema 3）里没有 font_pack。它不能被解析成"字体包叫空串"之外的东西，
+        // 而且必须显式等于空串 —— 空串在我们的语义里就是"用系统默认字体"。
+        let cfg = Config::from_toml(
+            r#"
+            schema_version = 3
+            [appearance]
+            theme = "zouwu-dark"
+            skin = "zouwu-ink"
+            "#,
+        )
+        .expect("parse");
+        assert_eq!(cfg.appearance.theme, "zouwu-dark");
+        assert_eq!(cfg.appearance.skin, "zouwu-ink");
+        assert!(cfg.appearance.font_pack.is_empty());
         assert_eq!(cfg.migrated().schema_version, SCHEMA_VERSION);
     }
 

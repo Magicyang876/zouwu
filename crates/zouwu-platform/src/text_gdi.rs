@@ -142,7 +142,13 @@ extern "system" {
     fn TextOutW(hdc: Hdc, x: i32, y: i32, string: *const u16, count: i32) -> Bool;
     fn GetTextExtentPoint32W(hdc: Hdc, string: *const u16, count: i32, size: *mut Size) -> Bool;
     fn GetTextMetricsW(hdc: Hdc, metrics: *mut TextMetricW) -> Bool;
+    /// 把字体文件注册给本进程（`FR_PRIVATE`）：不写注册表、不改系统设置，
+    /// 进程退出即失效。用户"导入一个字体包"就是往这儿喂一个文件。
+    fn AddFontResourceExW(name: *const u16, flags: u32, reserved: *mut c_void) -> i32;
 }
+
+/// `AddFontResourceExW` 的标志：只对本进程可见，且不污染系统字体列表。
+const FR_PRIVATE: u32 = 0x10;
 
 #[link(name = "user32")]
 extern "system" {
@@ -251,6 +257,59 @@ pub struct Metrics {
     pub ascent: f32,
     pub descent: f32,
     pub line_height: f32,
+}
+
+/// 没选自定义字体时用的家族。选它是因为它自带中文与西文回退，
+/// 且从 Win7 起就随系统存在 —— 我们不需要随包带字体文件。
+pub const DEFAULT_FAMILY: &str = "Microsoft YaHei UI";
+
+/// 注册一个字体文件（进程私有）。返回系统是否接受了它。
+///
+/// 注意：注册成功**不代表**字体家族是我们猜的那个名字，所以调用方应该
+/// 用 [`zouwu_platform::fontfile`] 从文件里读家族名，而不是靠枚举差集。
+pub fn add_font_file(path: &std::path::Path) -> bool {
+    let Some(text) = path.to_str() else {
+        return false;
+    };
+    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let added = unsafe { AddFontResourceExW(wide.as_ptr(), FR_PRIVATE, std::ptr::null_mut()) };
+    if added > 0 {
+        log::info!("font registered: {} ({added} face(s))", path.display());
+        true
+    } else {
+        log::warn!("font rejected by the system: {}", path.display());
+        false
+    }
+}
+
+/// 当前使用的字体家族（`None` = 系统默认）。
+pub fn family() -> Option<String> {
+    with_gdi(|gdi| gdi.family.clone()).flatten()
+}
+
+/// 切换字体家族。返回是否真的变了。
+///
+/// 换家族必须清掉字体与宽度缓存 —— 缓存键里只有 (px, bold)，
+/// 家族换了而键不变的话，我们会拿旧字体的度量去排版新字体。
+pub fn set_family(family: Option<String>) -> bool {
+    let target = family.filter(|f| !f.trim().is_empty());
+    let changed = with_gdi(|gdi| {
+        if gdi.family == target {
+            return false;
+        }
+        gdi.family = target.clone();
+        gdi.fonts.clear();
+        gdi.widths.clear();
+        true
+    })
+    .unwrap_or(false);
+    if changed {
+        match &target {
+            Some(f) => log::info!("font family -> {f}"),
+            None => log::info!("font family -> system default ({DEFAULT_FAMILY})"),
+        }
+    }
+    changed
 }
 
 /// 单行文本的浮点像素宽度（已含 GDI 的进位取整）。
@@ -394,6 +453,8 @@ struct Gdi {
     fonts: HashMap<(u16, bool), (Hfont, f32, f32, f32)>,
     /// 文本宽度缓存：面板一帧要量几十次同样的字符串。
     widths: HashMap<(String, u16, bool), f32>,
+    /// 当前家族（`None` = `DEFAULT_FAMILY`）。
+    family: Option<String>,
 }
 
 // 同上：HFONT 也是进程级 GDI 对象，访问全在锁内。
@@ -416,6 +477,7 @@ impl Gdi {
             scratch,
             fonts: HashMap::new(),
             widths: HashMap::new(),
+            family: None,
         })
     }
 
@@ -424,7 +486,8 @@ impl Gdi {
         if let Some(entry) = self.fonts.get(&key) {
             return Some(*entry);
         }
-        let face: Vec<u16> = "Microsoft YaHei UI\0".encode_utf16().collect();
+        let family = self.family.as_deref().unwrap_or(DEFAULT_FAMILY);
+        let face: Vec<u16> = family.encode_utf16().chain(std::iter::once(0)).collect();
         let height = -(px.round() as i32).max(1);
         let font = unsafe {
             CreateFontW(
@@ -508,6 +571,17 @@ impl Gdi {
 mod tests {
     use super::*;
 
+    /// 字体家族是**进程级全局状态**，而 `cargo test` 默认多线程跑。
+    ///
+    /// 没有这把锁时，一个测试正在断言"Consolas 的 i 和 M 等宽"，
+    /// 另一个测试刚好 `set_family(None)`，断言就会莫名其妙地失败 ——
+    /// 实测撞到过一次（同一份代码重跑即通过）。测试要确定性，就得自己串行。
+    static FONT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock() -> std::sync::MutexGuard<'static, ()> {
+        FONT_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     const W: usize = 800;
     const H: usize = 200;
 
@@ -545,6 +619,54 @@ mod tests {
         (x0, y0, x1, y1)
     }
 
+    /// 换家族必须真的换字形，而且换回来要能换回去。
+    ///
+    /// 判据用等宽字体当探针：Consolas 里 `i` 和 `M` 一样宽，比例字体里差好几倍。
+    /// 只看"宽度变了"不够 —— 缓存没清、字体没换都可能凑巧宽度不同，
+    /// 所以两侧都比。
+    #[test]
+    fn switching_family_changes_glyph_widths() {
+        let _guard = lock();
+        let default_probe = {
+            set_family(None);
+            (measure("iiii", 20.0, false), measure("MMMM", 20.0, false))
+        };
+        if !set_family(Some("Consolas".to_string())) {
+            eprintln!("Consolas not available, skipping");
+            return;
+        }
+        let mono_probe = (measure("iiii", 20.0, false), measure("MMMM", 20.0, false));
+        set_family(None);
+        let back = (measure("iiii", 20.0, false), measure("MMMM", 20.0, false));
+
+        assert!(
+            (mono_probe.0 - mono_probe.1).abs() < 0.5,
+            "Consolas 应该是等宽：i={} M={}",
+            mono_probe.0,
+            mono_probe.1
+        );
+        assert!(
+            (default_probe.0 - default_probe.1).abs() > 2.0,
+            "默认字体应该是比例字体：i={} M={}",
+            default_probe.0,
+            default_probe.1
+        );
+        assert_eq!(back.0, default_probe.0, "换回默认字体后度量必须复原");
+        assert_eq!(back.1, default_probe.1);
+    }
+
+    /// 注册字体文件要说真话：坏文件必须返回 false，不能假装成功。
+    #[test]
+    fn add_font_file_rejects_garbage() {
+        let _guard = lock();
+        let dir = std::env::temp_dir().join("zouwu-font-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let bogus = dir.join("not-a-font.ttf");
+        std::fs::write(&bogus, b"definitely not a font").expect("write");
+        assert!(!add_font_file(&bogus));
+        assert!(!add_font_file(&dir.join("missing.ttf")));
+    }
+
     /// 一笔绘制的结果不能取决于"上一笔是多大字号"。
     ///
     /// 守的是一个隐式假设：`draw_with` 曾经不自己 `SelectObject`，而是指望
@@ -558,6 +680,7 @@ mod tests {
     /// 所以这条测试确实能抓住它（缓冲区裁剪会让"墨迹右边界"看不出来，别用那个）。
     #[test]
     fn output_does_not_depend_on_the_previous_draw() {
+        let _guard = lock();
         let text = "国";
         let prime = |px: f32| {
             let _ = render(text, px);
@@ -581,6 +704,7 @@ mod tests {
     /// 墨迹宽度必须与 `measure` 相称（防"字号没生效"这类退化）。
     #[test]
     fn ink_width_tracks_measure_across_sizes() {
+        let _guard = lock();
         let text = "打开配置文件";
         for px in [12.0f32, 14.0, 18.0, 24.0] {
             let (x0, _, x1, _) = bbox(&render(text, px));

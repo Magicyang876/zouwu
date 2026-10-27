@@ -75,7 +75,9 @@ impl SettingsWindow {
             config: zouwu_platform::config_path().display().to_string(),
             log: zouwu_platform::logging::log_path().display().to_string(),
         };
-        let model = Model::new(config, themes, skins, paths);
+        let mut model = Model::new(config, themes, skins, paths);
+        // 字体包列表从磁盘扫（`Model::new` 不碰磁盘，测试才好写）。
+        model.refresh_fonts();
         window.set_title(&model.i18n.t("settings.title"));
         // 面板是暗色的，白标题栏很扎眼：让 DWM 一起变暗（失败也无所谓）。
         if let Ok(handle) = window.window_handle() {

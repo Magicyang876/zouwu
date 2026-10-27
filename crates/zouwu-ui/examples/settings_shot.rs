@@ -25,8 +25,20 @@ fn main() -> Result<(), String> {
     // 否则这个示例验收的是"假图"，而假图永远不会和桌面上的小兽不一样。
     let themes = vec![Theme::by_name("zouwu-warm"), Theme::by_name("zouwu-dark")];
     let _ = zouwu_platform::assets::ensure_builtin_skins();
+    // 字体包：先注册磁盘上已有的包，再把配置里选中的那套装上。
+    // 面板全是文字，字体这一层看不见就等于没验收。
+    zouwu_platform::fontpack::register_all();
     let mut config = Config::default();
     config.general.language = "zh-CN".into();
+    if let Ok(pack_id) = std::env::var("ZOUWU_FONT") {
+        if let Some(pack) = zouwu_platform::fontpack::get(pack_id.trim()) {
+            zouwu_ui::text::set_family(Some(pack.family.clone()));
+            config.appearance.font_pack = pack.id.clone();
+            eprintln!("font pack: {} ({})", pack.display_name(), pack.family);
+        } else {
+            eprintln!("no such font pack: {pack_id}");
+        }
+    }
     let skins = zouwu_platform::assets::skin_choices(&zouwu_core::i18n::I18n::new(
         &config.general.language,
     ));
@@ -47,6 +59,7 @@ fn main() -> Result<(), String> {
                 log: r"C:\Users\you\AppData\Roaming\zouwu\logs\zouwu.log".into(),
             },
         );
+        model.refresh_fonts();
         model.set_tab(tab);
         // 键盘焦点 + 悬停各演示一行，方便看选中/悬停态。
         model.keyboard_used = true;

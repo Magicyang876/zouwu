@@ -10,6 +10,22 @@ pub struct Metrics {
     pub line_height: f32,
 }
 
+/// 与 Windows 后端同名同义：系统默认字体的家族名。
+pub const DEFAULT_FAMILY: &str = "system";
+
+/// 占位实现不加载字体文件（mac/Linux 接 CoreText/Pango 时再实现）。
+pub fn add_font_file(_path: &std::path::Path) -> bool {
+    false
+}
+
+pub fn family() -> Option<String> {
+    None
+}
+
+pub fn set_family(family: Option<String>) -> bool {
+    family.is_some()
+}
+
 pub fn measure(text: &str, px: f32, _bold: bool) -> f32 {
     text.chars().count() as f32 * px * 0.55
 }

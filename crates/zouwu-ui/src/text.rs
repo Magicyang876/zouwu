@@ -15,6 +15,20 @@ use zouwu_core::theme::Rgba;
 
 use zouwu_platform::text_gdi as backend;
 
+/// 当前用的字体家族（`None` = 平台默认字体）。
+pub fn family() -> Option<String> {
+    backend::family()
+}
+
+/// 换字体家族。返回 `true` 表示真的换了 —— 调用方据此重排/重绘。
+///
+/// 只认**已经注册进本进程**的家族名（见 `zouwu_platform::fontpack::register_all`）。
+/// 传一个系统里不存在的名字不会报错：GDI 会静默替换成别的字体，
+/// 所以这里只能把"我们以为的设置"和"实际用的字体"对齐到家族名这一层。
+pub fn set_family(family: Option<String>) -> bool {
+    backend::set_family(family)
+}
+
 /// 文本引擎。字体资源在平台层是全局单例，这里只是一个零成本的门面。
 pub struct TextEngine {
     /// 预留给将来的字形缓存/排版配置。

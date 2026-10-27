@@ -33,6 +33,9 @@ pub const ID_SKIN_PREFIX: &str = "zouwu.skin.";
 /// `strip_prefix` 当成"皮肤 id 叫 import"。
 pub const ID_SKIN_IMPORT: &str = "zouwu.skin-import";
 pub const ID_SKIN_EXPORT: &str = "zouwu.skin-export";
+/// 打开字体目录。字体包的选择放在设置面板里（那里能看见实际效果），
+/// 托盘只留一个"把目录翻出来"的入口 —— 用户想自己塞字体进去时不至于找不着路。
+pub const ID_FONT_DIR: &str = "zouwu.font-dir";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TrayCommand {
@@ -44,6 +47,8 @@ pub enum TrayCommand {
     OpenConfigDir,
     /// 打开日志目录。
     OpenLogs,
+    /// 打开字体目录。
+    OpenFontsDir,
     /// 把小工具搬回主屏。存在的理由很具体：多屏拔掉之后，
     /// 旧坐标落在不存在的桌面上，用户看不见、也拖不到它。
     Recenter,
@@ -80,6 +85,7 @@ struct Items {
     skins: Vec<(String, CheckMenuItem)>,
     skin_import: MenuItem,
     skin_export: MenuItem,
+    font_dir: MenuItem,
 }
 
 /// `Tray::new` 的其余入参。
@@ -204,6 +210,8 @@ impl Tray {
                 .map_err(|err| format!("menu append failed: {err}"))?;
         }
 
+        let font_dir = MenuItem::with_id(ID_FONT_DIR, i18n.t("tray.font-dir"), true, None);
+
         let menu = Menu::new();
         menu.append_items(&[
             &show_hide,
@@ -212,6 +220,7 @@ impl Tray {
             &PredefinedMenuItem::separator(),
             &config_dir,
             &open_logs,
+            &font_dir,
             &PredefinedMenuItem::separator(),
             &autostart_item,
             &language_menu,
@@ -261,6 +270,7 @@ impl Tray {
                 skins: skin_items,
                 skin_import,
                 skin_export,
+                font_dir,
             },
         })
     }
@@ -308,6 +318,7 @@ impl Tray {
         self.items.settings.set_text(i18n.t("tray.settings"));
         self.items.config_dir.set_text(i18n.t("tray.config"));
         self.items.open_logs.set_text(i18n.t("tray.open-logs"));
+        self.items.font_dir.set_text(i18n.t("tray.font-dir"));
         self.items.autostart.set_text(i18n.t("tray.autostart"));
         self.items.quit.set_text(i18n.t("tray.quit"));
         self.items.language_menu.set_text(i18n.t("tray.language"));
@@ -363,6 +374,9 @@ impl Tray {
         }
         if id == ID_RECENTER {
             return Some(TrayCommand::Recenter);
+        }
+        if id == ID_FONT_DIR {
+            return Some(TrayCommand::OpenFontsDir);
         }
         if id == ID_AUTOSTART {
             return Some(TrayCommand::SetAutostart(self.items.autostart.is_checked()));
