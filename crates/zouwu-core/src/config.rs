@@ -45,10 +45,29 @@ pub struct Interaction {
     pub collapse_delay_ms: u64,
     /// 点击小兽是否立即展开（绕过延时）。
     pub expand_on_click: bool,
-    /// 指针在"小兽半径 × 该系数"以内视为仍在身上，不收起。
+    /// **悬停热区**：指针在"小兽半径 × 该系数"以内算"正摸着小兽"，
+    /// 才开始累计 `hover_delay_ms`。只管"要不要展开"，与收起无关。
+    pub hover_radius_factor: f32,
+    /// **收起边界**：环带外沿 = "(环半径 + 气泡直径) × 该系数"，
+    /// 指针越过这条线并持续 `collapse_delay_ms` 才收起。只管"要不要收起"。
+    ///
+    /// 早先这一个系数同时管两件事，于是调它必然顾此失彼：调大让气泡好点，
+    /// 却把悬停热区撑成两倍大；调小反之。这是两个独立的问题，就该有两个旋钮。
     pub collapse_radius_factor: f32,
     /// 命中容差（气泡半径的倍数）。
     pub hit_tolerance: f32,
+}
+
+impl Interaction {
+    /// 悬停热区半径（逻辑像素）：超过它就不再算"摸着小兽"。
+    pub fn hover_radius(&self, buddy_radius: f32) -> f32 {
+        buddy_radius * self.hover_radius_factor
+    }
+
+    /// 收起边界半径（逻辑像素，未考虑窗口可达范围）。
+    pub fn collapse_radius(&self, ring_radius: f32, bubble_radius: f32) -> f32 {
+        (ring_radius + bubble_radius * 2.0) * self.collapse_radius_factor
+    }
 }
 
 impl Default for Interaction {
@@ -57,6 +76,7 @@ impl Default for Interaction {
             hover_delay_ms: 150,
             collapse_delay_ms: 250,
             expand_on_click: true,
+            hover_radius_factor: 1.1,
             collapse_radius_factor: 1.1,
             hit_tolerance: 1.15,
         }
@@ -479,5 +499,38 @@ language = \"en-US\"
     fn ring_cfg_converts_degrees() {
         let rc = RingCfg::default().to_ring_config();
         assert!((rc.orbit_start + std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn hover_and_collapse_radius_are_independent() {
+        let i = Interaction::default();
+        // 悬停只看本体：56 × 1.1 = 61.6
+        assert!((i.hover_radius(56.0) - 61.6).abs() < 1e-4);
+        // 收起只看环带外沿：(112 + 24*2) × 1.1 = 176
+        assert!((i.collapse_radius(112.0, 24.0) - 176.0).abs() < 1e-4);
+
+        // 调大悬停热区不该把收起边界也放大
+        let wider_hover = Interaction {
+            hover_radius_factor: 2.0,
+            ..Default::default()
+        };
+        assert!((wider_hover.hover_radius(56.0) - 112.0).abs() < 1e-4);
+        assert!((wider_hover.collapse_radius(112.0, 24.0) - 176.0).abs() < 1e-4);
+
+        // 调大收起边界也不该影响悬停热区
+        let wider_band = Interaction {
+            collapse_radius_factor: 1.5,
+            ..Default::default()
+        };
+        assert!((wider_band.collapse_radius(112.0, 24.0) - 240.0).abs() < 1e-4);
+        assert!((wider_band.hover_radius(56.0) - 61.6).abs() < 1e-4);
+    }
+
+    #[test]
+    fn old_config_without_hover_factor_still_loads() {
+        // 旧配置里只有 collapse_radius_factor，新字段靠 serde default 补 1.1。
+        let cfg = Config::from_toml("[interaction]\ncollapse_radius_factor = 1.4\n").unwrap();
+        assert!((cfg.interaction.collapse_radius_factor - 1.4).abs() < 1e-6);
+        assert!((cfg.interaction.hover_radius_factor - 1.1).abs() < 1e-6);
     }
 }

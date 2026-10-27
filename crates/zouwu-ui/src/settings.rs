@@ -70,6 +70,7 @@ pub enum Field {
     HoverDelay,
     CollapseDelay,
     ExpandOnClick,
+    HoverFactor,
     CollapseFactor,
     HitTolerance,
     BuddyRadius,
@@ -112,6 +113,7 @@ impl Field {
             Field::HoverDelay => "settings.hover-delay",
             Field::CollapseDelay => "settings.collapse-delay",
             Field::ExpandOnClick => "settings.expand-on-click",
+            Field::HoverFactor => "settings.hover-factor",
             Field::CollapseFactor => "settings.collapse-factor",
             Field::HitTolerance => "settings.hit-tolerance",
             Field::BuddyRadius => "settings.buddy-radius",
@@ -147,6 +149,12 @@ impl Field {
                 max: 520,
                 step: 20,
                 unit: Unit::Px,
+            },
+            Field::HoverFactor => NumSpec {
+                min: 100,
+                max: 250,
+                step: 5,
+                unit: Unit::Percent,
             },
             Field::CollapseFactor => NumSpec {
                 min: 100,
@@ -200,6 +208,7 @@ impl Field {
             Field::HoverDelay => cfg.interaction.hover_delay_ms as i64,
             Field::CollapseDelay => cfg.interaction.collapse_delay_ms as i64,
             Field::WindowSize => cfg.window.size.round() as i64,
+            Field::HoverFactor => (cfg.interaction.hover_radius_factor * 100.0).round() as i64,
             Field::CollapseFactor => {
                 (cfg.interaction.collapse_radius_factor * 100.0).round() as i64
             }
@@ -219,6 +228,7 @@ impl Field {
             Field::HoverDelay => cfg.interaction.hover_delay_ms = v.max(0) as u64,
             Field::CollapseDelay => cfg.interaction.collapse_delay_ms = v.max(0) as u64,
             Field::WindowSize => cfg.window.size = v as f32,
+            Field::HoverFactor => cfg.interaction.hover_radius_factor = v as f32 / 100.0,
             Field::CollapseFactor => cfg.interaction.collapse_radius_factor = v as f32 / 100.0,
             Field::HitTolerance => cfg.interaction.hit_tolerance = v as f32 / 100.0,
             Field::BuddyRadius => cfg.buddy.radius = v as f32,
@@ -430,6 +440,7 @@ pub fn build_rows(model: &Model) -> Vec<Row> {
             rows.push(step_row(model, Field::HoverDelay));
             rows.push(step_row(model, Field::CollapseDelay));
             rows.push(toggle_row(model, Field::ExpandOnClick));
+            rows.push(step_row(model, Field::HoverFactor));
             rows.push(step_row(model, Field::CollapseFactor));
             rows.push(step_row(model, Field::HitTolerance));
             rows.push(Row::section(i18n.t("settings.section.beast")));

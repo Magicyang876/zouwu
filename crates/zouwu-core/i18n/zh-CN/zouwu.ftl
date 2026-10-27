@@ -50,7 +50,8 @@ settings-show-on-start = 启动时显示
 settings-bring-to-front = 呼出时置于最前
 
 settings-hover-delay = 悬停展开延迟
-settings-collapse-factor = 收起距离（小兽半径的倍数）
+settings-hover-factor = 悬停热区（小兽半径的倍数）
+settings-collapse-factor = 收起距离（环半径的倍数）
 settings-expand-on-click = 点击立即展开
 settings-hit-tolerance = 气泡命中容差
 settings-buddy-radius = 小兽大小

@@ -50,7 +50,8 @@ settings-show-on-start = Show on launch
 settings-bring-to-front = Bring to front on summon
 
 settings-hover-delay = Hover delay before unfolding
-settings-collapse-factor = Collapse distance (× body radius)
+settings-hover-factor = Hover hot zone (× body radius)
+settings-collapse-factor = Collapse distance (× ring radius)
 settings-expand-on-click = Click unfolds immediately
 settings-hit-tolerance = Bubble hit tolerance
 settings-buddy-radius = Beast size

@@ -61,7 +61,10 @@ pub fn run() -> Result<(), String> {
         std::env::consts::ARCH
     );
 
-    let instance = InstanceSignal::acquire("zouwu")?;
+    // `ZOUWU_INSTANCE` 让并行的调试实例不与正式实例互相"叫醒"：
+    // 单实例守卫按名字区分，换个名字就能同时开两只驺吾。
+    let instance_id = std::env::var("ZOUWU_INSTANCE").unwrap_or_else(|_| "zouwu".into());
+    let instance = InstanceSignal::acquire(&instance_id)?;
     let Some(instance) = instance else {
         log::info!("another zouwu is running; asked it to show up");
         return Ok(());
@@ -130,6 +133,9 @@ struct App {
     cursor: Option<Point>,
     /// 光标进入小工具的时刻（悬停计时起点）
     hover_since: Option<Instant>,
+    /// 光标「离开环带」的起始时刻。收起不是瞬时的：要连续远离 `collapse_delay_ms`
+    /// 才真的收，否则手从本体划向气泡的半路上就会被判死亡。
+    far_since: Option<Instant>,
     /// 用户意图：展开 / 收起
     expanded: bool,
     /// 展开动画起点（用于气泡逐个延迟出场）
@@ -259,6 +265,7 @@ impl App {
             pixmap: None,
             cursor: None,
             hover_since: None,
+            far_since: None,
             expanded: false,
             expand_started: None,
             ring,
@@ -845,6 +852,30 @@ impl App {
         self.dirty = true;
     }
 
+    /// 收起判定的半径上限。
+    ///
+    /// 必须比「气泡外沿」再留出余量：光标指到最外侧气泡时距离已经是 `radius`，
+    /// 气泡自己还有 `bubble_radius` 的直径。判定线贴着气泡画，就会"明明指着
+    /// 气泡却被判为离开"——这正是之前"一移动就收起"的根因。
+    fn collapse_limit(&self) -> f32 {
+        // 光标指到最外侧气泡时距离已经是 `radius`，气泡自身还有直径；
+        // 判定线贴着气泡边缘画，就会"明明指着气泡却被判为离开"。
+        let outer = self
+            .config
+            .interaction
+            .collapse_radius(self.ring.radius, self.ring.bubble_radius);
+        // 但窗口本身是有限的：判定半径不该超过窗口对角线的一半太多，
+        // 否则光标早已在窗口外，判定却还说"没走"。
+        let (w, h) = self.logical_size();
+        let reachable = (w * w + h * h).sqrt() * 0.5;
+        outer.min(reachable)
+    }
+
+    /// 收起延迟（`config.toml` 的 `collapse_delay_ms`，默认 250ms）。
+    fn collapse_delay(&self) -> Duration {
+        Duration::from_millis(self.config.interaction.collapse_delay_ms)
+    }
+
     fn hover_delay(&self) -> Duration {
         Duration::from_millis(self.config.interaction.hover_delay_ms)
     }
@@ -911,19 +942,31 @@ impl App {
             }
         }
 
-        // 4) 收起判定：光标远离整圈
+        // 4) 收起判定：光标远离整圈，且**持续**远离到 `collapse_delay_ms` 才收
         if self.expanded {
-            let far = match self.cursor {
-                None => true,
-                Some(p) => {
-                    let center = self.center();
-                    let limit = self.ring.radius + self.ring.bubble_radius * 2.0;
-                    p.distance(center) > limit * self.config.interaction.collapse_radius_factor
+            let center = self.center();
+            let limit = self.collapse_limit();
+            let dist = self.cursor.map(|p| p.distance(center));
+            // MSRV 1.80：`is_none_or` 是 1.82 才稳定的
+            if dist.map_or(true, |d| d > limit) {
+                // 第一次判定"远了"只记时间，不收：给手一点穿过空隙的余量。
+                let since = *self.far_since.get_or_insert(now);
+                if now.duration_since(since) >= self.collapse_delay() {
+                    log::debug!(
+                        "collapse: far for {}ms (cursor={:?} dist={:?} limit={:.1})",
+                        now.duration_since(since).as_millis(),
+                        self.cursor,
+                        dist,
+                        limit
+                    );
+                    self.far_since = None;
+                    self.set_expanded(false, now);
                 }
-            };
-            if far {
-                self.set_expanded(false, now);
+            } else {
+                self.far_since = None;
             }
+        } else {
+            self.far_since = None;
         }
     }
 
@@ -1033,6 +1076,12 @@ impl App {
                 consider(since + self.hover_delay());
             }
         }
+        // 已经判定"远了"，等 collapse_delay 到点收起：不排这个闹钟就会永远展开。
+        if self.expanded {
+            if let Some(since) = self.far_since {
+                consider(since + self.collapse_delay());
+            }
+        }
         // 有东西在动（弹簧 / 气泡出场 / 眨眼 / 呼吸）→ 排下一帧
         if self.needs_render(now) {
             consider(self.last_frame + self.frame_interval(now));
@@ -1081,8 +1130,12 @@ impl App {
         self.relayout();
 
         let center = self.center();
+        // 悬停热区：只看本体大小，与环带宽度无关（`hover_radius_factor`）。
         let inside_buddy = logical.distance(center)
-            <= self.config.buddy.radius * self.config.interaction.collapse_radius_factor;
+            <= self
+                .config
+                .interaction
+                .hover_radius(self.config.buddy.radius);
 
         let new_hover = self.hover_test(logical);
         if new_hover != self.hovered_bubble {
@@ -1195,6 +1248,11 @@ impl App {
 
         if !inside {
             if self.cursor.is_some() {
+                log::debug!(
+                    "cursor outside: screen {sx},{sy} origin {:?} size {w}x{h} scale {scale} local {:?}",
+                    (origin.x, origin.y),
+                    (local.x, local.y)
+                );
                 self.on_cursor_left();
             }
             self.buttons_down = (left, right);
@@ -1542,7 +1600,10 @@ impl ApplicationHandler for App {
                 self.on_cursor_moved(p, now);
             }
             WindowEvent::CursorLeft { .. } => {
-                self.on_cursor_left();
+                // 分层窗口（尤其是 `UpdateLayeredWindow` 之后）会**误报** CursorLeft：
+                // 实测刚展开就收到一个，然后把光标当成消失了 → 立刻收起 → 气泡永远点不到。
+                // 所以这里只把它当成"现在值得复核一下"，真假交给 16ms 的光标轮询判断。
+                self.next_poll = now;
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if state == ElementState::Pressed {
