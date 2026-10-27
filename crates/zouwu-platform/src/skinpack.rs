@@ -260,6 +260,24 @@ pub fn import(path: &Path) -> Result<String, String> {
     Ok(manifest.id)
 }
 
+/// 删除一套已安装皮肤。
+///
+/// 只删 `skins/` 下面那一层目录（先按 `is_plain_name` 挡掉 `../`），
+/// 而且**拒绝删 procedural**：它不是目录。
+pub fn delete(id: &str) -> Result<(), String> {
+    if id == zouwu_core::skin::PROCEDURAL_SKIN_ID {
+        return Err("the procedural skin is not a folder and cannot be deleted".into());
+    }
+    if !is_plain_name(id) {
+        return Err(format!("skin id `{id}` is not a plain folder name"));
+    }
+    let dir = assets::skins_dir().join(id);
+    if !dir.is_dir() {
+        return Err(format!("{}: not installed", dir.display()));
+    }
+    fs::remove_dir_all(&dir).map_err(|err| format!("remove {}: {err}", dir.display()))
+}
+
 /// `SkinPackage` → `.zwskin` 字节（示例与导出共用）。
 pub fn encode_package(package: &SkinPackage) -> Result<Vec<u8>, String> {
     encode(&package.manifest.to_toml(), &package.images)

@@ -95,6 +95,19 @@ pub fn exports_dir() -> PathBuf {
     crate::config_dir().join("exports")
 }
 
+/// 在资源管理器里打开 `skins/`。目录不存在时先建一个空的。
+pub fn reveal_skins_dir() {
+    let dir = skins_dir();
+    if let Err(err) = fs::create_dir_all(&dir) {
+        log::warn!("cannot create {}: {err}", dir.display());
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    crate::autostart::open_path(&dir);
+    #[cfg(not(target_os = "windows"))]
+    log::info!("skins dir: {}", dir.display());
+}
+
 /// 随程序发布的官方皮肤（内嵌进二进制）。
 ///
 /// 为什么内嵌而不直接读 `assets/`：发布版是单个 exe，没有 `assets` 目录；

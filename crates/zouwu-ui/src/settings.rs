@@ -18,7 +18,10 @@ use zouwu_core::hotkey::{Hotkey, HotkeyError};
 use zouwu_core::i18n::{I18n, AUTO, LANGUAGES};
 use zouwu_core::theme::{Rgba, Theme};
 
+use crate::skin::Skin;
+use crate::thumb::{self, Thumb};
 use crate::widget::{Painter, Rect, Weight};
+use zouwu_core::skin::PROCEDURAL_SKIN_ID;
 
 /// 面板的逻辑初始尺寸。宽度刻意刚好放下"长标签 + 控件"两列。
 pub const DEFAULT_SIZE: (f32, f32) = (760.0, 600.0);
@@ -32,6 +35,16 @@ const SECTION_H: f32 = 34.0;
 const TEXT_ROW_H: f32 = 34.0;
 const CONTROL_W: f32 = 210.0;
 const BUTTON_W: f32 = 170.0;
+/// 缩略图格子的间距。
+const GALLERY_GAP: f32 = 12.0;
+/// 一个缩略图格子（含底下的名字）的高度。
+const GALLERY_CELL_H: f32 = 104.0;
+/// 名义列数：只用来估算"要几行"，真实列数在 `gallery_geom` 里按宽度算。
+/// 取 5 是因为默认 760 宽的窗口扣掉边距正好放 5 个 132px 的格子。
+const GALLERY_COLS_NOMINAL: usize = 5;
+/// 缩略图墙最多显示几行。更多皮肤请去托盘菜单选：
+/// 一个设置页里堆三行以上的皮肤墙，没人会往下滚。
+const GALLERY_MAX_ROWS: usize = 2;
 
 // ── 标签页 ────────────────────────────────────────────────
 
@@ -40,17 +53,25 @@ pub enum Tab {
     General,
     Interaction,
     Appearance,
+    Skins,
     About,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Tab::General, Tab::Interaction, Tab::Appearance, Tab::About];
+    pub const ALL: [Tab; 5] = [
+        Tab::General,
+        Tab::Interaction,
+        Tab::Appearance,
+        Tab::Skins,
+        Tab::About,
+    ];
 
     pub fn key(self) -> &'static str {
         match self {
             Tab::General => "settings.tab.general",
             Tab::Interaction => "settings.tab.interaction",
             Tab::Appearance => "settings.tab.appearance",
+            Tab::Skins => "settings.tab.skins",
             Tab::About => "settings.tab.about",
         }
     }
@@ -289,6 +310,12 @@ pub enum Control {
     },
     /// 主题色板（只读装饰）。
     Swatches,
+    /// 皮肤缩略图网格。`selected`/`hover` 是 `Model::skins` 的下标。
+    Gallery {
+        count: usize,
+        selected: Option<usize>,
+        hover: Option<usize>,
+    },
     Section {
         text: String,
     },
@@ -299,6 +326,14 @@ pub enum Action {
     OpenConfig,
     OpenLogs,
     Reset,
+    /// 从 `.zwskin` 导入（会弹系统文件对话框）。
+    ImportSkin,
+    /// 把当前皮肤导出成 `.zwskin`。
+    ExportSkin,
+    /// 在资源管理器里打开 `skins/`。
+    OpenSkinsDir,
+    /// 删掉当前这套皮肤。
+    DeleteSkin,
 }
 
 #[derive(Clone, Debug)]
@@ -327,6 +362,13 @@ impl Row {
         match self.control {
             Control::Section { .. } => SECTION_H,
             Control::Value { .. } | Control::Swatches => TEXT_ROW_H,
+            // 按**实际**行数给高度：只装一套皮肤时不该留两行的空白。
+            Control::Gallery { count, .. } => {
+                let rows = count
+                    .div_ceil(GALLERY_COLS_NOMINAL)
+                    .clamp(1, GALLERY_MAX_ROWS);
+                GALLERY_CELL_H * rows as f32 + GALLERY_GAP * (rows - 1) as f32 + 12.0
+            }
             _ => ROW_H,
         }
     }
@@ -350,6 +392,12 @@ pub struct Model {
     pub capturing: bool,
     pub notice: Option<String>,
     pub i18n: I18n,
+    /// 形象页的缩略图缓存，下标与 `skins` 对齐。`None` = 这套皮肤打不开。
+    pub thumbs: Vec<Option<Thumb>>,
+    /// 鼠标悬停在第几个缩略图上（仅视觉反馈）。
+    pub hover_skin: Option<usize>,
+    /// 缩略图缓存键：主题或皮肤列表变了才重算。
+    thumbs_key: String,
 }
 
 /// 面板要展示的路径（关于页）。用 `String` 是为了在这里就能截断。
@@ -379,6 +427,9 @@ impl Model {
             capturing: false,
             notice: None,
             i18n,
+            thumbs: Vec::new(),
+            hover_skin: None,
+            thumbs_key: String::new(),
         }
     }
 
@@ -398,7 +449,56 @@ impl Model {
             self.scroll = 0.0;
             self.focus = None;
             self.capturing = false;
+            self.hover = None;
+            self.hover_skin = None;
         }
+    }
+
+    /// 当前皮肤在 `skins` 里的下标（找不到 → `None`，例如被手工删掉了）。
+    pub fn skin_index(&self) -> Option<usize> {
+        self.skins
+            .iter()
+            .position(|(id, _)| *id == self.config.appearance.skin)
+    }
+
+    /// 重新扫描磁盘上的皮肤。导入/删除之后必须调，否则列表还是旧的。
+    pub fn refresh_skins(&mut self) {
+        self.skins = zouwu_platform::assets::skin_choices(&self.i18n);
+        self.thumbs_key.clear();
+        self.hover_skin = None;
+    }
+
+    /// 懒加载缩略图。
+    ///
+    /// 只在主题或皮肤数量变化时重算：一套皮肤要解码 PNG + 走一遍主渲染管线，
+    /// 每帧都做的话这个面板的 CPU 会从 0% 变成几十。
+    pub fn ensure_thumbs(&mut self) {
+        let key = format!("{}:{}", self.config.appearance.theme, self.skins.len());
+        if key == self.thumbs_key && self.thumbs.len() == self.skins.len() {
+            return;
+        }
+        let theme = self.theme();
+        self.thumbs = self
+            .skins
+            .iter()
+            .map(|(id, _)| {
+                let procedural = id == PROCEDURAL_SKIN_ID;
+                let skin = if procedural {
+                    None
+                } else {
+                    zouwu_platform::assets::load_skin(id)
+                        .ok()
+                        .and_then(|pkg| Skin::decode(&pkg).ok())
+                };
+                // 素材皮肤打不开时**不给**缩略图（界面画成"打不开"），
+                // 而不是退回代码绘制——那会让坏皮肤看起来是好的。
+                if !procedural && skin.is_none() {
+                    return None;
+                }
+                thumb::render(skin.as_ref(), &theme, 128).ok()
+            })
+            .collect();
+        self.thumbs_key = key;
     }
 }
 
@@ -450,6 +550,56 @@ pub fn build_rows(model: &Model) -> Vec<Row> {
                 control: Control::Swatches,
             });
             rows.push(choice_row(model, Field::Skin, model.skins.clone()));
+        }
+        Tab::Skins => {
+            let current = model.skin_index();
+            rows.push(Row::section(i18n.t("settings.section.skins")));
+            rows.push(Row {
+                field: None,
+                label: i18n.t("settings.skin.current"),
+                hint: None,
+                control: Control::Value {
+                    text: current
+                        .and_then(|i| model.skins.get(i))
+                        .map(|(id, name)| format!("{name} · {id}"))
+                        .unwrap_or_else(|| model.config.appearance.skin.clone()),
+                },
+            });
+            rows.push(Row {
+                field: None,
+                label: String::new(),
+                hint: Some(i18n.t("settings.skin.gallery.hint")),
+                control: Control::Gallery {
+                    count: model.skins.len(),
+                    selected: current,
+                    hover: model.hover_skin,
+                },
+            });
+            rows.push(Row::section(i18n.t("settings.section.skinpack")));
+            for (text_key, action) in [
+                ("settings.skin.import", Action::ImportSkin),
+                ("settings.skin.export", Action::ExportSkin),
+                ("settings.skin.open.dir", Action::OpenSkinsDir),
+            ] {
+                rows.push(Row {
+                    field: None,
+                    label: String::new(),
+                    hint: None,
+                    control: Control::Button {
+                        text: i18n.t(text_key),
+                        action,
+                    },
+                });
+            }
+            rows.push(Row {
+                field: None,
+                label: String::new(),
+                hint: Some(i18n.t("settings.skin.delete.hint")),
+                control: Control::Button {
+                    text: i18n.t("settings.skin.delete"),
+                    action: Action::DeleteSkin,
+                },
+            });
         }
         Tab::About => {
             rows.push(Row::section(i18n.t("settings.section.logging")));
@@ -702,6 +852,8 @@ pub fn layout(model: &Model, w: f32, h: f32) -> Layout {
                 BUTTON_W,
                 30.0,
             ),
+            // 缩略图墙占满整行宽度：格子要尽量大，缩略图才有辨识度。
+            Control::Gallery { .. } => Rect::new(rect.x, y + 6.0, rect.w, rh - 12.0),
             _ => control,
         };
         out_rows.push((
@@ -793,6 +945,8 @@ pub enum Hit {
     Step(usize, i32),
     /// 开关 / 热键框 / 按钮
     Press(usize),
+    /// 缩略图墙里的第 `usize` 张（`Model::skins` 下标）
+    GalleryDot(usize),
     Scrollbar,
 }
 
@@ -831,6 +985,15 @@ pub fn hit(layout: &Layout, p: Point) -> Option<Hit> {
                 }
                 return Some(Hit::Row(i));
             }
+            Control::Gallery { count, .. } => {
+                let (cols, cell_w) = gallery_geom(rl.hit, count);
+                for dot in 0..count {
+                    if gallery_cell(rl.hit, dot, cols, cell_w).contains(p) {
+                        return Some(Hit::GalleryDot(dot));
+                    }
+                }
+                return Some(Hit::Row(i));
+            }
             _ => return Some(Hit::Row(i)),
         }
     }
@@ -855,6 +1018,12 @@ pub fn activate(model: &mut Model, layout: &Layout, index: usize) -> Vec<ChangeK
                 zouwu_platform::logging::open_log_dir();
             }
             Action::Reset => reset(model),
+            Action::ImportSkin => return import_skin(model),
+            Action::ExportSkin => {
+                export_skin(model);
+            }
+            Action::OpenSkinsDir => zouwu_platform::assets::reveal_skins_dir(),
+            Action::DeleteSkin => return delete_skin(model),
         }
         return Vec::new();
     }
@@ -878,6 +1047,103 @@ pub fn activate(model: &mut Model, layout: &Layout, index: usize) -> Vec<ChangeK
         }
         _ => Vec::new(),
     }
+}
+
+/// 点缩略图 = 选中并立刻apply。返回 `ChangeKind::Appearance` 让宿主换皮。
+pub fn select_skin(model: &mut Model, index: usize) -> Vec<ChangeKind> {
+    let Some((id, _)) = model.skins.get(index) else {
+        return Vec::new();
+    };
+    if *id == model.config.appearance.skin {
+        return Vec::new();
+    }
+    model.config.appearance.skin = id.clone();
+    vec![ChangeKind::Appearance]
+}
+
+/// 导入皮肤包。失败一律弹窗——这里没有第二个渠道能让用户知道发生了什么。
+fn import_skin(model: &mut Model) -> Vec<ChangeKind> {
+    let Some(path) = zouwu_platform::dialogs::pick_skin_package() else {
+        return Vec::new();
+    };
+    match zouwu_platform::skinpack::import(&path) {
+        Ok(id) => {
+            model.refresh_skins();
+            model.notice = Some(model.i18n.t_args("settings.skin.imported", &[("id", &id)]));
+            model.config.appearance.skin = id;
+            vec![ChangeKind::Appearance]
+        }
+        Err(err) => {
+            zouwu_platform::dialogs::warn(&model.i18n.t("skin.import.failed"), &err);
+            Vec::new()
+        }
+    }
+}
+
+fn export_skin(model: &Model) {
+    let id = &model.config.appearance.skin;
+    if id == PROCEDURAL_SKIN_ID {
+        zouwu_platform::dialogs::warn(
+            &model.i18n.t("skin.export.failed"),
+            &model.i18n.t("skin.export.procedural"),
+        );
+        return;
+    }
+    let Some(path) = zouwu_platform::dialogs::pick_export_path(&format!("{id}.zwskin")) else {
+        return;
+    };
+    if let Err(err) = zouwu_platform::skinpack::export_to(id, &path) {
+        zouwu_platform::dialogs::warn(&model.i18n.t("skin.export.failed"), &err);
+    }
+}
+
+/// 删除当前皮肤，并把配置退回代码绘制的那只。
+fn delete_skin(model: &mut Model) -> Vec<ChangeKind> {
+    let id = model.config.appearance.skin.clone();
+    if id == PROCEDURAL_SKIN_ID {
+        return Vec::new();
+    }
+    if !zouwu_platform::dialogs::confirm(&model.i18n.t("settings.skin.delete"), &id) {
+        return Vec::new();
+    }
+    match zouwu_platform::skinpack::delete(&id) {
+        Ok(()) => {
+            model.config.appearance.skin = PROCEDURAL_SKIN_ID.to_string();
+            model.refresh_skins();
+            vec![ChangeKind::Appearance]
+        }
+        Err(err) => {
+            zouwu_platform::dialogs::warn(&model.i18n.t("settings.skin.delete.failed"), &err);
+            Vec::new()
+        }
+    }
+}
+
+/// 缩略图网格的列数与格子宽度。
+///
+/// **绘制与命中共用这一个函数**：各算一遍是"看到的位置点不到"的经典来源。
+fn gallery_geom(rect: Rect, count: usize) -> (usize, f32) {
+    const MAX_CELL: f32 = 132.0;
+    let usable = rect.w.max(1.0);
+    let cols = (((usable + GALLERY_GAP) / (MAX_CELL + GALLERY_GAP)).floor() as usize)
+        .clamp(1, count.max(1));
+    let cell_w = ((usable - GALLERY_GAP * (cols.saturating_sub(1)) as f32) / cols as f32)
+        .clamp(48.0, MAX_CELL);
+    (cols, cell_w)
+}
+
+fn gallery_cell(rect: Rect, index: usize, cols: usize, cell_w: f32) -> Rect {
+    let cols = cols.max(1);
+    let col = index % cols;
+    let row = index / cols;
+    // 左对齐：和上面「当前形象」的标签踩同一条竖线，比居中更像一张表。
+    let x0 = rect.x;
+    Rect::new(
+        x0 + col as f32 * (cell_w + GALLERY_GAP),
+        rect.y + row as f32 * (GALLERY_CELL_H + GALLERY_GAP),
+        cell_w,
+        GALLERY_CELL_H,
+    )
 }
 
 /// `±` 一步（键盘 ←→ 或点击箭头）。
@@ -1199,6 +1465,67 @@ fn draw_row(p: &mut Painter<'_>, pal: &Palette, model: &Model, row: &Row, rl: &R
             let shown = p.truncate(text, 13.0, r.w - 16.0);
             p.text_center(&shown, r, 13.0, pal.text, Weight::Bold);
         }
+        Control::Gallery {
+            count,
+            selected,
+            hover,
+        } => {
+            let (cols, cell_w) = gallery_geom(rl.hit, *count);
+            for dot in 0..*count {
+                let cell = gallery_cell(rl.hit, dot, cols, cell_w);
+                let is_selected = *selected == Some(dot);
+                let is_hover = *hover == Some(dot);
+                let bg = if is_selected {
+                    pal.accent.with_alpha(0.16)
+                } else if is_hover {
+                    pal.raised
+                } else {
+                    pal.raised.with_alpha(0.5)
+                };
+                p.fill(cell, 10.0, bg);
+                if is_selected {
+                    p.stroke(cell, 10.0, 2.0, pal.accent);
+                } else {
+                    p.stroke(cell, 10.0, 1.0, pal.line.with_alpha(0.5));
+                }
+
+                // 缩略图区：上方留 8px、下方 26px 给名字。
+                let box_ = Rect::new(cell.x + 8.0, cell.y + 8.0, cell.w - 16.0, cell.h - 34.0);
+                match model.thumbs.get(dot) {
+                    Some(Some(thumb)) => {
+                        // 正方形居中：皮肤图是方的，格子不是，硬拉伸会让人"变胖"。
+                        let side = box_.w.min(box_.h);
+                        let rect = Rect::new(
+                            box_.x + (box_.w - side) * 0.5,
+                            box_.y + (box_.h - side) * 0.5,
+                            side,
+                            side,
+                        );
+                        p.image(rect, thumb);
+                    }
+                    _ => {
+                        let msg = model.i18n.t("settings.skin.broken");
+                        let shown = p.truncate(&msg, 10.0, box_.w);
+                        p.text_center(&shown, box_, 10.0, pal.dim, Weight::Regular);
+                    }
+                }
+
+                let name = model
+                    .skins
+                    .get(dot)
+                    .map(|(_, name)| name.as_str())
+                    .unwrap_or_default();
+                let shown = p.truncate(name, 11.0, cell.w - 8.0);
+                let fg = if is_selected { pal.text } else { pal.dim };
+                p.text_center(
+                    &shown,
+                    Rect::new(cell.x, cell.bottom() - 22.0, cell.w, 16.0),
+                    11.0,
+                    fg,
+                    Weight::Regular,
+                );
+            }
+        }
         Control::Value { text } => {
             let r = Rect::new(rl.control.x, rl.rect.y, rl.control.w, rl.rect.h);
             let shown = p.truncate_left(text, 12.0, r.w);
@@ -1235,6 +1562,58 @@ fn draw_row(p: &mut Painter<'_>, pal: &Palette, model: &Model, row: &Row, rl: &R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gallery_cells_tile_without_overlap_and_all_hit() {
+        let rect = Rect::new(24.0, 100.0, 712.0, 220.0);
+        for count in [1usize, 2, 5, 6, 12] {
+            let (cols, cell_w) = gallery_geom(rect, count);
+            assert!(cols >= 1, "count={count}");
+            let mut cells: Vec<Rect> = Vec::new();
+            for i in 0..count {
+                let cell = gallery_cell(rect, i, cols, cell_w);
+                assert!(cell.w >= 48.0 && cell.h > 0.0, "count={count} i={i}");
+                for other in cells.iter() {
+                    assert!(
+                        !cell.inset(0.5, 0.5).intersects(other),
+                        "count={count} i={i} overlaps"
+                    );
+                }
+                cells.push(cell);
+            }
+        }
+    }
+
+    #[test]
+    fn gallery_geometry_uses_width_for_columns() {
+        let wide = Rect::new(0.0, 0.0, 712.0, 220.0);
+        let narrow = Rect::new(0.0, 0.0, 300.0, 220.0);
+        let (cols_wide, _) = gallery_geom(wide, 8);
+        let (cols_narrow, _) = gallery_geom(narrow, 8);
+        assert!(
+            cols_wide > cols_narrow,
+            "wide={cols_wide} narrow={cols_narrow}"
+        );
+        // 窄到只放得下一个格子也不能算成 0 列
+        let (cols_tiny, _) = gallery_geom(Rect::new(0.0, 0.0, 40.0, 100.0), 3);
+        assert_eq!(cols_tiny, 1);
+    }
+
+    #[test]
+    fn selecting_a_thumbnail_changes_appearance_once() {
+        let mut m = model();
+        m.skins = vec![
+            ("procedural".into(), "Procedural".into()),
+            ("zouwu-ink".into(), "水墨驺吾".into()),
+        ];
+        // 点已经选中的那套 → 不产生变化（避免无意义地重载图片）
+        assert!(select_skin(&mut m, 0).is_empty());
+        let kinds = select_skin(&mut m, 1);
+        assert_eq!(kinds, vec![ChangeKind::Appearance]);
+        assert_eq!(m.config.appearance.skin, "zouwu-ink");
+        // 越界点击不能 panic
+        assert!(select_skin(&mut m, 99).is_empty());
+    }
 
     fn model() -> Model {
         Model::new(

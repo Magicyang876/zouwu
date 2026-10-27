@@ -76,6 +76,20 @@ impl Rect {
     }
 }
 
+/// 双线性采样的一轴：夹到边界内，返回 (左/上索引, 右/下索引, 小数部分)。
+///
+/// 这里**夹索引**而不是夹采样坐标：边缘像素被重复取用，
+/// 避免缩略图四周出现半透明黑边（照片缩放里典型的 border artifact）。
+fn sample_axis(v: f32, len: u32) -> (u32, u32, f32) {
+    if len <= 1 {
+        return (0, 0, 0.0);
+    }
+    let v = v.clamp(0.0, (len - 1) as f32);
+    let i0 = v.floor() as u32;
+    let i1 = (i0 + 1).min(len - 1);
+    (i0, i1, v - i0 as f32)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Weight {
     Regular,
@@ -202,6 +216,80 @@ impl<'a> Painter<'a> {
             Transform::identity(),
             mask,
         );
+    }
+
+    /// 把一张直通 alpha 的 RGBA 位图缩放绘制到 `rect` 内（双线性采样）。
+    ///
+    /// 手写而不是走 skia：面板里只有皮肤缩略图这一处位图，为它引入
+    /// `Pixmap::from_vec` + `Transform` 的完整路径不值得，而且这里要复用
+    /// 文本那条"绕开 skia mask、直接用 `clip_px` 裁剪"的做法。
+    ///
+    /// 混色在**预乘**空间里做：tiny-skia 的像素缓冲本来就是预乘的，
+    /// 源图从直通转成预乘再 `src + dst * (1 - sa)` 才是正确的 over。
+    pub fn image(&mut self, rect: Rect, thumb: &crate::thumb::Thumb) {
+        if rect.is_empty() || thumb.w == 0 || thumb.h == 0 {
+            return;
+        }
+        let (x0, y0, w, h) = rect.phys(self.scale);
+        if w < 1.0 || h < 1.0 {
+            return;
+        }
+
+        let (clip_x0, clip_y0, clip_x1, clip_y1) = match self.clip_px {
+            Some((a, b, c, d)) => (x0.max(a), y0.max(b), (x0 + w).min(c), (y0 + h).min(d)),
+            None => (x0, y0, x0 + w, y0 + h),
+        };
+        let (pw, ph) = (self.pixmap.width() as f32, self.pixmap.height() as f32);
+        let xs = clip_x0.max(0.0).floor() as i32;
+        let xe = clip_x1.min(pw).ceil() as i32;
+        let ys = clip_y0.max(0.0).floor() as i32;
+        let ye = clip_y1.min(ph).ceil() as i32;
+        if xe <= xs || ye <= ys {
+            return;
+        }
+
+        let (tw, th) = (thumb.w as f32, thumb.h as f32);
+        let stride = self.pixmap.width() as usize * 4;
+        let data = self.pixmap.data_mut();
+
+        for py in ys..ye {
+            // 目的像素中心 → 源图上的采样点（减 0.5 让采样点落在像素中心）
+            let v = ((py as f32 + 0.5 - y0) / h) * th - 0.5;
+            let (ty0, ty1, fy) = sample_axis(v, thumb.h);
+            for px in xs..xe {
+                let u = ((px as f32 + 0.5 - x0) / w) * tw - 0.5;
+                let (tx0, tx1, fx) = sample_axis(u, thumb.w);
+
+                let p00 = thumb.pixel(tx0, ty0);
+                let p10 = thumb.pixel(tx1, ty0);
+                let p01 = thumb.pixel(tx0, ty1);
+                let p11 = thumb.pixel(tx1, ty1);
+                let mut src = [0.0f32; 4];
+                for c in 0..4 {
+                    let top = p00[c] as f32 * (1.0 - fx) + p10[c] as f32 * fx;
+                    let bot = p01[c] as f32 * (1.0 - fx) + p11[c] as f32 * fx;
+                    src[c] = top * (1.0 - fy) + bot * fy;
+                }
+                let a = src[3] / 255.0;
+                if a <= 0.001 {
+                    continue;
+                }
+                let at = py as usize * stride + px as usize * 4;
+                let dst = [
+                    data[at] as f32,
+                    data[at + 1] as f32,
+                    data[at + 2] as f32,
+                    data[at + 3] as f32,
+                ];
+                // 直通 → 预乘
+                let sp = [src[0] * a, src[1] * a, src[2] * a, src[3]];
+                let inv = 1.0 - a;
+                for c in 0..4 {
+                    let out = sp[c] + dst[c] * inv;
+                    data[at + c] = out.clamp(0.0, 255.0).round() as u8;
+                }
+            }
+        }
     }
 
     /// 水平细线（分隔线、进度条）。

@@ -134,8 +134,13 @@ pub fn set_enabled(enabled: bool) -> bool {
 pub fn open_config_dir() -> bool {
     let dir = crate::config_dir();
     let _ = std::fs::create_dir_all(&dir);
+    open_path(&dir)
+}
+
+/// 用系统默认方式打开一个路径（目录 → 资源管理器）。
+pub fn open_path(path: &std::path::Path) -> bool {
     let mut cmd = std::process::Command::new("explorer");
-    cmd.arg(dir);
+    cmd.arg(path);
     match cmd.spawn() {
         Ok(_) => true,
         Err(err) => {

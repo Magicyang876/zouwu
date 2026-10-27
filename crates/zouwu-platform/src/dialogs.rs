@@ -32,19 +32,28 @@ pub fn pick_export_path(default_name: &str) -> Option<PathBuf> {
     dialog.save_file()
 }
 
+/// 一个是/否框。默认"否"（MB_DEFBUTTON2）：危险操作不该被回车顺手确认掉。
+pub fn confirm(title: &str, text: &str) -> bool {
+    log::info!("confirm: {title} — {text}");
+    message_box_ex(title, text, true)
+}
+
 /// 一个警告框。失败路径专用，不要拿它做日常提示。
 pub fn warn(title: &str, text: &str) {
     log::warn!("{title}: {text}");
-    message_box(title, text);
+    message_box_ex(title, text, false);
 }
 
 #[cfg(target_os = "windows")]
-fn message_box(title: &str, text: &str) {
+fn message_box_ex(title: &str, text: &str, question: bool) -> bool {
     use std::ffi::CString;
 
     const MB_OK: u32 = 0x0000_0000;
     const MB_ICONWARNING: u32 = 0x0000_0030;
     const MB_SETFOREGROUND: u32 = 0x0001_0000;
+    const MB_YESNO: u32 = 0x0000_0004;
+    const MB_DEFBUTTON2: u32 = 0x0000_0100;
+    const IDYES: i32 = 6;
     // 顶层窗口是分层窗口 + NOACTIVATE，正常弹窗会被别的前台窗口压住。
     const MB_TOPMOST: u32 = 0x0004_0000;
 
@@ -54,10 +63,10 @@ fn message_box(title: &str, text: &str) {
     }
 
     let Ok(title) = CString::new(title.replace('\0', "")) else {
-        return;
+        return false;
     };
     let Ok(text) = CString::new(text.replace('\0', "")) else {
-        return;
+        return false;
     };
     let wide = |s: &CString| -> Vec<u16> {
         s.to_string_lossy()
@@ -66,15 +75,19 @@ fn message_box(title: &str, text: &str) {
             .collect()
     };
     let (t, b) = (wide(&text), wide(&title));
-    unsafe {
-        MessageBoxW(
-            0,
-            t.as_ptr(),
-            b.as_ptr(),
-            MB_OK | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST,
-        );
-    }
+    let flags = if question {
+        MB_YESNO | MB_DEFBUTTON2
+    } else {
+        MB_OK | MB_ICONWARNING
+    } | MB_SETFOREGROUND
+        | MB_TOPMOST;
+    let ret = unsafe { MessageBoxW(0, t.as_ptr(), b.as_ptr(), flags) };
+    ret == IDYES
 }
 
 #[cfg(not(target_os = "windows"))]
-fn message_box(_title: &str, _text: &str) {}
+fn message_box_ex(_title: &str, _text: &str, question: bool) -> bool {
+    // 非 Windows 后端还没接：不做假设，一律当"否"。
+    let _ = question;
+    false
+}

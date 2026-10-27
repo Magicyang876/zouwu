@@ -94,3 +94,18 @@ settings-hotkey-need-modifier = Needs at least one modifier (Ctrl / Alt / Shift 
 skin-import-failed = Skin package import failed
 skin-export-procedural = The default character is drawn in code, so there are no files to export. Switch to an image-based skin first.
 skin-export-failed = Skin package export failed
+
+# ── Skins (settings panel) ─────────────────────────
+settings-tab-skins = Skins
+settings-section-skins = Character
+settings-section-skinpack = Skin packages
+settings-skin-current = Current skin
+settings-skin-gallery-hint = Click a thumbnail to switch — it applies immediately
+settings-skin-import = Import skin package…
+settings-skin-export = Export current skin…
+settings-skin-open-dir = Open skins folder
+settings-skin-delete = Delete this skin
+settings-skin-delete-hint = Built-in skins come back on the next launch
+settings-skin-delete-failed = Delete failed
+settings-skin-imported = Imported "{$id}"
+settings-skin-broken = cannot be opened (bad manifest or image)
