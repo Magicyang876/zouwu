@@ -28,6 +28,10 @@ pub const ID_LANG_AUTO: &str = "zouwu.lang.auto";
 /// 主题项 id 形如 `zouwu.theme.zouwu-warm`；皮肤同理。
 pub const ID_THEME_PREFIX: &str = "zouwu.theme.";
 pub const ID_SKIN_PREFIX: &str = "zouwu.skin.";
+/// 注意：这两个 id **故意不用** `zouwu.skin.` 前缀，否则会被上面的
+/// `strip_prefix` 当成"皮肤 id 叫 import"。
+pub const ID_SKIN_IMPORT: &str = "zouwu.skin-import";
+pub const ID_SKIN_EXPORT: &str = "zouwu.skin-export";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TrayCommand {
@@ -45,6 +49,10 @@ pub enum TrayCommand {
     SetTheme(String),
     /// 换形象（id → `skins/<id>/` 或 `procedural`）。
     SetSkin(String),
+    /// 导入 `.zwskin`（会弹系统文件对话框）。
+    ImportSkin,
+    /// 导出当前皮肤到 `exports/`（会弹"另存为"）。
+    ExportSkin,
     Quit,
 }
 
@@ -66,6 +74,8 @@ struct Items {
     skin_menu: Submenu,
     /// `(皮肤 id, 菜单项)`。
     skins: Vec<(String, CheckMenuItem)>,
+    skin_import: MenuItem,
+    skin_export: MenuItem,
 }
 
 /// `Tray::new` 的其余入参。
@@ -177,6 +187,17 @@ impl Tray {
                 .map_err(|err| format!("menu append failed: {err}"))?;
             skin_items.push((entry.0.clone(), item));
         }
+        // 导入/导出放在皮肤菜单最下面：它们改的是"皮肤列表"，不是"当前选中项"。
+        let skin_import = MenuItem::with_id(ID_SKIN_IMPORT, i18n.t("tray.skin.import"), true, None);
+        let skin_export = MenuItem::with_id(ID_SKIN_EXPORT, i18n.t("tray.skin.export"), true, None);
+        skin_menu
+            .append(&PredefinedMenuItem::separator())
+            .map_err(|err| format!("menu append failed: {err}"))?;
+        for item in [&skin_import, &skin_export] {
+            skin_menu
+                .append(item)
+                .map_err(|err| format!("menu append failed: {err}"))?;
+        }
 
         let menu = Menu::new();
         menu.append_items(&[
@@ -232,6 +253,8 @@ impl Tray {
                 themes: theme_items,
                 skin_menu,
                 skins: skin_items,
+                skin_import,
+                skin_export,
             },
         })
     }
@@ -286,6 +309,8 @@ impl Tray {
         self.items.lang_auto.set_checked(language_setting == AUTO);
         self.items.theme_menu.set_text(i18n.t("tray.theme"));
         self.items.skin_menu.set_text(i18n.t("tray.skin"));
+        self.items.skin_import.set_text(i18n.t("tray.skin.import"));
+        self.items.skin_export.set_text(i18n.t("tray.skin.export"));
         for (code, item) in &self.items.langs {
             item.set_text(language_label(code));
             item.set_checked(language_setting == *code);
@@ -346,6 +371,12 @@ impl Tray {
         }
         if let Some(theme_id) = id.strip_prefix(ID_THEME_PREFIX) {
             return Some(TrayCommand::SetTheme(theme_id.to_string()));
+        }
+        if id == ID_SKIN_IMPORT {
+            return Some(TrayCommand::ImportSkin);
+        }
+        if id == ID_SKIN_EXPORT {
+            return Some(TrayCommand::ExportSkin);
         }
         if let Some(skin_id) = id.strip_prefix(ID_SKIN_PREFIX) {
             return Some(TrayCommand::SetSkin(skin_id.to_string()));

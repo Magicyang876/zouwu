@@ -70,6 +70,11 @@ pub fn run() -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| format!("event loop: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
+    // 官方皮肤随程序内嵌发布，首次启动（或用户删掉后）落到磁盘上，
+    // 之后就以磁盘那份为准——用户改配色/换图不会被下一次启动覆盖。
+    // 必须排在读配置之前：配置里可能就指名了某个内置皮肤。
+    zouwu_platform::assets::ensure_builtin_skins();
+
     // 配置在启动时读一次（缺文件会写出一份默认配置，方便用户手改）
     let config = zouwu_platform::load_config();
     // 配置里的日志级别/落盘策略现在才生效（RUST_LOG 仍然优先）。
@@ -486,25 +491,39 @@ impl App {
         }
     }
 
+    /// 建（或重建）托盘图标。
+    ///
+    /// 单独成一个函数是因为**导入新皮肤后菜单要长出这一条**：托盘菜单是静态构建的，
+    /// 只能丢掉重建。热键不能跟着重建（重复注册会 already registered），所以两者分开。
+    fn init_tray(&mut self) {
+        let (rgba, w, h) = crate::paint::tray_icon(&self.theme, self.skin_for_paint(), 32);
+        let autostart_on = autostart::is_enabled();
+        // 主题/皮肤列表在启动时扫一次：换外观不是高频操作，为它挂目录监听不值得。
+        // 例外是导入功能：它导入完会 `rebuild_tray`，否则新皮肤不会出现在菜单里。
+        let opts = TrayOptions {
+            icon_rgba: Some((rgba, w, h)),
+            language_setting: &self.config.general.language,
+            autostart: autostart_on,
+            visible: self.visible,
+            theme_id: &self.config.appearance.theme,
+            skin_id: &self.config.appearance.skin,
+        };
+        match Tray::new(&self.i18n, &self.themes, opts) {
+            Ok(tray) => self.tray = Some(tray),
+            Err(err) => log::error!("tray init failed: {err}"),
+        }
+    }
+
+    /// 丢掉旧托盘再建一个（皮肤列表变了之后调用）。
+    fn rebuild_tray(&mut self) {
+        self.tray = None;
+        self.init_tray();
+    }
+
     /// 托盘图标 + 全局热键。只做一次，且必须**在主线程**上做（见 platform::tray）。
     fn init_shell(&mut self) {
         if self.tray.is_none() {
-            let (rgba, w, h) = crate::paint::tray_icon(&self.theme, self.skin_for_paint(), 32);
-            let autostart_on = autostart::is_enabled();
-            // 主题/皮肤列表在启动时扫一次：换外观不是高频操作，
-            // 为它挂目录监听不值得（新装的主题重启后出现）。
-            let opts = TrayOptions {
-                icon_rgba: Some((rgba, w, h)),
-                language_setting: &self.config.general.language,
-                autostart: autostart_on,
-                visible: self.visible,
-                theme_id: &self.config.appearance.theme,
-                skin_id: &self.config.appearance.skin,
-            };
-            match Tray::new(&self.i18n, &self.themes, opts) {
-                Ok(tray) => self.tray = Some(tray),
-                Err(err) => log::error!("tray init failed: {err}"),
-            }
+            self.init_tray();
         }
 
         if self.hotkeys.is_none() {
@@ -661,6 +680,49 @@ impl App {
         log::info!("skin -> {id}");
     }
 
+    /// 导入 `.zwskin`：选文件 → 校验 → 落盘 → 重建菜单 → 立刻换上。
+    ///
+    /// 成功后**不给弹窗**：小兽当场变了个样，比任何提示都直接。
+    /// 失败必须弹窗——常驻托盘的工具没有控制台，用户不会去翻日志。
+    fn import_skin(&mut self, now: Instant) {
+        let Some(path) = zouwu_platform::dialogs::pick_skin_package() else {
+            return;
+        };
+        match zouwu_platform::skinpack::import(&path) {
+            Ok(id) => {
+                log::info!("imported skin `{id}` from {}", path.display());
+                // 菜单是静态构建的，新皮肤要重建托盘才看得见
+                self.rebuild_tray();
+                self.set_skin(id, now);
+            }
+            Err(err) => {
+                zouwu_platform::dialogs::warn(&self.i18n.t("skin.import.failed"), &err);
+            }
+        }
+    }
+
+    /// 导出当前皮肤成 `.zwskin`（发给别人 / 备份自己手改过的那套）。
+    fn export_skin(&mut self) {
+        let id = self.skin.manifest.id.clone();
+        if id == PROCEDURAL_SKIN_ID {
+            // 代码绘制的小兽没有文件可打：这不是错误，但必须说清楚
+            zouwu_platform::dialogs::warn(
+                &self.i18n.t("skin.export.failed"),
+                &self.i18n.t("skin.export.procedural"),
+            );
+            return;
+        }
+        let Some(path) = zouwu_platform::dialogs::pick_export_path(&format!("{id}.zwskin")) else {
+            return;
+        };
+        match zouwu_platform::skinpack::export_to(&id, &path) {
+            Ok(()) => log::info!("exported skin `{id}` to {}", path.display()),
+            Err(err) => {
+                zouwu_platform::dialogs::warn(&self.i18n.t("skin.export.failed"), &err);
+            }
+        }
+    }
+
     /// 托盘那一小格用的是同一套画笔：换了颜色/形象要重画，否则托盘和窗口不一样。
     fn refresh_tray_icon(&self) {
         let Some(tray) = &self.tray else { return };
@@ -688,6 +750,8 @@ impl App {
             }
             TrayCommand::SetTheme(id) => self.set_theme(id, now),
             TrayCommand::SetSkin(id) => self.set_skin(id, now),
+            TrayCommand::ImportSkin => self.import_skin(now),
+            TrayCommand::ExportSkin => self.export_skin(),
             TrayCommand::SetAutostart(on) => self.set_autostart(on),
             TrayCommand::SetLanguage(code) => self.set_language(code),
             TrayCommand::Quit => return true,

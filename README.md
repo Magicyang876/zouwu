@@ -174,8 +174,10 @@
 | 悬停变形（气泡环） | ✔ 悬停 150ms 展开 8 颗气泡，弹簧错峰 24ms + 轨道浮动，选中态发光 |
 | 点击 / 右键 | ✔ 左键点气泡 → 动作入口；左键点本体 → 立即展开/收起；右键 → 收起 |
 | 输入保底 | ✔ 全局光标轮询（本机分层窗口收不到鼠标消息，见 ADR-009） |
-| 主题 | ✔ 令牌化 `Theme` + 两个内置主题（`zouwu-warm` / `zouwu-dark`）；外部 `%APPDATA%\zouwu	hemes\*.toml` 覆盖同名 id，坏文件跳过并记日志 |
-| 皮肤加载器 | ✔ `skin.toml` + 图片资源（`%APPDATA%\zouwu\skins\<id>\`），保留 `procedural` 兜底；用户皮肤加载失败不会把画面搞挂 |
+| 主题 | ✔ `themes/<id>.toml`：`base` + 增量调色板；内置暖橙 / 夜行两套；托盘与设置面板切换即时生效（ADR-017） |
+| 皮肤加载器 | ✔ `skins/<id>/skin.toml` + PNG 图层（body/blink/overlay）；目录名须等于 id；解码失败保留当前皮肤（ADR-018） |
+| 官方第二套皮肤 | ✔ 「水墨驺吾」——由 `examples/make_skins.rs` 代码生成（含 blink/overlay 两个角色），内嵌进二进制，首启落地到磁盘（ADR-020） |
+| 皮肤包导入导出 | ✔ `.zwskin` 单文件容器（自定格式，不引 zip）：托盘菜单 → 系统文件对话框 → 校验 → 落地；路径穿越/超长/重复/覆盖全部拒绝（ADR-019） |
 | 设置面板 | ✔ 独立窗口 + `softbuffer` 呈现，4 个分页 / 7 种控件 / 键盘可达 / 热键录制；**无保存按钮，改动即时生效并写盘**（ADR-015） |
 | 日志 | ✔ `%APPDATA%\zouwu\logs\zouwu.log`，按大小轮转（2MB×3）；级别可运行时改；panic 也落盘（ADR-014） |
 | 文本渲染 | ✔ 系统 GDI 栅格化（中文/符号 fallback 免费，常驻增量≈0），面板 RSS 879MB → 23MB（ADR-016） |
@@ -191,10 +193,15 @@
 **可复现的验收方式**：
 
 ```bash
-cargo test --workspace                     # 93 个单测：几何 / 弹簧 / 布局 / 屏边避让 / 配置 / 主题 / 皮肤 / 日志 / 面板
+cargo test --workspace                     # 102 个单测：几何 / 弹簧 / 布局 / 屏边避让 / 配置 / 主题 / 皮肤 / 皮肤包 / 日志 / 面板 / i18n
 cargo run -p zouwu-ui --example offscreen  # 离屏渲染 → target/zouwu-offscreen/*.png，直接看图
 cargo run -p zouwu-ui --example settings_shot   # 设置面板 4 个分页 → target/zouwu-settings/*.png（2×）
 cargo run -p zouwu-ui --example bench      # 单帧成本模型（release）
+cargo run --release -p zouwu-ui --example skin_demo            # 造一份皮肤 → 走真实解码 → 导出 4 张图 + 三种路径耗时
+cargo run --release -p zouwu-ui --example skin_demo -- --install  # 真的装进 %APPDATA%/zouwu/skins/，托盘里就能选
+cargo run --release -p zouwu-ui --example skin_demo -- --preview assets/skins/zouwu-ink  # 预览某个皮肤目录（改图即看）
+cargo run --release -p zouwu-ui --example make_skins              # 重新生成官方第二套皮肤（assets/skins/zouwu-ink/，产物要提交）
+cargo run -p zouwu-platform --example skinpack_tool -- list       # 皮肤包：list / export <id> [dest] / import <file>（无 GUI，可脚本化）
 ZOUWU_PERF=1 cargo run --release -p zouwu-app   # 每 60 帧报一次实际帧率
 ZOUWU_SETTINGS=1 cargo run --release -p zouwu-app   # 启动即开设置面板（托盘菜单没法脚本化）
 cargo run -p zouwu-platform --example autostart_check -- status   # 开机自启读写（有副作用，故不做成单测）
@@ -211,7 +218,7 @@ cargo run -p zouwu-platform --example autostart_check -- status   # 开机自启
 | O3 | 用户脚本动作：Rhai vs wasmtime | M4 前 |
 | O4 | 开源协议（建议 MIT+Apache-2.0，素材单独 CC-BY） | 公开发布前 |
 | O5 | 驺吾插画来源与授权（原创 / 约稿 / 素材） | M1 前 |
-| O6 | 是否引入精灵图缓存（各状态预渲染成位图） | M1 做皮肤时 |
+| O6 | 精灵图缓存 —— 实测后不急（位图皮肤已给 1.56×） | M5 若仍嫌慢 |
 | O7 | 动画占空比是否再压（现 20fps / 呼吸占 10% 时间） | M2 动效定稿 |
 
 ---

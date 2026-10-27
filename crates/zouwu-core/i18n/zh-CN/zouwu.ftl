@@ -12,6 +12,8 @@ tray-language = 语言
 tray-language-auto = 跟随系统
 tray-theme = 主题
 tray-skin = 形象
+tray-skin-import = 导入皮肤包…
+tray-skin-export = 导出当前皮肤…
 tray-autostart = 开机自启
 tray-quit = 退出
 
@@ -88,3 +90,7 @@ settings-log-file = 日志文件
 settings-footer-keys = ↑↓ 选择 · ←→ 调整 · Esc 关闭
 settings-reset-done = 已恢复默认外观与交互
 settings-hotkey-need-modifier = 需要至少一个修饰键（Ctrl / Alt / Shift / Win）
+
+skin-import-failed = 皮肤包导入失败
+skin-export-procedural = 默认形象是代码画出来的，没有可导出的文件。想分享，先换成一套素材皮肤。
+skin-export-failed = 皮肤包导出失败

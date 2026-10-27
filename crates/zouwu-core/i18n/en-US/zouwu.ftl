@@ -12,6 +12,8 @@ tray-language = Language
 tray-language-auto = Follow system
 tray-theme = Theme
 tray-skin = Skin
+tray-skin-import = Import skin package…
+tray-skin-export = Export current skin…
 tray-autostart = Start with Windows
 tray-quit = Quit
 
@@ -88,3 +90,7 @@ settings-log-file = Log file
 settings-footer-keys = ↑↓ select · ←→ adjust · Esc close
 settings-reset-done = Appearance and interaction reset to defaults
 settings-hotkey-need-modifier = Needs at least one modifier (Ctrl / Alt / Shift / Win)
+
+skin-import-failed = Skin package import failed
+skin-export-procedural = The default character is drawn in code, so there are no files to export. Switch to an image-based skin first.
+skin-export-failed = Skin package export failed

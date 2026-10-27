@@ -44,7 +44,7 @@ fn paint_body(size: u32) -> Vec<u8> {
     let s = size as f32;
     let mut paint = Paint {
         anti_alias: true,
-        ..Default::default()
+        ..Paint::default()
     };
 
     // 尾巴
@@ -119,7 +119,7 @@ fn paint_blink(size: u32) -> Vec<u8> {
     let s = size as f32;
     let mut paint = Paint {
         anti_alias: true,
-        ..Default::default()
+        ..Paint::default()
     };
     paint.set_color(Color::from_rgba8(48, 34, 28, 255));
 
@@ -179,7 +179,11 @@ role = "blink"
 fn shoot(name: &str, skin: &Skin, openness: f32, blink: f32, breath: f32) {
     let size = 340u32;
     let mut pixmap = Pixmap::new(size, size).expect("pixmap");
-    let theme = Theme::fallback();
+    // （可选）用 `ZOUWU_THEME=zouwu-dark` 换配色，方便一眼看出"皮肤和主题是两件事"。
+    let theme = std::env::var("ZOUWU_THEME")
+        .ok()
+        .and_then(|id| Theme::builtin(&id))
+        .unwrap_or_else(Theme::fallback);
     let scene = Scene {
         width: size as f32,
         height: size as f32,
@@ -305,7 +309,9 @@ fn scene_for<'a>(
 /// 这样就能在**运行时**验证"从磁盘读 PNG → 托盘菜单里出现 → 切换生效"整条链路。
 /// （离线示例证明的是解码正确，安装版证明的是路径/配置/菜单也接对了。）
 fn install(package: &SkinPackage) {
-    let dir = zouwu_platform::assets::skins_dir().join("papercut");
+    // 目录名必须等于 `skin.toml` 里的 id —— 加载器就是这么校验的
+    // （否则一个 `foo` 目录里放 `bar` 的图，排查起来是场噩梦）。
+    let dir = zouwu_platform::assets::skins_dir().join(&package.manifest.id);
     if let Err(err) = std::fs::create_dir_all(&dir) {
         eprintln!("cannot create {}: {err}", dir.display());
         return;
@@ -320,13 +326,64 @@ fn install(package: &SkinPackage) {
     match std::fs::write(dir.join("skin.toml"), package.manifest.to_toml()) {
         Ok(()) => {
             println!("installed demo skin -> {}", dir.display());
-            println!("switch with: appearance.skin = \"papercut\"  (or the tray menu)");
+            println!(
+                "switch with: appearance.skin = \"{}\"  (or the tray menu)",
+                package.manifest.id
+            );
         }
         Err(err) => eprintln!("write skin.toml failed: {err}"),
     }
 }
 
+/// 直接预览一个**皮肤目录**（作者改完图就能看，不必先装进 `%APPDATA%`）。
+///
+/// 走的是和运行时完全相同的 `SkinPackage` → `Skin::decode` 路径，
+/// 唯一的区别是目录由参数给定、图层文件从磁盘读。
+fn load_dir(dir: &std::path::Path) -> Result<SkinPackage, String> {
+    let text = std::fs::read_to_string(dir.join("skin.toml"))
+        .map_err(|err| format!("{}: {err}", dir.join("skin.toml").display()))?;
+    let manifest = SkinManifest::parse(&text)?;
+    let mut images = Vec::new();
+    for layer in &manifest.layers {
+        let path = dir.join(&layer.image);
+        let bytes =
+            std::fs::read(&path).map_err(|err| format!("layer `{}`: {err}", path.display()))?;
+        images.push((layer.image.clone(), bytes));
+    }
+    Ok(SkinPackage {
+        manifest,
+        dir: dir.to_path_buf(),
+        images,
+    })
+}
+
 fn main() {
+    if let Some(dir) = std::env::args()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find(|w| w[0] == "--preview")
+        .map(|w| PathBuf::from(&w[1]))
+    {
+        let package = match load_dir(&dir) {
+            Ok(pkg) => pkg,
+            Err(err) => {
+                eprintln!("cannot load {}: {err}", dir.display());
+                std::process::exit(1);
+            }
+        };
+        let skin = Skin::decode(&package).expect("decode preview skin");
+        println!(
+            "previewing `{}` from {}: {} layers",
+            skin.manifest.display_name(),
+            dir.display(),
+            skin.layers.len()
+        );
+        shoot("preview-collapsed", &skin, 0.0, 0.0, 0.0);
+        shoot("preview-expanded", &skin, 1.0, 0.0, 0.0);
+        shoot("preview-blink", &skin, 1.0, 1.0, 0.0);
+        return;
+    }
+
     let package = demo_package(256);
     if std::env::args().any(|a| a == "--install") {
         install(&package);

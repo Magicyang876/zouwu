@@ -12,3 +12,4 @@ toml = { workspace = true }
 log = { workspace = true }
 tray-icon = { workspace = true }
 global-hotkey = { workspace = true }
+rfd = { version = "0.17.2", default-features = false }

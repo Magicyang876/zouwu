@@ -1,0 +1,21 @@
+# 水墨驺吾 —— 官方第二套皮肤
+id = "zouwu-ink"
+name = "水墨驺吾"
+author = "zouwu"
+version = "1.0.0"
+theme = "zouwu-dark"
+
+[geometry]
+radius = 56.0
+breath_amount = 0.03
+
+[[layers]]
+image = "body.png"
+
+[[layers]]
+image = "blink.png"
+role = "blink"
+
+[[layers]]
+image = "seal.png"
+role = "overlay"
