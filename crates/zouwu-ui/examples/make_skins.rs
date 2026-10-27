@@ -120,11 +120,11 @@ fn body(size: u32) -> Pixmap {
     blob_chain(
         &mut pm,
         &[
-            (cx - 0.66 * r, cy + 0.46 * r),
-            (cx - 0.92 * r, cy + 0.40 * r),
-            (cx - 1.06 * r, cy + 0.22 * r),
-            (cx - 1.04 * r, cy + 0.02 * r),
-            (cx - 0.92 * r, cy - 0.08 * r),
+            (cx - 0.62 * r, cy + 0.44 * r),
+            (cx - 0.84 * r, cy + 0.38 * r),
+            (cx - 0.94 * r, cy + 0.22 * r),
+            (cx - 0.92 * r, cy + 0.04 * r),
+            (cx - 0.82 * r, cy - 0.06 * r),
         ],
         0.13 * r,
         0.07 * r,
@@ -167,7 +167,7 @@ fn body(size: u32) -> Pixmap {
 
     // ── 身体：一团稍扁的墨，下缘再补一笔当"坐下去"的重量 ───────────────
     blot(&mut pm, cx, cy - 0.02 * r, r, ink(), 1.0);
-    blot(&mut pm, cx, cy + 0.24 * r, 0.80 * r, ink(), 1.0);
+    blot(&mut pm, cx, cy + 0.22 * r, 0.72 * r, ink(), 1.0);
 
     // ── 鬃毛：左右各三簇，**对称** ─────────────────────────────────
     // 第一版只长在左上（想表现"被风吹"，结果像多了三条腿），
@@ -180,8 +180,8 @@ fn body(size: u32) -> Pixmap {
             let k = 1.0 - i as f32 * 0.06;
             blot(
                 &mut pm,
-                cx + side * cos * 1.04 * r,
-                cy + sin * 1.04 * r,
+                cx + side * cos * 1.00 * r,
+                cy + sin * 1.00 * r,
                 0.13 * r * k,
                 ink(),
                 0.95,
@@ -224,7 +224,7 @@ fn body(size: u32) -> Pixmap {
     // 只有眼白的时候像个"空壳"；加上瞳孔才有表情，也才读得出是"看过来"。
     for side in [-1.0f32, 1.0] {
         let ex = cx + side * 0.28 * r;
-        let ey = cy - 0.10 * r;
+        let ey = cy - 0.02 * r;
         blot(&mut pm, ex, ey, 0.135 * r, paper(), 0.95);
         blot(
             &mut pm,
@@ -301,8 +301,8 @@ fn blink(size: u32) -> Pixmap {
     for side in [-1.0f32, 1.0] {
         let mut pb = PathBuilder::new();
         let x = cx + side * 0.28 * r;
-        pb.move_to(x - 0.14 * r, cy - 0.10 * r);
-        pb.quad_to(x, cy + 0.02 * r, x + 0.14 * r, cy - 0.10 * r);
+        pb.move_to(x - 0.14 * r, cy - 0.02 * r);
+        pb.quad_to(x, cy + 0.10 * r, x + 0.14 * r, cy - 0.02 * r);
         if let Some(path) = pb.finish() {
             pm.stroke_path(
                 &path,
@@ -330,8 +330,8 @@ fn seal_layer(size: u32) -> Pixmap {
     paint.set_color(seal());
 
     // 贴住身体右下沿（球面外一点点），压在留白上，不糊在脸上
-    let w = 0.26 * r;
-    let (x, y) = (cx + 0.50 * r, cy + 0.54 * r);
+    let w = 0.24 * r;
+    let (x, y) = (cx + 0.62 * r, cy + 0.62 * r);
     // 歪一点（-6°）：手盖的印章不会正。绕自己的中心旋转，位置不受影响。
     let turn = Transform::from_rotate_at(-6.0, x + w * 0.5, y + w * 0.5);
     if let Some(rect) = tiny_skia::Rect::from_xywh(x, y, w, w) {
@@ -391,6 +391,25 @@ fn centroid(pm: &Pixmap) -> (f32, f32) {
     )
 }
 
+/// 外轮廓的最远墨点，按画布边长归一（0.5 = 顶到画布边）。
+///
+/// 和 `centroid` 是一对：重心管"往哪偏"，轮廓管"多大"。
+/// 尺寸口径漂移（装饰伸得比墨团远太多）就是靠它拦住的。
+fn silhouette(pm: &Pixmap) -> f32 {
+    let size = pm.width() as f32;
+    let (cx, cy) = (size * 0.5, size * 0.5);
+    let mut far: f32 = 0.0;
+    for (i, px) in pm.data().chunks_exact(4).enumerate() {
+        if px[3] <= 8 {
+            continue;
+        }
+        let x = (i % pm.width() as usize) as f32;
+        let y = (i / pm.width() as usize) as f32;
+        far = far.max(((x - cx).powi(2) + (y - cy).powi(2)).sqrt());
+    }
+    far / size
+}
+
 fn write_png(dir: &Path, name: &str, pm: Pixmap, visible_min: usize) {
     let path = dir.join(name);
     pm.save_png(&path).expect("save png");
@@ -416,12 +435,34 @@ fn main() {
         (gx - 0.5).abs() < 0.03 && (gy - 0.5).abs() < 0.03,
         "body is off-center: centroid ({gx:.3}, {gy:.3}) — 检查 make_skins.rs 的 frame()"
     );
+
+    // `geometry.radius` 的语义是"墨团的半径"（不含耳朵、尾巴、印章这些装饰），
+    // 所以图层 `scale` 不该手调，而要由"墨团在画布里占多大"反推出来：
+    //   scale = 目标半径 / (墨团占比 × 画布边长)
+    // 手调过一次 1.80（想让水墨看起来跟代码绘制一样大），结果墨团比 `radius`
+    // 大了一圈，环菜单几乎贴到身上——"位置不对"的观感有一半来自尺寸口径漂移。
+    let blob_ratio = 0.30; // body() 里墨团半径 = 0.30 × 画布边长
+    let scale = 1.0 / (2.0 * blob_ratio);
+    let sil = silhouette(&body_pm);
+    assert!(
+        sil > blob_ratio && sil < blob_ratio * 1.30,
+        "装饰伸得太远：外轮廓 {sil:.3} vs 墨团 {blob_ratio:.3}（上限 1.3 倍）"
+    );
+    println!(
+        "ink: blob {:.3} of side, silhouette {:.3} -> layer scale {:.3} ({:.1}% 余量)",
+        blob_ratio,
+        sil,
+        scale,
+        (sil / blob_ratio - 1.0) * 100.0
+    );
+
     write_png(&dir, "body.png", body_pm, 15_000);
     write_png(&dir, "blink.png", blink(256), 100);
     // 印章做小了（0.26r），可见像素跟着少——阈值按"至少能看出是个方块"给。
     write_png(&dir, "seal.png", seal_layer(256), 300);
 
-    let manifest = r#"# 水墨驺吾 —— 官方第二套皮肤
+    let manifest = format!(
+        r#"# 水墨驺吾 —— 官方第二套皮肤
 id = "zouwu-ink"
 name = "水墨驺吾"
 author = "zouwu"
@@ -432,23 +473,24 @@ theme = "zouwu-dark"
 radius = 56.0
 breath_amount = 0.03
 
-# 主体在 256 画布里只占 0.6（留了水墨的空白），
-# 所以用图层 `scale` 把它放大 1/0.6 ≈ 1.67 倍补齐，再留一点余量取 1.80：
-# `radius` 始终表示"桌面上的主体半径"，`scale` 只负责校正画面里的留白。
+# 墨团在 256 画布里只占 0.6（留了水墨的空白），所以图层要放大 1/0.6 ≈ 1.67 倍，
+# 才让 `radius` 继续表示"桌面上的墨团半径"。这个数由 make_skins.rs 按实测占比
+# 反推、不手调——手调会让 `radius` 的口径悄悄漂移，环菜单就会贴上身体。
 [[layers]]
 image = "body.png"
-scale = 1.80
+scale = {scale:.2}
 
 [[layers]]
 image = "blink.png"
 role = "blink"
-scale = 1.80
+scale = {scale:.2}
 
 [[layers]]
 image = "seal.png"
 role = "overlay"
-scale = 1.80
-"#;
+scale = {scale:.2}
+"#
+    );
     std::fs::write(dir.join("skin.toml"), manifest).expect("write skin.toml");
     println!("wrote skin.toml");
 }

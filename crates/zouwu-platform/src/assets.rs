@@ -149,7 +149,7 @@ pub fn builtin_skin_ids() -> Vec<&'static str> {
 /// 否则老用户机器上那份永远不会被替换——我们改了构图，他们看到的还是旧的那只。
 /// 这条规则是踩出来的：水墨驺吾重新居中之后，本机的 `%APPDATA%` 里仍是旧图，
 /// 看起来像"根本没修好"。
-pub const BUILTIN_ASSET_REVISION: u32 = 2;
+pub const BUILTIN_ASSET_REVISION: u32 = 3;
 
 /// 版本戳文件名（写在每个内置皮肤目录里）。
 const STAMP_FILE: &str = ".zouwu-builtin";

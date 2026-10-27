@@ -9,19 +9,19 @@ theme = "zouwu-dark"
 radius = 56.0
 breath_amount = 0.03
 
-# 主体在 256 画布里只占 0.6（留了水墨的空白），
-# 所以用图层 `scale` 把它放大 1/0.6 ≈ 1.67 倍补齐，再留一点余量取 1.80：
-# `radius` 始终表示"桌面上的主体半径"，`scale` 只负责校正画面里的留白。
+# 墨团在 256 画布里只占 0.6（留了水墨的空白），所以图层要放大 1/0.6 ≈ 1.67 倍，
+# 才让 `radius` 继续表示"桌面上的墨团半径"。这个数由 make_skins.rs 按实测占比
+# 反推、不手调——手调会让 `radius` 的口径悄悄漂移，环菜单就会贴上身体。
 [[layers]]
 image = "body.png"
-scale = 1.80
+scale = 1.67
 
 [[layers]]
 image = "blink.png"
 role = "blink"
-scale = 1.80
+scale = 1.67
 
 [[layers]]
 image = "seal.png"
 role = "overlay"
-scale = 1.80
+scale = 1.67

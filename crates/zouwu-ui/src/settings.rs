@@ -31,6 +31,14 @@ const MARGIN: f32 = 24.0;
 const HEADER_H: f32 = 92.0;
 const FOOTER_H: f32 = 38.0;
 const ROW_H: f32 = 46.0;
+/// 带提示的行要多高。
+///
+/// 以前提示行也按 `ROW_H` 给高度，于是 14pt 的标签和 11pt 的提示挤在 46px 里：
+/// 两行底色（25px + 15px）加起来超过行高，提示字顶到了标签字的下缘，
+/// 看起来像被「遮盖」。多给 18px，两行之间就有了真正的行距。
+const HINT_ROW_EXTRA: f32 = 18.0;
+/// 标签与提示之间的间隙。
+const HINT_GAP: f32 = 2.0;
 const SECTION_H: f32 = 34.0;
 const TEXT_ROW_H: f32 = 34.0;
 const CONTROL_W: f32 = 210.0;
@@ -39,6 +47,8 @@ const BUTTON_W: f32 = 170.0;
 const GALLERY_GAP: f32 = 12.0;
 /// 一个缩略图格子（含底下的名字）的高度。
 const GALLERY_CELL_H: f32 = 104.0;
+/// 缩略图墙脚那一行说明文字预留的高度。
+const GALLERY_HINT_H: f32 = 20.0;
 /// 名义列数：只用来估算"要几行"，真实列数在 `gallery_geom` 里按宽度算。
 /// 取 5 是因为默认 760 宽的窗口扣掉边距正好放 5 个 132px 的格子。
 const GALLERY_COLS_NOMINAL: usize = 5;
@@ -389,9 +399,19 @@ impl Row {
                 let rows = count
                     .div_ceil(GALLERY_COLS_NOMINAL)
                     .clamp(1, GALLERY_MAX_ROWS);
-                GALLERY_CELL_H * rows as f32 + GALLERY_GAP * (rows - 1) as f32 + 12.0
+                // 缩略图墙的说明文字放在最下面一行，所以高度里要多给它一条。
+                GALLERY_CELL_H * rows as f32
+                    + GALLERY_GAP * (rows - 1) as f32
+                    + 12.0
+                    + GALLERY_HINT_H
             }
-            _ => ROW_H,
+            _ => {
+                if self.hint.is_some() {
+                    ROW_H + HINT_ROW_EXTRA
+                } else {
+                    ROW_H
+                }
+            }
         }
     }
 }
@@ -1465,31 +1485,45 @@ fn draw_row(p: &mut Painter<'_>, pal: &Palette, model: &Model, row: &Row, rl: &R
         return;
     }
 
-    if !row.label.is_empty() {
-        match &row.hint {
-            None => {
-                let label = p.truncate(&row.label, 14.0, label_rect.w);
-                p.text_in(&label, label_rect, 14.0, pal.text, Weight::Regular);
-            }
-            Some(hint) => {
-                // 有提示的行：标签上、提示下，两行都在左侧列。
-                let top = Rect::new(
-                    label_rect.x,
-                    label_rect.y + rl.rect.h * 0.12,
-                    label_rect.w,
-                    rl.rect.h * 0.5,
-                );
-                let bottom = Rect::new(
-                    label_rect.x,
-                    top.bottom() - 4.0,
-                    label_rect.w,
-                    rl.rect.h * 0.34,
-                );
-                let label = p.truncate(&row.label, 14.0, top.w);
-                p.text_in(&label, top, 14.0, pal.text, Weight::Regular);
-                let hint = p.truncate(hint, 11.0, bottom.w);
-                p.text_in(&hint, bottom, 11.0, pal.muted, Weight::Regular);
-            }
+    match (row.label.is_empty(), row.hint.as_deref()) {
+        // 只有提示的行（删除按钮等）：提示自己就是这一行的说明文字。
+        (true, Some(hint)) if matches!(row.control, Control::Gallery { .. }) => {
+            // 缩略图墙占满了整行，说明只能待在墙脚。
+            let h = p.line_height(11.0);
+            let rect = Rect::new(label_rect.x, rl.rect.bottom() - h - 2.0, label_rect.w, h);
+            let hint = p.truncate(hint, 11.0, rect.w);
+            p.text_in(&hint, rect, 11.0, pal.muted, Weight::Regular);
+        }
+        (true, Some(hint)) => {
+            let hint = p.truncate(hint, 11.0, label_rect.w);
+            p.text_in(&hint, label_rect, 11.0, pal.muted, Weight::Regular);
+        }
+        (true, None) => {}
+        (false, None) => {
+            let label = p.truncate(&row.label, 14.0, label_rect.w);
+            p.text_in(&label, label_rect, 14.0, pal.text, Weight::Regular);
+        }
+        (false, Some(hint)) => {
+            // 标签上、提示下，两行作为一个整体在行内垂直居中。
+            //
+            // 关键是"按行高算"而不是按行高的百分比算：字体度量一变（换字体、
+            // 换 DPI、中英文混排），百分比布局就会让两行字互相压住，
+            // 而按行高叠起来时，间隙始终是 HINT_GAP 那么多。
+            let label_h = p.line_height(14.0);
+            let hint_h = p.line_height(11.0);
+            let block = label_h + HINT_GAP + hint_h;
+            let top_y = rl.rect.y + (rl.rect.h - block) * 0.5;
+            let top = Rect::new(label_rect.x, top_y, label_rect.w, label_h);
+            let bottom = Rect::new(
+                label_rect.x,
+                top_y + label_h + HINT_GAP,
+                label_rect.w,
+                hint_h,
+            );
+            let label = p.truncate(&row.label, 14.0, top.w);
+            p.text_in(&label, top, 14.0, pal.text, Weight::Regular);
+            let hint = p.truncate(hint, 11.0, bottom.w);
+            p.text_in(&hint, bottom, 11.0, pal.muted, Weight::Regular);
         }
     }
 
