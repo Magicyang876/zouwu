@@ -189,6 +189,8 @@
 
 发布物是 `dist/zouwu-<version>-win64.zip`（约 1.9 MB），由
 `powershell -File packaging/package.ps1` 生成，同时打印 sha256。
+产物落两处（内容一致）：`dist/`（面向人）与 `target/dist/`（编辑器默认看得到，
+因为新建的 `dist/` 常要重开工作区才出现在文件树里）。
 
 为什么不是 MSI / 安装向导：见 [ADR-025](docs/decisions.md)。一句话——
 三种"安装才能做的事"（开始菜单、可卸载项、静默部署）都不需要安装器框架，
@@ -247,7 +249,7 @@ cargo run -p zouwu-platform --example skinpack_tool -- list       # 皮肤包：
 ZOUWU_PERF=1 cargo run --release -p zouwu-app   # 每 60 帧报一次实际帧率
 ZOUWU_SETTINGS=1 cargo run --release -p zouwu-app   # 启动即开设置面板（托盘菜单没法脚本化）
 cargo run -p zouwu-platform --example autostart_check -- status   # 开机自启读写（有副作用，故不做成单测）
-powershell -File packaging/package.ps1     # 打包 → dist/zouwu-<ver>-win64.zip + sha256（约 1.9 MB）
+powershell -File packaging/package.ps1     # 打包 → dist/ 与 target/dist/ 各一份 zip + sha256（约 1.9 MB）
 target/release/zouwu.exe --install         # 装到 %LOCALAPPDATA%\Programs\zouwu（退出码 0/1，可脚本化）
 target/release/zouwu.exe --uninstall --purge   # 卸载，连配置/皮肤/日志一起删
 ```
