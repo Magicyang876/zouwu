@@ -14,6 +14,7 @@ tray-theme = Theme
 tray-skin = Skin
 tray-skin-import = Import skin package…
 tray-skin-export = Export current skin…
+tray-recenter = Bring back to screen
 tray-autostart = Start with Windows
 tray-quit = Quit
 

@@ -143,16 +143,41 @@ pub fn builtin_skin_ids() -> Vec<&'static str> {
     BUILTIN_SKINS.iter().map(|s| s.id).collect()
 }
 
-/// 把缺少的官方皮肤写到 `skins/`，返回这次实际写入了几个。
+/// 内置素材的版本戳。
 ///
-/// 幂等：已存在的目录一律不动（用户在改我们发布的皮肤，不能被启动覆盖）。
+/// **只要改了 `assets/` 下内置皮肤的字节（哪怕是同一版程序），就要把它 +1。**
+/// 否则老用户机器上那份永远不会被替换——我们改了构图，他们看到的还是旧的那只。
+/// 这条规则是踩出来的：水墨驺吾重新居中之后，本机的 `%APPDATA%` 里仍是旧图，
+/// 看起来像"根本没修好"。
+pub const BUILTIN_ASSET_REVISION: u32 = 2;
+
+/// 版本戳文件名（写在每个内置皮肤目录里）。
+const STAMP_FILE: &str = ".zouwu-builtin";
+
+/// 把官方皮肤写到 `skins/`，返回这次实际写入了几个。
+///
+/// 幂等有两个含义：
+/// - 已经有**同一版**的：一律不动（用户在改我们发布的皮肤，不能被启动覆盖）；
+/// - 是旧版的（版本戳不同）：整目录重建。用户对内置皮肤的手改会丢，
+///   但"更新之后看到的还是旧图"更难解释——导入的皮肤有自己的 id，不受影响。
 pub fn ensure_builtin_skins() -> usize {
     let root = skins_dir();
     let mut installed = 0;
     for skin in BUILTIN_SKINS {
         let dir = root.join(skin.id);
-        if dir.is_dir() {
+        let up_to_date = fs::read_to_string(dir.join(STAMP_FILE))
+            .ok()
+            .and_then(|text| text.trim().parse::<u32>().ok())
+            .is_some_and(|rev| rev == BUILTIN_ASSET_REVISION);
+        if dir.is_dir() && up_to_date {
             continue;
+        }
+        if dir.is_dir() {
+            // 旧版本（或没有戳的历史安装）：整目录重建，避免残留旧图层文件。
+            if let Err(err) = fs::remove_dir_all(&dir) {
+                log::warn!("cannot refresh {}: {err}", dir.display());
+                continue;
+            }
         }
         if let Err(err) = fs::create_dir_all(&dir) {
             log::warn!("cannot create {}: {err}", dir.display());
@@ -170,6 +195,12 @@ pub fn ensure_builtin_skins() -> usize {
         if let Err(err) = fs::write(&manifest, skin.manifest) {
             log::warn!("cannot write {}: {err}", manifest.display());
             ok = false;
+        }
+        if ok {
+            if let Err(err) = fs::write(dir.join(STAMP_FILE), BUILTIN_ASSET_REVISION.to_string()) {
+                log::warn!("cannot write stamp in {}: {err}", dir.display());
+                ok = false;
+            }
         }
         if ok {
             installed += 1;

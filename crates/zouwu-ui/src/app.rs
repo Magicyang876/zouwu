@@ -116,6 +116,24 @@ const CLICK_DEBOUNCE: Duration = Duration::from_millis(250);
 /// 1200² ≈ 1.44 Mpx，一帧 RGBA 约 5.8 MB；再大光栅+合成会明显拖慢。
 const MAX_PHYSICAL_SIDE: u32 = 1200;
 
+/// 至少要有这么多比例的面积落在真实屏幕上，才认为「这个位置还活着」。
+///
+/// 场景：笔记本插着外接屏时把驺吾放到外接屏上，拔掉外接屏后那个坐标就落在
+/// 不存在的桌面上——窗口还在、进程活着、托盘也在，但用户什么都看不见，
+/// 而且重启也回不来（坏坐标被记进了 state.toml）。
+///
+/// 0.5 是刻意的宽：允许小工具被屏幕边缘切掉一半，不允许它整个消失。
+const MIN_VISIBLE_RATIO: f32 = 0.5;
+
+/// 多久检查一次「我还在屏幕上吗」。
+///
+/// 拔屏、改分辨率不会通知我们（winit 不暴露 WM_DISPLAYCHANGE），
+/// 但枚举显示器只要几微秒，所以跟光标轮询同节拍做一次就够。
+const MONITOR_CHECK: Duration = Duration::from_secs(3);
+
+/// 重新落位时离屏幕右下边缘的距离。
+const EDGE_MARGIN: f32 = 48.0;
+
 struct App {
     config: Config,
     theme: Theme,
@@ -173,6 +191,10 @@ struct App {
 
     /// 窗口位置：`Moved` 事件只记在这里，节流后再落盘（拖动会刷出大量事件）
     state_pos: Option<(i32, i32)>,
+    /// 托盘点了「回到主屏」：窗口句柄只有 `about_to_wait` 里拿得到，先记个意愿
+    pending_recenter: bool,
+    /// 上一次检查显示器的时刻
+    last_monitor_check: Instant,
     /// 位置待落盘
     state_pending: bool,
     /// 上一次位置落盘的时刻（节流）
@@ -286,6 +308,8 @@ impl App {
             last_click: None,
             drag: None,
             state_pos: None,
+            pending_recenter: false,
+            last_monitor_check: Instant::now(),
             state_pending: false,
             state_saved_at: Instant::now(),
             perf_trace: std::env::var("ZOUWU_PERF").is_ok(),
@@ -755,6 +779,7 @@ impl App {
                     log::warn!("log dir: {}", zouwu_platform::logging::log_dir().display());
                 }
             }
+            TrayCommand::Recenter => self.pending_recenter = true,
             TrayCommand::SetTheme(id) => self.set_theme(id, now),
             TrayCommand::SetSkin(id) => self.set_skin(id, now),
             TrayCommand::ImportSkin => self.import_skin(now),
@@ -1050,6 +1075,91 @@ impl App {
     /// 任何原因醒来，每次醒来都重新算一个"16ms 之后"，deadline 就永远追不上，
     /// 于是 request_redraw 一次都不发、动画卡死、循环却空转在 60Hz。
     /// 所以节拍锚在 `last_frame`（上一次真正渲染的时刻），它只在渲染时前进。
+    /// 所有显示器的工作区矩形（物理像素），**主屏排第一**。
+    ///
+    /// `available_monitors` 的顺序不保证稳定（换一个 DPI、换个版本就可能变），
+    /// 而 `home_slot` 把第一个当主屏，所以这里显式把 `primary_monitor` 提到前面。
+    fn monitor_rects(event_loop: &ActiveEventLoop) -> Vec<Rect> {
+        fn to_rect(m: &winit::monitor::MonitorHandle) -> Rect {
+            let p = m.position();
+            let s = m.size();
+            Rect::new(p.x as f32, p.y as f32, s.width as f32, s.height as f32)
+        }
+        let mut out = Vec::new();
+        if let Some(m) = event_loop.primary_monitor() {
+            out.push(to_rect(&m));
+        }
+        for m in event_loop.available_monitors() {
+            let r = to_rect(&m);
+            let dup = out
+                .iter()
+                .any(|o| o.x == r.x && o.y == r.y && o.w == r.w && o.h == r.h);
+            if !dup {
+                out.push(r);
+            }
+        }
+        out
+    }
+
+    /// 窗口自己占的矩形（物理像素）。
+    fn self_rect(window: &Window) -> Option<Rect> {
+        let pos = window.outer_position().ok()?;
+        let size = window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return None;
+        }
+        Some(Rect::new(
+            pos.x as f32,
+            pos.y as f32,
+            size.width as f32,
+            size.height as f32,
+        ))
+    }
+
+    /// 确认自己还在某块真实屏幕上；不在就搬回主屏。
+    ///
+    /// `had_position = true` 表示“本来就有位置（来自上次退出或当前状态）”，
+    /// 这时只在可见比例不足时才动它——用户精心摆的位置不能因为一次启动就重置。
+    /// `false` 表示“没有可信位置”（首次运行、或用户主动点了「回到主屏」）。
+    ///
+    /// 返回是否真的搬了。
+    fn ensure_visible_on(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window: &Window,
+        had_position: bool,
+    ) -> bool {
+        let monitors = Self::monitor_rects(event_loop);
+        if monitors.is_empty() {
+            // 拿不到显示器信息时不猜：宁可留在原地，也不要凭一个空的列表乱搬。
+            return false;
+        }
+        let Some(me) = Self::self_rect(window) else {
+            return false;
+        };
+        let ratio = zouwu_core::geom::visible_ratio(me, &monitors);
+        if had_position && ratio >= MIN_VISIBLE_RATIO {
+            return false;
+        }
+        let slot = zouwu_core::geom::home_slot(&monitors, me.w, EDGE_MARGIN);
+        window.set_outer_position(PhysicalPosition::new(slot.x as i32, slot.y as i32));
+        self.state_pos = Some((slot.x as i32, slot.y as i32));
+        self.state_pending = true;
+        if had_position {
+            // 这条日志是“我的小工具刚才不见了”的唯一解释，值得说清楚。
+            log::warn!(
+                "position ({:.0}, {:.0}) only {:.0}% visible on {} monitor(s); moved to ({:.0}, {:.0})",
+                me.x,
+                me.y,
+                ratio * 100.0,
+                monitors.len(),
+                slot.x,
+                slot.y
+            );
+        }
+        true
+    }
+
     fn next_deadline(&self, now: Instant) -> Option<Instant> {
         // 藏在托盘里：只有一个闹钟有意义 —— 轮询外壳（热键/托盘/第二实例）。
         // 眨眼、呼吸、悬停计时全部停摆，否则一个"看不见"的程序还在按 20fps 空转。
@@ -1511,28 +1621,18 @@ impl ApplicationHandler for App {
             }
         };
 
-        // 位置：优先回到上次的位置；没有记录时停在主屏右侧偏下的"宠物位"
-        let restored = if self.config.window.remember_position {
+        // 位置：优先回到上次的位置；没有记录时停在主屏右侧偏下的「宠物位」。
+        // 两种来源都要过一遍可见性检查——上次的位置可能属于一块已经不存在的屏。
+        let saved = if self.config.window.remember_position {
             zouwu_platform::load_window_state()
         } else {
             None
         };
-        let pos = restored.map(|WindowState { x, y }| (x, y)).or_else(|| {
-            let monitor = window
-                .current_monitor()
-                .or_else(|| event_loop.primary_monitor())?;
-            let msize = monitor.size();
-            let mpos = monitor.position();
-            let wsize = window.inner_size();
-            Some((
-                mpos.x + msize.width as i32 - wsize.width as i32 - 48,
-                mpos.y + (msize.height as f32 * 0.55) as i32 - wsize.height as i32 / 2,
-            ))
-        });
-        if let Some((x, y)) = pos {
+        if let Some(WindowState { x, y }) = saved {
             window.set_outer_position(PhysicalPosition::new(x, y));
             self.state_pos = Some((x, y));
         }
+        self.ensure_visible_on(event_loop, &window, saved.is_some());
 
         let physical = window.inner_size();
         match crate::presenter::create(&window, physical.width, physical.height) {
@@ -1666,6 +1766,27 @@ impl ApplicationHandler for App {
         // 开一枪 GetCursorPos 几微秒，醒来发现画面没变就直接接着睡。
         if now >= self.next_poll {
             self.poll_now(now);
+
+            // 显示器状态搭同一班车：拔屏/改分辨率不会发通知给 winit，
+            // 而这条 100ms 的闹钟本来就在跑，搭车的代价是每 3 秒一次枚举。
+            if now.duration_since(self.last_monitor_check) >= MONITOR_CHECK {
+                self.last_monitor_check = now;
+                if let Some(window) = self.window_arc() {
+                    if self.ensure_visible_on(event_loop, &window, true) {
+                        self.dirty = true;
+                        window.request_redraw();
+                    }
+                }
+            }
+        }
+
+        // 托盘点了「回到主屏」：无视当前可见性，强制回宠物位。
+        if std::mem::take(&mut self.pending_recenter) {
+            if let Some(window) = self.window_arc() {
+                self.ensure_visible_on(event_loop, &window, false);
+                self.dirty = true;
+                window.request_redraw();
+            }
         }
 
         // 外壳（托盘/热键/第二实例）与光标轮询同节拍：一次唤醒问完所有事。

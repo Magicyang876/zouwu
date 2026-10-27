@@ -14,6 +14,7 @@ tray-theme = 主题
 tray-skin = 形象
 tray-skin-import = 导入皮肤包…
 tray-skin-export = 导出当前皮肤…
+tray-recenter = 回到主屏
 tray-autostart = 开机自启
 tray-quit = 退出
 

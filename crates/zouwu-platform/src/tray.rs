@@ -22,6 +22,7 @@ pub const ID_SHOW_HIDE: &str = "zouwu.show-hide";
 pub const ID_SETTINGS: &str = "zouwu.settings";
 pub const ID_CONFIG_DIR: &str = "zouwu.config-dir";
 pub const ID_OPEN_LOGS: &str = "zouwu.open-logs";
+pub const ID_RECENTER: &str = "zouwu.recenter";
 pub const ID_AUTOSTART: &str = "zouwu.autostart";
 pub const ID_QUIT: &str = "zouwu.quit";
 pub const ID_LANG_AUTO: &str = "zouwu.lang.auto";
@@ -43,6 +44,9 @@ pub enum TrayCommand {
     OpenConfigDir,
     /// 打开日志目录。
     OpenLogs,
+    /// 把小工具搬回主屏。存在的理由很具体：多屏拔掉之后，
+    /// 旧坐标落在不存在的桌面上，用户看不见、也拖不到它。
+    Recenter,
     SetAutostart(bool),
     SetLanguage(&'static str),
     /// 换配色（id → `themes/<id>.toml` 或内置）。
@@ -115,6 +119,7 @@ impl Tray {
         let settings = MenuItem::with_id(ID_SETTINGS, i18n.t("tray.settings"), true, None);
         let config_dir = MenuItem::with_id(ID_CONFIG_DIR, i18n.t("tray.config"), true, None);
         let open_logs = MenuItem::with_id(ID_OPEN_LOGS, i18n.t("tray.open-logs"), true, None);
+        let recenter = MenuItem::with_id(ID_RECENTER, i18n.t("tray.recenter"), true, None);
         let autostart_item = CheckMenuItem::with_id(
             ID_AUTOSTART,
             i18n.t("tray.autostart"),
@@ -202,6 +207,7 @@ impl Tray {
         let menu = Menu::new();
         menu.append_items(&[
             &show_hide,
+            &recenter,
             &settings,
             &PredefinedMenuItem::separator(),
             &config_dir,
@@ -354,6 +360,9 @@ impl Tray {
         }
         if id == ID_OPEN_LOGS {
             return Some(TrayCommand::OpenLogs);
+        }
+        if id == ID_RECENTER {
+            return Some(TrayCommand::Recenter);
         }
         if id == ID_AUTOSTART {
             return Some(TrayCommand::SetAutostart(self.items.autostart.is_checked()));
