@@ -16,11 +16,18 @@ use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem,
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use zouwu_core::i18n::{I18n, AUTO, LANGUAGES};
 
+use zouwu_core::theme::Theme;
+
 pub const ID_SHOW_HIDE: &str = "zouwu.show-hide";
 pub const ID_SETTINGS: &str = "zouwu.settings";
+pub const ID_CONFIG_DIR: &str = "zouwu.config-dir";
+pub const ID_OPEN_LOGS: &str = "zouwu.open-logs";
 pub const ID_AUTOSTART: &str = "zouwu.autostart";
 pub const ID_QUIT: &str = "zouwu.quit";
 pub const ID_LANG_AUTO: &str = "zouwu.lang.auto";
+/// 主题项 id 形如 `zouwu.theme.zouwu-warm`；皮肤同理。
+pub const ID_THEME_PREFIX: &str = "zouwu.theme.";
+pub const ID_SKIN_PREFIX: &str = "zouwu.skin.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TrayCommand {
@@ -28,8 +35,16 @@ pub enum TrayCommand {
     Hide,
     Toggle,
     Settings,
+    /// 打开配置目录（托盘里的快捷入口，不改任何东西）。
+    OpenConfigDir,
+    /// 打开日志目录。
+    OpenLogs,
     SetAutostart(bool),
     SetLanguage(&'static str),
+    /// 换配色（id → `themes/<id>.toml` 或内置）。
+    SetTheme(String),
+    /// 换形象（id → `skins/<id>/` 或 `procedural`）。
+    SetSkin(String),
     Quit,
 }
 
@@ -37,32 +52,59 @@ pub enum TrayCommand {
 struct Items {
     show_hide: MenuItem,
     settings: MenuItem,
+    config_dir: MenuItem,
+    open_logs: MenuItem,
     autostart: CheckMenuItem,
     quit: MenuItem,
     language_menu: Submenu,
     lang_auto: CheckMenuItem,
     /// `(语言代码, 菜单项)`，顺序与 `LANGUAGES` 一致。
     langs: Vec<(&'static str, CheckMenuItem)>,
+    theme_menu: Submenu,
+    /// `(主题 id, 菜单项)`，启动时扫一次（托盘菜单不动态刷新列表）。
+    themes: Vec<(String, CheckMenuItem)>,
+    skin_menu: Submenu,
+    /// `(皮肤 id, 菜单项)`。
+    skins: Vec<(String, CheckMenuItem)>,
+}
+
+/// `Tray::new` 的其余入参。
+///
+/// 凑成结构体是因为 8 个位置参数里有 4 个是 `bool`/`&str`，调用处读起来像猜灯谜
+/// （clippy 的 `too_many_arguments` 也是同一个抱怨）。
+pub struct TrayOptions<'a> {
+    /// 32×32 非预乘 RGBA，由 `zouwu-ui::paint::tray_icon` 用同一套画笔渲染。
+    pub icon_rgba: Option<(Vec<u8>, u32, u32)>,
+    pub language_setting: &'a str,
+    pub autostart: bool,
+    pub visible: bool,
+    /// 当前主题/皮肤 id：决定菜单里哪一项打勾。
+    pub theme_id: &'a str,
+    pub skin_id: &'a str,
 }
 
 pub struct Tray {
     // 必须一直活着：drop 掉托盘图标就没了。
-    _icon: TrayIcon,
+    icon: TrayIcon,
     items: Items,
 }
 
 impl Tray {
     /// `icon_rgba` 是 32×32 的非预乘 RGBA（由 UI 层用同一套画笔渲染，见
     /// `zouwu-ui::paint::tray_icon`），保证托盘图标和桌面上的小兽长得一样。
-    pub fn new(
-        i18n: &I18n,
-        icon_rgba: Option<(Vec<u8>, u32, u32)>,
-        language_setting: &str,
-        autostart: bool,
-        visible: bool,
-    ) -> Result<Self, String> {
+    pub fn new(i18n: &I18n, themes: &[Theme], opts: TrayOptions<'_>) -> Result<Self, String> {
+        let TrayOptions {
+            icon_rgba,
+            language_setting,
+            autostart,
+            visible,
+            theme_id,
+            skin_id,
+        } = opts;
         let show_hide = MenuItem::with_id(ID_SHOW_HIDE, show_hide_text(i18n, visible), true, None);
-        let settings = MenuItem::with_id(ID_SETTINGS, i18n.t("tray.config"), true, None);
+        let settings = MenuItem::with_id(ID_SETTINGS, i18n.t("tray.settings"), true, None);
+        let config_dir = MenuItem::with_id(ID_CONFIG_DIR, i18n.t("tray.config"), true, None);
+        let open_logs = MenuItem::with_id(ID_OPEN_LOGS, i18n.t("tray.open-logs"), true, None);
         let autostart_item = CheckMenuItem::with_id(
             ID_AUTOSTART,
             i18n.t("tray.autostart"),
@@ -101,13 +143,53 @@ impl Tray {
             .append(&lang_auto)
             .map_err(|err| format!("menu append failed: {err}"))?;
 
+        // ---- 主题 / 皮肤：都是"启动时扫一次"的静态列表。
+        // 新装的主题重启后出现——换主题不是高频操作，为此做目录监听不值得。
+        let theme_menu = Submenu::with_id("zouwu.theme", i18n.t("tray.theme"), true);
+        let mut theme_items = Vec::with_capacity(themes.len());
+        for entry in themes {
+            let item = CheckMenuItem::with_id(
+                format!("{ID_THEME_PREFIX}{}", entry.id),
+                entry.name.clone(),
+                true,
+                entry.id == theme_id,
+                None,
+            );
+            theme_menu
+                .append(&item)
+                .map_err(|err| format!("menu append failed: {err}"))?;
+            theme_items.push((entry.id.clone(), item));
+        }
+
+        let skin_menu = Submenu::with_id("zouwu.skin", i18n.t("tray.skin"), true);
+        let skins = skin_choices(i18n);
+        let mut skin_items = Vec::with_capacity(skins.len());
+        for entry in &skins {
+            let item = CheckMenuItem::with_id(
+                format!("{ID_SKIN_PREFIX}{}", entry.0),
+                entry.1.clone(),
+                true,
+                entry.0 == skin_id,
+                None,
+            );
+            skin_menu
+                .append(&item)
+                .map_err(|err| format!("menu append failed: {err}"))?;
+            skin_items.push((entry.0.clone(), item));
+        }
+
         let menu = Menu::new();
         menu.append_items(&[
             &show_hide,
             &settings,
             &PredefinedMenuItem::separator(),
+            &config_dir,
+            &open_logs,
+            &PredefinedMenuItem::separator(),
             &autostart_item,
             &language_menu,
+            &theme_menu,
+            &skin_menu,
             &PredefinedMenuItem::separator(),
             &quit,
         ])
@@ -135,17 +217,51 @@ impl Tray {
         );
 
         Ok(Self {
-            _icon: icon,
+            icon,
             items: Items {
                 show_hide,
                 settings,
+                config_dir,
+                open_logs,
                 autostart: autostart_item,
                 quit,
                 language_menu,
                 lang_auto,
                 langs,
+                theme_menu,
+                themes: theme_items,
+                skin_menu,
+                skins: skin_items,
             },
         })
+    }
+
+    /// 换主题/换皮肤后刷新托盘那一小格图标（用同一套画笔重画，见 `paint::tray_icon`）。
+    pub fn set_icon(&self, icon_rgba: Option<(Vec<u8>, u32, u32)>) {
+        let Some((rgba, w, h)) = icon_rgba else {
+            return;
+        };
+        match tray_icon::Icon::from_rgba(rgba, w, h) {
+            Ok(icon) => {
+                if let Err(err) = self.icon.set_icon(Some(icon)) {
+                    log::warn!("tray icon update failed: {err}");
+                }
+            }
+            Err(err) => log::warn!("tray icon rejected: {err}"),
+        }
+    }
+
+    /// 主题变了：只动勾选（文字不跟着变）。
+    pub fn apply_theme(&self, theme_id: &str) {
+        for (id, item) in &self.items.themes {
+            item.set_checked(id == theme_id);
+        }
+    }
+
+    pub fn apply_skin(&self, skin_id: &str) {
+        for (id, item) in &self.items.skins {
+            item.set_checked(id == skin_id);
+        }
     }
 
     /// 按当前显示状态刷新"显示/隐藏"那一条。
@@ -160,12 +276,16 @@ impl Tray {
     /// 语言变了：原地改文字 + 勾选状态，不重建托盘。
     pub fn apply_language(&self, i18n: &I18n, language_setting: &str, visible: bool) {
         self.items.show_hide.set_text(show_hide_text(i18n, visible));
-        self.items.settings.set_text(i18n.t("tray.config"));
+        self.items.settings.set_text(i18n.t("tray.settings"));
+        self.items.config_dir.set_text(i18n.t("tray.config"));
+        self.items.open_logs.set_text(i18n.t("tray.open-logs"));
         self.items.autostart.set_text(i18n.t("tray.autostart"));
         self.items.quit.set_text(i18n.t("tray.quit"));
         self.items.language_menu.set_text(i18n.t("tray.language"));
         self.items.lang_auto.set_text(i18n.t("tray.language.auto"));
         self.items.lang_auto.set_checked(language_setting == AUTO);
+        self.items.theme_menu.set_text(i18n.t("tray.theme"));
+        self.items.skin_menu.set_text(i18n.t("tray.skin"));
         for (code, item) in &self.items.langs {
             item.set_text(language_label(code));
             item.set_checked(language_setting == *code);
@@ -204,6 +324,12 @@ impl Tray {
         if id == ID_SETTINGS {
             return Some(TrayCommand::Settings);
         }
+        if id == ID_CONFIG_DIR {
+            return Some(TrayCommand::OpenConfigDir);
+        }
+        if id == ID_OPEN_LOGS {
+            return Some(TrayCommand::OpenLogs);
+        }
         if id == ID_AUTOSTART {
             return Some(TrayCommand::SetAutostart(self.items.autostart.is_checked()));
         }
@@ -217,6 +343,12 @@ impl Tray {
             if item.id().as_ref() == id {
                 return Some(TrayCommand::SetLanguage(code));
             }
+        }
+        if let Some(theme_id) = id.strip_prefix(ID_THEME_PREFIX) {
+            return Some(TrayCommand::SetTheme(theme_id.to_string()));
+        }
+        if let Some(skin_id) = id.strip_prefix(ID_SKIN_PREFIX) {
+            return Some(TrayCommand::SetSkin(skin_id.to_string()));
         }
         None
     }
@@ -232,6 +364,23 @@ fn show_hide_text(i18n: &I18n, visible: bool) -> String {
 
 /// 语言菜单里用**该语言自己的名字**（中文显示"简体中文"，英文显示"English"）。
 /// 用界面语言去翻译语言名是常见的坏味道：英文用户看到"简体中文"不知道该不该点它。
+/// 皮肤菜单项：`(id, 显示名)`。
+///
+/// `procedural` 没有清单，名字走 i18n；其余用清单里的 `name`（缺省用目录名）。
+fn skin_choices(i18n: &I18n) -> Vec<(String, String)> {
+    crate::assets::skin_entries()
+        .into_iter()
+        .map(|entry| {
+            let name = if entry.id == zouwu_core::skin::PROCEDURAL_SKIN_ID {
+                i18n.t("settings.skin.procedural")
+            } else {
+                entry.name
+            };
+            (entry.id, name)
+        })
+        .collect()
+}
+
 pub fn language_label(code: &str) -> String {
     match code {
         "zh-CN" => "简体中文".to_string(),

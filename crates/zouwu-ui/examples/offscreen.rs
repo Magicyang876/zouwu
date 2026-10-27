@@ -74,8 +74,10 @@ fn shoot(name: &str, logical: f32, scale: f32, openness: f32, theme: &Theme) {
         buddy_scale: 1.0 + 0.06 * openness,
         buddy_alpha: 1.0,
         blink: 0.0,
+        breath: 0.0,
         theme,
         bubbles: &bubbles,
+        skin: None,
     };
     render(&scene, &mut pixmap);
 

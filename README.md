@@ -107,7 +107,7 @@
 | 托盘 | `tray-icon` | 各平台原生 API | 与 Tauri 同源，成熟 |
 | 全局热键 | `global-hotkey` | Win32 `RegisterHotKey` / Carbon / portal | Linux Wayland 无原生全局热键，需 `xdg-desktop-portal` 的 GlobalShortcuts |
 | i18n | `fluent` + `fluent-bundle`（支持复数、性别、变量） | `rust-i18n`（YAML/TOML，更简单） | 若只要"中英日"简单键值，`rust-i18n` 更省事 |
-| 配置 | `serde` + `toml` + `figment`，`notify` 热重载 | `confy`、`ron` | 配置要有版本号与迁移逻辑 |
+| 配置 | `serde` + `toml`（版本号 + 迁移）；热重载靠**已有轮询节拍 + metadata**，不引 `notify` | `confy`、`ron` | 见 ADR-012：变更要按 `ChangeKind` 分类热应用，坏配置不能打断运行 |
 | 插件脚本 | 内置动作直接用 Rust trait；用户脚本用 `rhai`（轻、易嵌） | `wasmtime`（沙箱强、体积大）、`mlua` | 先支持"命令/HTTP/Shell"三类声明式动作，脚本作为 P2 |
 | 异步/任务 | `tokio`（网络、OCR、翻译等外部调用） | `smol` | 渲染线程与任务线程严格分离 |
 | 日志/诊断 | `tracing` + `tracing-appender` | | |
@@ -166,22 +166,25 @@
 | 悬停变形（气泡环） | ✔ 悬停 150ms 展开 8 颗气泡，弹簧错峰 24ms + 轨道浮动，选中态发光 |
 | 点击 / 右键 | ✔ 左键点气泡 → 动作入口；左键点本体 → 立即展开/收起；右键 → 收起 |
 | 输入保底 | ✔ 全局光标轮询（本机分层窗口收不到鼠标消息，见 ADR-009） |
-| 主题 | ✔ `Theme` 已抽出（`ZOUWU_WARM` / `ZOUWU_DARK`），M1.5 接配置与皮肤包 |
+| 主题 | ✔ `themes/<id>.toml`：`base` + 增量调色板；内置暖橙/夜行；托盘菜单切换即时生效（ADR-013） |
+| 皮肤加载器 | ✔ `skins/<id>/skin.toml` + PNG 图层（body/blink/overlay）；目录名须等于 id；解码失败保留当前皮肤（ADR-014） |
 | 托盘常驻 | ✔ 左键切显隐，右键菜单（显示/隐藏、配置文件…、开机自启、语言、退出） |
 | 全局热键 | ✔ 默认 `Alt+Space`，可在 `config.toml` 改；解析失败回退默认 |
 | 单实例 | ✔ 命名内核事件：第二次启动把已有窗口叫出来，然后自己退出 |
 | 关窗语义 | ✔ 关窗 / Esc = 缩进托盘（**不是退出**），退出只走托盘菜单 |
 | 开机自启 | ✔ `HKCU\...\Run` 单值，写后读回校验，托盘可勾选 |
 | 多语言 | ✔ Fluent 中/英，托盘内即时切换，`language = "auto"` 跟随系统 |
-| 配置热重载 | ✖ 待做（改 `config.toml` 目前要重启） |
+| 配置热重载 | ✔ 改 `config.toml` 保存即生效（语言/主题/热键/自启/环/尺寸/置顶/日志），坏配置跳过并保留现状（ADR-012） |
 | 矢量图标字体 | ✖ 8 个 glyph 先程序化绘制，M2 换图标字体 |
 
 **可复现的验收方式**：
 
 ```bash
-cargo test --workspace                     # 34 个单测：几何 / 弹簧 / 布局 / 屏边避让 / 配置
+cargo test --workspace                     # 95 个单测：几何 / 弹簧 / 布局 / 屏边避让 / 配置 / 主题 / 皮肤 / i18n
 cargo run -p zouwu-ui --example offscreen  # 离屏渲染 → target/zouwu-offscreen/*.png，直接看图
 cargo run -p zouwu-ui --example bench      # 单帧成本模型（release）
+cargo run --release -p zouwu-ui --example skin_demo            # 造一份皮肤 → 走真实解码 → 导出 4 张图 + 三种路径耗时
+cargo run --release -p zouwu-ui --example skin_demo -- --install  # 真的装进 %APPDATA%/zouwu/skins/，托盘里就能选
 ZOUWU_PERF=1 cargo run --release -p zouwu-app   # 每 60 帧报一次实际帧率
 cargo run -p zouwu-platform --example autostart_check -- status   # 开机自启读写（有副作用，故不做成单测）
 ```
@@ -197,7 +200,7 @@ cargo run -p zouwu-platform --example autostart_check -- status   # 开机自启
 | O3 | 用户脚本动作：Rhai vs wasmtime | M4 前 |
 | O4 | 开源协议（建议 MIT+Apache-2.0，素材单独 CC-BY） | 公开发布前 |
 | O5 | 驺吾插画来源与授权（原创 / 约稿 / 素材） | M1 前 |
-| O6 | 是否引入精灵图缓存（各状态预渲染成位图） | M1 做皮肤时 |
+| O6 | 精灵图缓存 —— 实测后不急（位图皮肤已给 1.56×） | M5 若仍嫌慢 |
 | O7 | 动画占空比是否再压（现 20fps / 呼吸占 10% 时间） | M2 动效定稿 |
 
 ---

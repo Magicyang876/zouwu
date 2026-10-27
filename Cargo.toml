@@ -20,7 +20,6 @@ zouwu-platform = { path = "crates/zouwu-platform" }
 zouwu-ui = { path = "crates/zouwu-ui" }
 
 bytemuck = { version = "1.25", features = ["derive"] }
-env_logger = "0.11"
 log = "0.4"
 pollster = "0.4"
 serde = { version = "1.0", features = ["derive"] }
@@ -28,11 +27,17 @@ tiny-skia = "0.12"
 toml = "0.9"
 wgpu = "30.0"
 winit = "0.30"
+raw-window-handle = "0.6"
 tray-icon = "0.26"
 global-hotkey = "0.9"
 fluent = "0.17"
 sys-locale = "0.3"
 unic-langid = "0.9"
+# 设置面板需要第二个"真窗口"（要焦点、要键盘），分层窗口做不到；
+# softbuffer 是最小的一块：DIB + BitBlt，不引入 GPU 依赖。
+softbuffer = "0.4"
+# 文本栅格化（系统字体，见 crates/zouwu-ui/src/text.rs）
+fontdue = "0.9"
 
 [profile.dev]
 opt-level = 1

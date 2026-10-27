@@ -82,11 +82,13 @@ fn main() {
             scale,
             buddy_center: center,
             buddy_radius: 56.0,
-            buddy_scale: 1.0 + breath,
+            buddy_scale: 1.0,
             buddy_alpha: 1.0,
             blink,
+            breath,
             theme: &theme,
             bubbles: &bubbles,
+            skin: None,
         };
 
         // 预热：让 tiny-skia 的路径缓存与 CPU 频率先稳下来

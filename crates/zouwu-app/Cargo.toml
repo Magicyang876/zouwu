@@ -13,5 +13,4 @@ path = "src/main.rs"
 zouwu-core = { workspace = true }
 zouwu-platform = { workspace = true }
 zouwu-ui = { workspace = true }
-env_logger = { workspace = true }
 log = { workspace = true }

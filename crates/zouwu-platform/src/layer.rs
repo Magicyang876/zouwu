@@ -232,6 +232,7 @@ const SW_SHOWNOACTIVATE: i32 = 4;
 const WS_EX_TOOLWINDOW: isize = 0x0000_0080;
 const WS_EX_NOACTIVATE: isize = 0x0800_0000;
 const HWND_TOPMOST: Hwnd = -1isize as Hwnd;
+const HWND_NOTOPMOST: Hwnd = -2isize as Hwnd;
 const SWP_NOSIZE: u32 = 0x0001;
 const SWP_NOMOVE: u32 = 0x0002;
 const SWP_NOACTIVATE: u32 = 0x0010;
@@ -279,6 +280,27 @@ pub fn bring_to_front(hwnd: isize) {
         );
         // 有些 shell 组合（比如全屏游戏退出后）需要显式再问一次前台。
         SetForegroundWindow(hwnd);
+    }
+}
+
+/// 置顶 / 取消置顶。
+///
+/// 不能用 winit 的 `set_window_level`：它会把窗口重建一遍，重建后的窗口
+/// **丢掉 `WS_EX_LAYERED`**，于是下一帧 `UpdateLayeredWindow` 就永久失败（实测
+/// 1172 条 render failed，CPU 直接跑到 66%）。用 `SetWindowPos` 改 Z 序才是
+/// 无创的，分层属性、位置、尺寸、激活状态全都不动。
+pub fn set_always_on_top(hwnd: isize, on_top: bool) {
+    let hwnd = hwnd as Hwnd;
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            if on_top { HWND_TOPMOST } else { HWND_NOTOPMOST },
+            0,
+            0,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
+        );
     }
 }
 

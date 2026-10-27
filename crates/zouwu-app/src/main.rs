@@ -4,7 +4,11 @@
 //! 全局热键注册，再决定是"直接显示"还是"安静启动到托盘"。
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // 日志由 `zouwu_platform::logging` 接管（stderr + 落盘 + 轮转 + panic hook）。
+    //
+    // 这里**不能**再装 env_logger：`log::set_logger` 只成功一次，先装 env_logger
+    // 会让后面真装的文件日志静默失效——"日志文件一直是 0 字节"就是这么来的。
+    zouwu_platform::logging::init();
 
     log::info!(
         "zouwu starting (platform={}, config={})",

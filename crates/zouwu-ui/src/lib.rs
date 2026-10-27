@@ -9,5 +9,10 @@ pub mod paint;
 pub mod presenter;
 #[cfg(feature = "gpu")]
 pub mod presenter_gpu;
+pub mod settings;
+pub mod settings_window;
+pub mod skin;
+pub mod text;
+pub mod widget;
 
 pub use app::run;

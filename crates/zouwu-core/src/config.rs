@@ -5,14 +5,16 @@
 use crate::ring::{RingConfig, DEG};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub schema_version: u32,
     /// 放在最前面：这是用户最常手改的一段（语言、热键、自启）。
     pub general: General,
+    pub appearance: Appearance,
+    pub log: LogCfg,
     pub interaction: Interaction,
     pub ring: RingCfg,
     pub buddy: BuddyCfg,
@@ -24,6 +26,8 @@ impl Default for Config {
         Self {
             schema_version: SCHEMA_VERSION,
             general: General::default(),
+            appearance: Appearance::default(),
+            log: LogCfg::default(),
             interaction: Interaction::default(),
             ring: RingCfg::default(),
             buddy: BuddyCfg::default(),
@@ -32,7 +36,7 @@ impl Default for Config {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Interaction {
     /// 悬停多久后展开（毫秒）。0 = 立即展开。
@@ -59,7 +63,7 @@ impl Default for Interaction {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RingCfg {
     pub radius: f32,
@@ -102,7 +106,7 @@ impl RingCfg {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BuddyCfg {
     /// 小兽半径（逻辑像素）
@@ -120,7 +124,7 @@ impl Default for BuddyCfg {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WindowCfg {
     /// 窗口边长（逻辑像素）。M0 固定，保证气泡环展开不用改窗口尺寸。
@@ -140,7 +144,7 @@ impl Default for WindowCfg {
 }
 
 /// 常驻形态相关的开关：托盘、热键、语言、开机自启。
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct General {
     /// 界面语言：`"auto"` = 跟随系统，或 `"zh-CN"` / `"en-US"`。
@@ -167,6 +171,62 @@ impl Default for General {
     }
 }
 
+/// 外观：主题与皮肤。两者正交——皮肤决定"长什么样"，主题决定"什么颜色"。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Appearance {
+    /// 主题 id：内置的 `zouwu-warm` / `zouwu-dark`，或
+    /// `%APPDATA%/zouwu/themes/<id>.toml` 里声明的 id。
+    pub theme: String,
+    /// 皮肤 id：`procedural`（代码绘制）或
+    /// `%APPDATA%/zouwu/skins/<id>/skin.toml` 里声明的 id。
+    pub skin: String,
+}
+
+impl Default for Appearance {
+    fn default() -> Self {
+        Self {
+            theme: "zouwu-warm".to_string(),
+            skin: crate::skin::PROCEDURAL_SKIN_ID.to_string(),
+        }
+    }
+}
+
+/// 日志落盘。写在文件里的一行应该让人**不用开着控制台**也能定位问题。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LogCfg {
+    /// `off` / `error` / `warn` / `info` / `debug` / `trace`。
+    /// 环境变量 `RUST_LOG` 优先（临时排查时不想改用户的持久配置）。
+    pub level: String,
+    /// 是否写文件（关掉后只剩 stderr，从资源管理器启动时等于什么也没留下）。
+    pub to_file: bool,
+    /// 单个日志文件的上限（KB），超过就在下次启动时轮转。
+    pub max_size_kb: u64,
+    /// 保留多少个历史文件（`zouwu.1.log` …）。
+    pub keep_files: u32,
+}
+
+impl Default for LogCfg {
+    fn default() -> Self {
+        Self {
+            level: "info".to_string(),
+            to_file: true,
+            max_size_kb: 2048,
+            keep_files: 3,
+        }
+    }
+}
+
+impl LogCfg {
+    /// 合法的级别名（也是设置面板里的选项顺序）。
+    pub const LEVELS: [&'static str; 6] = ["off", "error", "warn", "info", "debug", "trace"];
+
+    pub fn is_valid_level(level: &str) -> bool {
+        Self::LEVELS.contains(&level)
+    }
+}
+
 impl Config {
     pub fn from_toml(text: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(text)
@@ -176,12 +236,101 @@ impl Config {
         toml::to_string_pretty(self).unwrap_or_default()
     }
 
-    /// 配置迁移入口（M0 只有 v1，占位保持结构稳定）。
+    /// 配置迁移入口：v1 没有 `[general]`，v2 没有 `[appearance]`，
+    /// 两者都靠 `#[serde(default)]` 补全，这里只把版本号推进到最新。
     pub fn migrated(mut self) -> Self {
         if self.schema_version < SCHEMA_VERSION {
             self.schema_version = SCHEMA_VERSION;
         }
         self
+    }
+
+    /// 从 `self`（运行中的配置）到 `next`（磁盘上新读到的配置）需要重新作用于
+    /// 运行期对象的维度，按固定顺序返回。
+    ///
+    /// 这里**只列真的能热应用的东西**。`general.show_on_start` 只在启动时读一次，
+    /// 改了它不该产生任何副作用 —— 把它放进 diff 只会让人误以为已经生效。
+    /// 返回空 `Vec` 不等于"没变化"（例如只改了 `remember_position`），
+    /// 调用方仍应把新配置整体接管，只是没有额外动作要做。
+    pub fn diff(&self, next: &Config) -> Vec<ChangeKind> {
+        use ChangeKind::*;
+        let mut out = Vec::new();
+        if self.general.language != next.general.language {
+            out.push(Language);
+        }
+        if self.general.hotkey != next.general.hotkey {
+            out.push(Hotkey);
+        }
+        if self.general.start_on_boot != next.general.start_on_boot {
+            out.push(Autostart);
+        }
+        if self.appearance != next.appearance {
+            out.push(Appearance);
+        }
+        if self.log != next.log {
+            out.push(Log);
+        }
+        if self.interaction != next.interaction {
+            out.push(Interaction);
+        }
+        if self.ring != next.ring {
+            out.push(Ring);
+        }
+        if self.buddy != next.buddy {
+            out.push(Buddy);
+        }
+        if self.window.size != next.window.size {
+            out.push(WindowSize);
+        }
+        if self.window.always_on_top != next.window.always_on_top {
+            out.push(WindowLevel);
+        }
+        out
+    }
+}
+
+/// 配置热重载时需要重新作用的维度。
+///
+/// 存在的意义是把"哪些字段能热生效"变成**可测试的领域知识**，而不是散落在 UI
+/// 层的一堆 `if old.field != new.field`。UI 只需要 `match` 这些名字。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ChangeKind {
+    /// 界面语言（托盘菜单 + 文案）
+    Language,
+    /// 全局热键（重新注册）
+    Hotkey,
+    /// 开机自启（写注册表）
+    Autostart,
+    /// 主题 / 皮肤
+    Appearance,
+    /// 日志级别与落盘策略
+    Log,
+    /// 悬停延时 / 命中容差 / 收起半径
+    Interaction,
+    /// 气泡环几何（半径、气泡数、浮动幅度）
+    Ring,
+    /// 小兽半径 / 呼吸开关
+    Buddy,
+    /// 窗口边长（要改窗口尺寸）
+    WindowSize,
+    /// 置顶与否（窗口层级）
+    WindowLevel,
+}
+
+impl ChangeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChangeKind::Language => "language",
+            ChangeKind::Hotkey => "hotkey",
+            ChangeKind::Autostart => "autostart",
+            ChangeKind::Appearance => "appearance",
+            ChangeKind::Log => "log",
+            ChangeKind::Interaction => "interaction",
+            ChangeKind::Ring => "ring",
+            ChangeKind::Buddy => "buddy",
+            ChangeKind::WindowSize => "window.size",
+            ChangeKind::WindowLevel => "window.always_on_top",
+        }
     }
 }
 
@@ -232,6 +381,98 @@ mod tests {
         .expect("parse");
         assert_eq!(cfg.general.language, "auto");
         assert_eq!(cfg.migrated().schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn diff_reports_only_actionable_changes() {
+        let base = Config::default();
+        assert!(base.diff(&base).is_empty());
+
+        let mut next = base.clone();
+        next.general.language = "en-US".into();
+        next.general.hotkey = "Ctrl+Shift+Z".into();
+        next.ring.radius = 130.0;
+        next.window.size = 360.0;
+        assert_eq!(
+            base.diff(&next),
+            vec![
+                ChangeKind::Language,
+                ChangeKind::Hotkey,
+                ChangeKind::Ring,
+                ChangeKind::WindowSize
+            ]
+        );
+    }
+
+    #[test]
+    fn diff_ignores_startup_only_fields() {
+        let base = Config::default();
+        let mut next = base.clone();
+        // 启动期开关：改了它不该有任何运行期副作用
+        next.general.show_on_start = !base.general.show_on_start;
+        next.window.remember_position = !base.window.remember_position;
+        assert!(base.diff(&next).is_empty());
+        // 但内容确实变了，调用方仍要接管新配置
+        assert_ne!(base, next);
+    }
+
+    #[test]
+    fn appearance_defaults_and_roundtrip() {
+        let cfg = Config::default();
+        assert_eq!(cfg.appearance.theme, "zouwu-warm");
+        assert_eq!(cfg.appearance.skin, "procedural");
+
+        let text = cfg.to_toml();
+        let back = Config::from_toml(&text).expect("roundtrip");
+        assert_eq!(back.appearance, cfg.appearance);
+        assert!(
+            text.contains("[appearance]"),
+            "appearance must be serialized, got:
+{text}"
+        );
+    }
+
+    #[test]
+    fn v2_config_gets_appearance_defaults() {
+        let cfg = Config::from_toml(
+            "[general]
+language = \"en-US\"
+",
+        )
+        .expect("parse");
+        assert_eq!(cfg.general.language, "en-US");
+        assert_eq!(cfg.appearance.theme, "zouwu-warm");
+        assert_eq!(cfg.migrated().schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn log_section_defaults_and_roundtrip() {
+        let cfg = Config::default();
+        assert_eq!(cfg.log.level, "info");
+        assert!(cfg.log.to_file);
+        let text = cfg.to_toml();
+        assert!(text.contains("[log]"), "log section must be serialized");
+        let back = Config::from_toml(&text).expect("roundtrip");
+        assert_eq!(back.log, cfg.log);
+    }
+
+    #[test]
+    fn log_levels_are_validated() {
+        assert!(LogCfg::is_valid_level("debug"));
+        assert!(!LogCfg::is_valid_level("verbose"));
+        assert_eq!(LogCfg::LEVELS[0], "off");
+    }
+
+    #[test]
+    fn diff_reports_appearance_and_log() {
+        let base = Config::default();
+        let mut next = base.clone();
+        next.appearance.theme = "zouwu-dark".into();
+        next.log.level = "debug".into();
+        assert_eq!(
+            base.diff(&next),
+            vec![ChangeKind::Appearance, ChangeKind::Log]
+        );
     }
 
     #[test]
