@@ -1,0 +1,566 @@
+//! 用 tiny-skia 把一"帧场景"光栅化到 Pixmap。
+//!
+//! tiny-skia 的 API 与 Skia 高度一致，后续若换成 `skia-safe`（GPU 后端），
+//! 这里的绘制代码可以基本平移，因此 M0 先用纯 Rust 光栅器：
+//! * 零 C++ 依赖，编译/分发简单；
+//! * 340×340 的画面 CPU 光栅成本极低（< 0.3ms）；
+//! * 空闲时根本不调用它。
+
+use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
+use zouwu_core::action::Glyph;
+use zouwu_core::geom::Point;
+use zouwu_core::theme::{Rgba, Theme};
+
+pub struct BubblePaint {
+    pub center: Point,
+    pub radius: f32,
+    /// 弹簧值：0 = 收起，1 = 完全展开（可能略大于 1，即过冲）
+    pub scale: f32,
+    pub alpha: f32,
+    pub glyph: Glyph,
+    pub selected: bool,
+}
+
+pub struct Scene<'a> {
+    /// 逻辑宽高
+    pub width: f32,
+    pub height: f32,
+    /// DPI 缩放（物理 = 逻辑 × scale）
+    pub scale: f32,
+    pub buddy_center: Point,
+    pub buddy_radius: f32,
+    /// 悬停时的轻微放大（弹簧值）
+    pub buddy_scale: f32,
+    pub buddy_alpha: f32,
+    /// 眨眼量：0 = 睁眼，1 = 闭眼
+    pub blink: f32,
+    pub theme: &'a Theme,
+    pub bubbles: &'a [BubblePaint],
+}
+
+struct Ctx<'a> {
+    pixmap: &'a mut Pixmap,
+    s: f32,
+}
+
+fn col(c: Rgba, alpha_mul: f32) -> Color {
+    let c = c.with_alpha(alpha_mul);
+    Color::from_rgba8(c.r, c.g, c.b, c.a)
+}
+
+impl Ctx<'_> {
+    fn px(&self, v: f32) -> f32 {
+        v * self.s
+    }
+
+    fn point(&self, p: Point) -> (f32, f32) {
+        (p.x * self.s, p.y * self.s)
+    }
+
+    fn fill_circle(&mut self, center: Point, radius: f32, color: Color) {
+        let (cx, cy) = self.point(center);
+        let r = self.px(radius);
+        if r <= 0.0 {
+            return;
+        }
+        if let Some(path) = PathBuilder::from_circle(cx, cy, r) {
+            let mut paint = Paint::default();
+            paint.set_color(color);
+            paint.anti_alias = true;
+            self.pixmap.fill_path(
+                &path,
+                &paint,
+                FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
+        }
+    }
+
+    /// 支持椭圆的圆（缩放 + 平移），用于眯眼等变形。
+    fn fill_ellipse(&mut self, center: Point, radius: f32, sx: f32, sy: f32, color: Color) {
+        let (cx, cy) = self.point(center);
+        let r = self.px(radius);
+        if r <= 0.0 || sx <= 0.0 || sy <= 0.0 {
+            return;
+        }
+        if let Some(path) = PathBuilder::from_circle(0.0, 0.0, r) {
+            let mut paint = Paint::default();
+            paint.set_color(color);
+            paint.anti_alias = true;
+            let ts = Transform::from_scale(sx, sy).post_translate(cx, cy);
+            self.pixmap
+                .fill_path(&path, &paint, FillRule::Winding, ts, None);
+        }
+    }
+
+    fn stroke_circle(&mut self, center: Point, radius: f32, width: f32, color: Color) {
+        let (cx, cy) = self.point(center);
+        let r = self.px(radius);
+        if r <= 0.0 {
+            return;
+        }
+        if let Some(path) = PathBuilder::from_circle(cx, cy, r) {
+            let mut paint = Paint::default();
+            paint.set_color(color);
+            paint.anti_alias = true;
+            let stroke = Stroke {
+                width: self.px(width).max(1.0),
+                ..Stroke::default()
+            };
+            self.pixmap
+                .stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+        }
+    }
+
+    fn line(&mut self, a: Point, b: Point, width: f32, color: Color) {
+        let mut pb = PathBuilder::new();
+        let (ax, ay) = self.point(a);
+        let (bx, by) = self.point(b);
+        pb.move_to(ax, ay);
+        pb.line_to(bx, by);
+        if let Some(path) = pb.finish() {
+            let mut paint = Paint::default();
+            paint.set_color(color);
+            paint.anti_alias = true;
+            let stroke = Stroke {
+                width: self.px(width).max(1.0),
+                ..Stroke::default()
+            };
+            self.pixmap
+                .stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+        }
+    }
+
+    fn polyline(&mut self, pts: &[Point], width: f32, color: Color) {
+        if pts.len() < 2 {
+            return;
+        }
+        let mut pb = PathBuilder::new();
+        let (x0, y0) = self.point(pts[0]);
+        pb.move_to(x0, y0);
+        for p in &pts[1..] {
+            let (x, y) = self.point(*p);
+            pb.line_to(x, y);
+        }
+        if let Some(path) = pb.finish() {
+            let mut paint = Paint::default();
+            paint.set_color(color);
+            paint.anti_alias = true;
+            let stroke = Stroke {
+                width: self.px(width).max(1.0),
+                ..Stroke::default()
+            };
+            self.pixmap
+                .stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+        }
+    }
+
+    fn fill_triangle(&mut self, a: Point, b: Point, c: Point, color: Color) {
+        let mut pb = PathBuilder::new();
+        let (ax, ay) = self.point(a);
+        let (bx, by) = self.point(b);
+        let (cx, cy) = self.point(c);
+        pb.move_to(ax, ay);
+        pb.line_to(bx, by);
+        pb.line_to(cx, cy);
+        pb.close();
+        if let Some(path) = pb.finish() {
+            let mut paint = Paint::default();
+            paint.set_color(color);
+            paint.anti_alias = true;
+            self.pixmap.fill_path(
+                &path,
+                &paint,
+                FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
+        }
+    }
+
+    fn fill_round_rect(&mut self, center: Point, w: f32, h: f32, radius: f32, color: Color) {
+        let mut pb = PathBuilder::new();
+        let (cx, cy) = self.point(center);
+        let hw = self.px(w) * 0.5;
+        let hh = self.px(h) * 0.5;
+        let r = self.px(radius).min(hw).min(hh);
+        let (l, t, rr, b) = (cx - hw, cy - hh, cx + hw, cy + hh);
+        pb.move_to(l + r, t);
+        pb.line_to(rr - r, t);
+        pb.quad_to(rr, t, rr, t + r);
+        pb.line_to(rr, b - r);
+        pb.quad_to(rr, b, rr - r, b);
+        pb.line_to(l + r, b);
+        pb.quad_to(l, b, l, b - r);
+        pb.line_to(l, t + r);
+        pb.quad_to(l, t, l + r, t);
+        pb.close();
+        if let Some(path) = pb.finish() {
+            let mut paint = Paint::default();
+            paint.set_color(color);
+            paint.anti_alias = true;
+            self.pixmap.fill_path(
+                &path,
+                &paint,
+                FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
+        }
+    }
+}
+
+pub fn render(scene: &Scene<'_>, pixmap: &mut Pixmap) {
+    pixmap.fill(Color::TRANSPARENT);
+    let theme = scene.theme;
+    let mut ctx = Ctx {
+        pixmap,
+        s: scene.scale,
+    };
+
+    draw_buddy(&mut ctx, scene);
+    draw_bubbles(&mut ctx, scene, theme);
+}
+
+fn draw_buddy(ctx: &mut Ctx<'_>, scene: &Scene<'_>) {
+    let theme = scene.theme;
+    let a = scene.buddy_alpha;
+    if a <= 0.001 {
+        return;
+    }
+    let c = scene.buddy_center;
+    let r = scene.buddy_radius * scene.buddy_scale;
+    // 局部坐标：以本体中心为原点、以半径 r 为单位
+    let p = |x: f32, y: f32| Point::new(c.x + r * x, c.y + r * y);
+
+    // ---- 地面投影：多层同心扁椭圆叠出柔和渐变（比模糊成本低一个数量级）
+    for i in (1..=12).rev() {
+        let k = i as f32 / 12.0;
+        ctx.fill_ellipse(
+            p(0.0, 0.94),
+            r * (0.42 + 0.62 * k),
+            1.0,
+            0.14,
+            col(theme.shadow, 0.055 * a),
+        );
+    }
+
+    // ---- 尾巴（在身体后面），带三道虎纹
+    ctx.polyline(
+        &[
+            p(-0.58, 0.34),
+            p(-1.04, 0.22),
+            p(-1.26, -0.10),
+            p(-1.10, -0.48),
+        ],
+        r * 0.21,
+        col(theme.body, a),
+    );
+    for (x1, y1, x2, y2) in [
+        (-0.84, 0.40, -0.78, 0.16),
+        (-1.06, 0.26, -1.02, 0.02),
+        (-1.22, -0.02, -1.24, -0.26),
+    ] {
+        ctx.line(
+            p(x1, y1),
+            p(x2, y2),
+            r * 0.085,
+            col(theme.body_shade, 0.75 * a),
+        );
+    }
+
+    // ---- 后脚掌
+    for k in [-1.0f32, 1.0] {
+        ctx.fill_ellipse(p(0.40 * k, 0.92), r * 0.19, 1.15, 0.72, col(theme.body, a));
+    }
+
+    // ---- 耳朵：外耳三角 + 内耳浅色三角
+    for k in [-1.0f32, 1.0] {
+        ctx.fill_triangle(
+            p(0.28 * k, -0.72),
+            p(0.70 * k, -1.28),
+            p(0.04 * k, -1.00),
+            col(theme.body, a),
+        );
+        ctx.fill_triangle(
+            p(0.34 * k, -0.80),
+            p(0.58 * k, -1.13),
+            p(0.20 * k, -0.97),
+            col(theme.mane, 0.85 * a),
+        );
+    }
+
+    // ---- 鬃毛：头周围一圈绒球，只露出外缘，形成蓬松轮廓
+    let head = Point::new(0.0, -0.34);
+    for i in 0..10 {
+        let ang = i as f32 / 10.0 * std::f32::consts::TAU + 0.31;
+        ctx.fill_circle(
+            p(head.x + ang.cos() * 0.58, head.y + ang.sin() * 0.58),
+            r * 0.27,
+            col(theme.mane, 0.95 * a),
+        );
+    }
+
+    // ---- 身体
+    ctx.fill_circle(p(0.0, 0.22), r * 0.92, col(theme.body, a));
+    // 胸口浅色（肚皮）
+    ctx.fill_ellipse(
+        p(0.0, 0.42),
+        r * 0.50,
+        1.0,
+        0.80,
+        col(theme.muzzle, 0.92 * a),
+    );
+    // 身体右侧暗部，给一点体积
+    ctx.fill_ellipse(
+        p(0.34, 0.50),
+        r * 0.40,
+        1.0,
+        0.85,
+        col(theme.body_shade, 0.18 * a),
+    );
+    // 前爪
+    for k in [-1.0f32, 1.0] {
+        ctx.fill_ellipse(
+            p(0.32 * k, 0.84),
+            r * 0.20,
+            1.1,
+            0.78,
+            col(theme.muzzle, 0.95 * a),
+        );
+        ctx.line(
+            p(0.32 * k, 0.80),
+            p(0.32 * k, 0.90),
+            r * 0.04,
+            col(theme.body_shade, 0.45 * a),
+        );
+    }
+
+    // ---- 头
+    ctx.fill_circle(p(head.x, head.y), r * 0.68, col(theme.body, a));
+    // 头顶柔光
+    ctx.fill_ellipse(
+        p(head.x - 0.20, head.y - 0.28),
+        r * 0.34,
+        1.0,
+        0.62,
+        col(Rgba::rgb(255, 255, 255), 0.10 * a),
+    );
+    // 虎纹（额侧两道）
+    for k in [-1.0f32, 1.0] {
+        ctx.line(
+            p(0.44 * k, -0.74),
+            p(0.56 * k, -0.52),
+            r * 0.055,
+            col(theme.body_shade, 0.50 * a),
+        );
+        ctx.line(
+            p(0.50 * k, -0.56),
+            p(0.60 * k, -0.42),
+            r * 0.048,
+            col(theme.body_shade, 0.42 * a),
+        );
+    }
+
+    // ---- 口鼻区
+    ctx.fill_ellipse(
+        p(0.0, -0.18),
+        r * 0.32,
+        1.18,
+        0.86,
+        col(theme.muzzle, 0.97 * a),
+    );
+
+    // ---- 腮红
+    for k in [-1.0f32, 1.0] {
+        ctx.fill_ellipse(
+            p(0.47 * k, -0.28),
+            r * 0.10,
+            1.0,
+            0.72,
+            col(theme.accent, 0.26 * a),
+        );
+    }
+
+    // ---- 眼睛（眨眼 = 纵向压扁）
+    let eye_open = (1.0 - scene.blink).clamp(0.05, 1.0);
+    for k in [-1.0f32, 1.0] {
+        let eye = p(0.27 * k, -0.47);
+        ctx.fill_ellipse(eye, r * 0.105, 1.0, eye_open, col(theme.eye, a));
+        if eye_open > 0.6 {
+            ctx.fill_circle(
+                Point::new(eye.x + r * 0.035, eye.y - r * 0.035),
+                r * 0.032,
+                col(Rgba::rgb(255, 255, 255), 0.88 * a),
+            );
+        }
+    }
+
+    // ---- 鼻子
+    ctx.fill_triangle(
+        p(-0.065, -0.265),
+        p(0.065, -0.265),
+        p(0.0, -0.205),
+        col(theme.eye, 0.92 * a),
+    );
+    // ---- 嘴（一个小小的微笑）
+    ctx.polyline(
+        &[p(-0.09, -0.165), p(0.0, -0.115), p(0.09, -0.165)],
+        r * 0.045,
+        col(theme.eye, 0.55 * a),
+    );
+
+    // ---- 胡须
+    for k in [-1.0f32, 1.0] {
+        ctx.line(
+            p(0.30 * k, -0.16),
+            p(0.58 * k, -0.24),
+            r * 0.030,
+            col(theme.body_shade, 0.55 * a),
+        );
+        ctx.line(
+            p(0.30 * k, -0.09),
+            p(0.60 * k, -0.06),
+            r * 0.030,
+            col(theme.body_shade, 0.55 * a),
+        );
+    }
+}
+
+fn draw_bubbles(ctx: &mut Ctx<'_>, scene: &Scene<'_>, theme: &Theme) {
+    for b in scene.bubbles {
+        let a = b.alpha;
+        if a <= 0.005 || b.scale <= 0.01 {
+            continue;
+        }
+        let r = b.radius * b.scale;
+
+        // 选中时的外发光（两层）
+        if b.selected {
+            ctx.stroke_circle(b.center, r + 5.0, 5.0, col(theme.glow, 0.16 * a));
+            ctx.stroke_circle(b.center, r + 1.8, 2.2, col(theme.glow, 0.55 * a));
+        }
+
+        let bg = if b.selected {
+            theme.bubble_bg_active
+        } else {
+            theme.bubble_bg
+        };
+        let edge = if b.selected {
+            theme.bubble_edge_active
+        } else {
+            theme.bubble_edge
+        };
+        // 气泡底（略微半透明，让桌面透出来一点，像玻璃）
+        ctx.fill_circle(b.center, r, col(bg, 0.90 * a));
+        ctx.stroke_circle(b.center, r - 0.6, 1.4, col(edge, 0.9 * a));
+
+        let g = if b.selected {
+            theme.glyph_active
+        } else {
+            theme.glyph
+        };
+        draw_glyph(ctx, b.glyph, b.center, r, col(g, a));
+    }
+}
+
+fn draw_glyph(ctx: &mut Ctx<'_>, glyph: Glyph, c: Point, r: f32, color: Color) {
+    let s = r * 0.52; // 图标半径
+    match glyph {
+        Glyph::Frame => {
+            // 四角取景框
+            let corner = s * 0.45;
+            for (sx, sy) in [(-1.0f32, -1.0f32), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+                let p = Point::new(c.x + s * 0.72 * sx, c.y + s * 0.72 * sy);
+                let px = Point::new(p.x - corner * sx, p.y);
+                let py = Point::new(p.x, p.y - corner * sy);
+                ctx.line(p, px, s * 0.16, color);
+                ctx.line(p, py, s * 0.16, color);
+            }
+        }
+        Glyph::Lines => {
+            for (i, w) in [1.0f32, 0.66, 0.86].iter().enumerate() {
+                let y = c.y + s * (-0.42 + 0.42 * i as f32);
+                let half = s * 0.72 * w;
+                ctx.line(
+                    Point::new(c.x - half, y),
+                    Point::new(c.x + half, y),
+                    s * 0.16,
+                    color,
+                );
+            }
+        }
+        Glyph::Grid => {
+            let cell = s * 0.46;
+            for i in -1..=1 {
+                for j in -1..=1 {
+                    let filled = (i + j) % 2 == 0;
+                    let p = Point::new(c.x + cell * i as f32, c.y + cell * j as f32);
+                    if filled {
+                        ctx.fill_round_rect(p, s * 0.34, s * 0.34, s * 0.06, color);
+                    } else {
+                        ctx.stroke_circle(p, s * 0.1, s * 0.1, color);
+                    }
+                }
+            }
+        }
+        Glyph::Clip => {
+            ctx.fill_round_rect(c, s * 1.18, s * 1.5, s * 0.24, color);
+            ctx.fill_round_rect(
+                Point::new(c.x, c.y - s * 0.62),
+                s * 0.52,
+                s * 0.3,
+                s * 0.1,
+                color,
+            );
+            // 挖一个洞的效果：用主题色再画一次内部矩形不可行（颜色未知），
+            // 因此改为在夹子上画两条横线表示"内容"。
+            ctx.line(
+                Point::new(c.x - s * 0.34, c.y + s * 0.06),
+                Point::new(c.x + s * 0.34, c.y + s * 0.06),
+                s * 0.12,
+                col(Rgba::rgb(0, 0, 0), 0.45),
+            );
+        }
+        Glyph::Drop => {
+            // 水滴：圆 + 三角
+            ctx.fill_circle(Point::new(c.x, c.y + s * 0.24), s * 0.56, color);
+            ctx.fill_triangle(
+                Point::new(c.x - s * 0.36, c.y + s * 0.18),
+                Point::new(c.x + s * 0.36, c.y + s * 0.18),
+                Point::new(c.x, c.y - s * 0.86),
+                color,
+            );
+        }
+        Glyph::Bolt => {
+            ctx.fill_triangle(
+                Point::new(c.x + s * 0.30, c.y - s * 0.80),
+                Point::new(c.x - s * 0.42, c.y + s * 0.12),
+                Point::new(c.x + s * 0.02, c.y + s * 0.12),
+                color,
+            );
+            ctx.fill_triangle(
+                Point::new(c.x - s * 0.30, c.y + s * 0.80),
+                Point::new(c.x + s * 0.42, c.y - s * 0.12),
+                Point::new(c.x - s * 0.02, c.y - s * 0.12),
+                color,
+            );
+        }
+        Glyph::Clock => {
+            ctx.stroke_circle(c, s * 0.82, s * 0.16, color);
+            ctx.line(c, Point::new(c.x, c.y - s * 0.50), s * 0.14, color);
+            ctx.line(
+                c,
+                Point::new(c.x + s * 0.40, c.y + s * 0.18),
+                s * 0.14,
+                color,
+            );
+        }
+        Glyph::Dots => {
+            for i in -1..=1 {
+                ctx.fill_circle(Point::new(c.x + s * 0.52 * i as f32, c.y), s * 0.17, color);
+            }
+        }
+    }
+}

@@ -1,0 +1,17 @@
+[package]
+name = "zouwu-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "zouwu"
+path = "src/main.rs"
+
+[dependencies]
+zouwu-core = { workspace = true }
+zouwu-platform = { workspace = true }
+zouwu-ui = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }

@@ -1,0 +1,20 @@
+[package]
+name = "zouwu-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+zouwu-core = { workspace = true }
+zouwu-platform = { workspace = true }
+tiny-skia = { workspace = true }
+wgpu = { workspace = true, optional = true }
+winit = { workspace = true }
+pollster = { workspace = true }
+log = { workspace = true }
+bytemuck = { workspace = true, optional = true }
+
+[features]
+# 实验性 GPU 后端：需要能正常链接 wgpu（本机 windows-gnu 上会崩，见 docs/decisions.md）
+gpu = ["dep:wgpu", "dep:bytemuck"]

@@ -1,0 +1,129 @@
+//! zouwu-platform —— 平台能力层。
+//!
+//! v1 只实现 Windows（见 `docs/decisions.md` ADR-001），但所有平台相关逻辑
+//! 都必须待在本 crate 里，UI 与领域层通过这里的函数/ trait 使用。
+
+#[cfg(target_os = "windows")]
+pub mod layer;
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use zouwu_core::config::{Config, WindowState};
+
+/// 配置根目录：Windows `%APPDATA%\zouwu`，其它平台 `$XDG_CONFIG_HOME/zouwu`。
+pub fn config_dir() -> PathBuf {
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        return PathBuf::from(appdata).join("zouwu");
+    }
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        return PathBuf::from(xdg).join("zouwu");
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home).join(".config").join("zouwu");
+    }
+    PathBuf::from(".zouwu")
+}
+
+fn read_to_string(path: &Path) -> Option<String> {
+    fs::read_to_string(path).ok()
+}
+
+/// 原子写：先写临时文件再 rename，避免半个文件。
+fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, contents)?;
+    fs::rename(&tmp, path)
+}
+
+pub fn config_path() -> PathBuf {
+    config_dir().join("config.toml")
+}
+
+pub fn state_path() -> PathBuf {
+    config_dir().join("state.toml")
+}
+
+/// 读取配置；文件不存在或解析失败时写回默认配置并返回默认值。
+pub fn load_config() -> Config {
+    let path = config_path();
+    match read_to_string(&path) {
+        Some(text) => match Config::from_toml(&text) {
+            Ok(cfg) => cfg.migrated(),
+            Err(err) => {
+                log::warn!("config parse failed ({err}); backing up and using defaults");
+                let _ = fs::rename(&path, path.with_extension("bad.toml"));
+                let cfg = Config::default();
+                let _ = write_atomic(&path, &cfg.to_toml());
+                cfg
+            }
+        },
+        None => {
+            let cfg = Config::default();
+            if let Err(err) = write_atomic(&path, &cfg.to_toml()) {
+                log::warn!("failed to write default config: {err}");
+            }
+            cfg
+        }
+    }
+}
+
+pub fn save_config(cfg: &Config) {
+    if let Err(err) = write_atomic(&config_path(), &cfg.to_toml()) {
+        log::warn!("failed to save config: {err}");
+    }
+}
+
+pub fn load_window_state() -> Option<WindowState> {
+    let text = read_to_string(&state_path())?;
+    toml::from_str::<WindowState>(&text).ok()
+}
+
+pub fn save_window_state(state: WindowState) {
+    let text = toml::to_string(&state).unwrap_or_default();
+    if let Err(err) = write_atomic(&state_path(), &text) {
+        log::warn!("failed to save window state: {err}");
+    }
+}
+
+/// 当前平台名，写进日志便于排查。
+pub fn platform_name() -> &'static str {
+    #[cfg(windows)]
+    {
+        "windows"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "macos"
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        "linux"
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        "unknown"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_dir_is_not_empty() {
+        assert!(!config_dir().as_os_str().is_empty());
+    }
+
+    #[test]
+    fn atomic_roundtrip() {
+        let dir = std::env::temp_dir().join("zouwu-test-atomic");
+        let path = dir.join("x.toml");
+        write_atomic(&path, "a = 1\n").unwrap();
+        assert_eq!(read_to_string(&path).as_deref(), Some("a = 1\n"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
