@@ -355,7 +355,13 @@ fn draw_skin_buddy(ctx: &mut Ctx<'_>, scene: &Scene<'_>, skin: &Skin) {
         let (pw, ph) = (layer.pixmap.width() as f32, layer.pixmap.height() as f32);
         let tx = c.x + layer.offset_x * k - w * 0.5;
         let ty = c.y + layer.offset_y * k - h * 0.5;
-        let transform = Transform::from_scale(w / pw, h / ph).post_translate(tx, ty);
+        // 贴图是唯一绕过 `Ctx` 画笔的地方：`draw_pixmap` 收的是**物理像素**，
+        // 而上面所有坐标都是逻辑像素（`c`、`w`、`h` 全是逻辑）。
+        // 忘记乘 `ctx.s` 的后果：125% 缩放下整只兽被画到 1/1.25 的位置，
+        // 于是"影子在环中心、本体偏左上"——一个只在非 100% DPI 上才会出现的错位。
+        let s = ctx.s;
+        let transform =
+            Transform::from_scale(w * s / pw, h * s / ph).post_translate(tx * s, ty * s);
         let paint = PixmapPaint {
             opacity: alpha,
             blend_mode: tiny_skia::BlendMode::SourceOver,
@@ -750,6 +756,94 @@ fn draw_glyph(ctx: &mut Ctx<'_>, glyph: Glyph, c: Point, r: f32, color: Color) {
             for i in -1..=1 {
                 ctx.fill_circle(Point::new(c.x + s * 0.52 * i as f32, c.y), s * 0.17, color);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::skin::Skin;
+    use zouwu_core::theme::Theme;
+    use zouwu_platform::assets::SkinPackage;
+
+    fn solid_png(w: u32, h: u32) -> Vec<u8> {
+        let mut pm = Pixmap::new(w, h).expect("pixmap");
+        pm.fill(tiny_skia::Color::from_rgba8(220, 120, 80, 255));
+        pm.encode_png().expect("png")
+    }
+
+    fn bitmap_skin() -> Skin {
+        let pkg = SkinPackage {
+            manifest: zouwu_core::skin::SkinManifest::parse(
+                "id = \"t\"\n[geometry]\nradius = 56.0\n[[layers]]\nimage = \"body.png\"",
+            )
+            .expect("manifest"),
+            dir: std::path::PathBuf::from("/nowhere"),
+            images: vec![("body.png".to_string(), solid_png(64, 64))],
+        };
+        Skin::decode(&pkg).expect("skin")
+    }
+
+    fn visible_bbox(pm: &Pixmap) -> (f32, f32, f32, f32) {
+        let (w, h) = (pm.width() as f32, pm.height() as f32);
+        let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0.0f32, 0.0f32);
+        for (i, px) in pm.data().chunks_exact(4).enumerate() {
+            if px[3] <= 8 {
+                continue;
+            }
+            let x = (i % w as usize) as f32;
+            let y = (i / w as usize) as f32;
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+        }
+        (x0, y0, x1, y1)
+    }
+
+    /// 位图皮肤在非 100% DPI 下必须和代码绘制的小兽**落在同一个点**上。
+    ///
+    /// 回归的是这个 bug：贴图走 `draw_pixmap`（物理像素），而其他画笔吃逻辑像素，
+    /// 忘了乘 `scale` 时，125%/150% 缩放下整只兽会缩到画布左上，
+    /// 表现为「影子在环中心、本体偏左上」——只在用户的机器上复现，离屏预览全对。
+    #[test]
+    fn bitmap_skin_centers_on_canvas_at_any_dpi_scale() {
+        for scale in [1.0f32, 1.25, 1.5, 2.0] {
+            let skin = bitmap_skin();
+            let logical = 100.0f32;
+            let size = (logical * scale) as u32;
+            let mut pm = Pixmap::new(size, size).expect("pixmap");
+            let scene = Scene {
+                width: logical,
+                height: logical,
+                scale,
+                buddy_center: Point::new(logical * 0.5, logical * 0.5),
+                buddy_radius: 20.0,
+                buddy_scale: 1.0,
+                buddy_alpha: 1.0,
+                blink: 0.0,
+                breath: 0.5,
+                theme: &Theme::fallback(),
+                bubbles: &[],
+                skin: Some(&skin),
+            };
+            render(&scene, &mut pm);
+            let (x0, y0, x1, y1) = visible_bbox(&pm);
+            let (cx, cy) = ((x0 + x1) * 0.5, (y0 + y1) * 0.5);
+            let want = size as f32 * 0.5;
+            assert!(
+                (cx - want).abs() <= 2.0 && (cy - want).abs() <= 2.0,
+                "scale {scale}: 本体中心 ({cx:.1}, {cy:.1}) 偏离画布中心 ({want:.1}); \
+                 bbox = ({x0:.1}, {y0:.1})..({x1:.1}, {y1:.1})"
+            );
+            // 直径还要对得上：`radius` 是逻辑像素，乘 scale 后才是物理像素。
+            let want_side = 2.0 * 20.0 * scale;
+            let got_side = (x1 - x0 + 1.0).max(y1 - y0 + 1.0);
+            assert!(
+                (got_side - want_side).abs() <= 2.0,
+                "scale {scale}: 本体边长 {got_side:.1} 应为 {want_side:.1}"
+            );
         }
     }
 }

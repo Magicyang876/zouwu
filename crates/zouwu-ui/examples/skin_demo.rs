@@ -176,8 +176,22 @@ role = "blink"
     }
 }
 
+/// 离屏渲染的 DPI 倍率。
+///
+/// 默认为 1.0，但**必须能改**：ADR-029 那个「贴图忘乘 DPI scale」的 bug 在
+/// 1.0 下永远正确，只有真机上才偏。`ZOUWU_DPI=1.5` 就是把真机搬进离屏渲染。
+fn dpi() -> f32 {
+    std::env::var("ZOUWU_DPI")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| (0.5..=4.0).contains(v))
+        .unwrap_or(1.0)
+}
+
 fn shoot(name: &str, skin: &Skin, openness: f32, blink: f32, breath: f32) {
-    let size = 340u32;
+    let dpi = dpi();
+    // 逻辑尺寸固定 340，物理画布随 DPI 放大——和真窗口的 inner_size 关系一致。
+    let size = (340.0 * dpi).round() as u32;
     let mut pixmap = Pixmap::new(size, size).expect("pixmap");
     // （可选）用 `ZOUWU_THEME=zouwu-dark` 换配色，方便一眼看出"皮肤和主题是两件事"。
     let theme = std::env::var("ZOUWU_THEME")
@@ -185,10 +199,10 @@ fn shoot(name: &str, skin: &Skin, openness: f32, blink: f32, breath: f32) {
         .and_then(|id| Theme::builtin(&id))
         .unwrap_or_else(Theme::fallback);
     let scene = Scene {
-        width: size as f32,
-        height: size as f32,
-        scale: 1.0,
-        buddy_center: zouwu_core::geom::Point::new(size as f32 * 0.5, size as f32 * 0.5),
+        width: 340.0,
+        height: 340.0,
+        scale: dpi,
+        buddy_center: zouwu_core::geom::Point::new(170.0, 170.0),
         buddy_radius: 56.0,
         buddy_scale: 1.0,
         buddy_alpha: 1.0,
@@ -199,7 +213,11 @@ fn shoot(name: &str, skin: &Skin, openness: f32, blink: f32, breath: f32) {
         skin: Some(skin),
     };
     render(&scene, &mut pixmap);
-    let path = out_dir().join(format!("{name}.png"));
+    let path = if (dpi - 1.0).abs() < f32::EPSILON {
+        out_dir().join(format!("{name}.png"))
+    } else {
+        out_dir().join(format!("{name}@{dpi}x.png"))
+    };
     pixmap.save_png(&path).expect("save png");
     let visible = pixmap.data().chunks_exact(4).filter(|px| px[3] > 8).count();
     println!("{name}: {} visible px -> {}", visible, path.display());
