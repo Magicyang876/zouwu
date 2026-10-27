@@ -21,17 +21,25 @@ fn main() -> Result<(), String> {
         .join("zouwu-settings");
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
 
+    // 真实主题/皮肤列表：形象页的缩略图必须走真实加载路径，
+    // 否则这个示例验收的是"假图"，而假图永远不会和桌面上的小兽不一样。
     let themes = vec![Theme::by_name("zouwu-warm"), Theme::by_name("zouwu-dark")];
-    let skins = vec![("procedural".to_string(), "代码绘制（内置）".to_string())];
+    let _ = zouwu_platform::assets::ensure_builtin_skins();
+    let mut config = Config::default();
+    config.general.language = "zh-CN".into();
+    let skins = zouwu_platform::assets::skin_choices(&zouwu_core::i18n::I18n::new(
+        &config.general.language,
+    ));
 
     for (tab, file) in [
         (Tab::General, "general.png"),
         (Tab::Interaction, "interaction.png"),
         (Tab::Appearance, "appearance.png"),
+        (Tab::Skins, "skins.png"),
         (Tab::About, "about.png"),
     ] {
         let mut model = Model::new(
-            Config::default(),
+            config.clone(),
             themes.clone(),
             skins.clone(),
             Paths {
@@ -42,6 +50,10 @@ fn main() -> Result<(), String> {
         model.set_tab(tab);
         // 键盘焦点 + 悬停各演示一行，方便看选中/悬停态。
         model.keyboard_used = true;
+        if tab == Tab::Skins {
+            model.ensure_thumbs();
+            model.hover_skin = Some(1);
+        }
 
         let (lw, lh) = settings::DEFAULT_SIZE;
         let scale = 2.0;

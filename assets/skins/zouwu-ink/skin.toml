@@ -9,13 +9,19 @@ theme = "zouwu-dark"
 radius = 56.0
 breath_amount = 0.03
 
+# 主体在 256 画布里只占 0.6（留了水墨的空白），
+# 所以用图层 `scale` 把它放大 1/0.6 ≈ 1.66 倍补齐：
+# `radius` 始终表示"桌面上的主体半径"，`scale` 只负责校正画面里的留白。
 [[layers]]
 image = "body.png"
+scale = 1.66
 
 [[layers]]
 image = "blink.png"
 role = "blink"
+scale = 1.66
 
 [[layers]]
 image = "seal.png"
 role = "overlay"
+scale = 1.66

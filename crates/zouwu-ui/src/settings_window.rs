@@ -149,6 +149,10 @@ impl SettingsWindow {
             self.pixmap = Pixmap::new(size.width, size.height);
             self.presenter.resize(size.width.max(1), size.height.max(1));
         }
+        // 形象页的缩略图是按需算的：只有主题或皮肤列表变了才重画。
+        if self.model.tab == settings::Tab::Skins {
+            self.model.ensure_thumbs();
+        }
         self.rebuild_layout();
         let Some(layout) = &self.layout else {
             return;
@@ -208,7 +212,21 @@ impl SettingsWindow {
                         Hit::Row(i) | Hit::Step(i, _) | Hit::Press(i) => Some(i),
                         _ => None,
                     });
+                // 缩略图墙的悬停单独记：它记的是"第几套皮肤"，不是"第几行"。
+                let hover_dot = self
+                    .layout
+                    .as_ref()
+                    .and_then(|l| settings::hit(l, self.cursor))
+                    .and_then(|hit| match hit {
+                        Hit::GalleryDot(dot) => Some(dot),
+                        _ => None,
+                    });
+                if hover_dot != self.model.hover_skin {
+                    self.model.hover_skin = hover_dot;
+                    self.request_redraw();
+                }
                 let interactive = hover.is_some()
+                    || hover_dot.is_some()
                     || self
                         .layout
                         .as_ref()
@@ -228,6 +246,9 @@ impl SettingsWindow {
             }
             WindowEvent::CursorLeft { .. } => {
                 self.hover = None;
+                if self.model.hover_skin.take().is_some() {
+                    self.request_redraw();
+                }
                 self.model.hover = None;
                 self.request_redraw();
                 Vec::new()
@@ -306,6 +327,10 @@ impl SettingsWindow {
             Hit::Press(i) => {
                 self.model.focus = Some(i);
                 let kinds = settings::activate(&mut self.model, layout, i);
+                self.after_change(kinds)
+            }
+            Hit::GalleryDot(dot) => {
+                let kinds = settings::select_skin(&mut self.model, dot);
                 self.after_change(kinds)
             }
             Hit::Row(i) => {

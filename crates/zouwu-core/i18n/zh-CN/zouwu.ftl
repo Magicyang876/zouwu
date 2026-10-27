@@ -95,3 +95,18 @@ settings-hotkey-need-modifier = 需要至少一个修饰键（Ctrl / Alt / Shift
 skin-import-failed = 皮肤包导入失败
 skin-export-procedural = 默认形象是代码画出来的，没有可导出的文件。想分享，先换成一套素材皮肤。
 skin-export-failed = 皮肤包导出失败
+
+# ── 形象页（设置面板） ─────────────────────────────
+settings-tab-skins = 形象
+settings-section-skins = 形象
+settings-section-skinpack = 皮肤包
+settings-skin-current = 当前形象
+settings-skin-gallery-hint = 点缩略图直接切换，选中的会立刻换到桌面
+settings-skin-import = 导入皮肤包…
+settings-skin-export = 导出当前形象…
+settings-skin-open-dir = 打开形象目录
+settings-skin-delete = 删除这套形象
+settings-skin-delete-hint = 内置形象删掉后，下次启动会自动补回来
+settings-skin-delete-failed = 删除失败
+settings-skin-imported = 已导入「{$id}」
+settings-skin-broken = 打不开（清单或图片有问题）
