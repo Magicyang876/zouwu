@@ -268,6 +268,14 @@ struct App {
     scan_env_done: bool,
     /// `ZOUWU_HISTORY=1` 启动即开一次剪贴板历史窗（只一次）。
     history_env_done: bool,
+    /// 待销毁的子窗口。
+    ///
+    /// **不要在 winit 的事件回调里 drop 掉 `Window`**：Windows 下析构会
+    /// `DestroyWindow`，那会同步派发窗口消息、重入事件派发；而此刻主窗事件
+    /// 回调还没返回，重入一撞上就死锁。表现是“开过 A 再来 B 就卡死”。
+    /// 所以关闭只 mark 一下，把结构体挪进这个墓地，统一在 `about_to_wait`
+    /// （事件派发已结束）里清掉。
+    retired: Vec<Box<dyn std::any::Any>>,
 }
 
 /// 读并解码当前皮肤。任何一步失败都退回 `procedural`：
@@ -375,7 +383,15 @@ impl App {
             settings_env_done: false,
             scan_env_done: false,
             history_env_done: false,
+            retired: Vec::new(),
         }
+    }
+
+    /// 把子窗口推入墓地，等 `about_to_wait` 里再真正析构。
+    ///
+    /// 见 `retired` 字段的注释：在事件回调里析构 `Window` 会重入事件派发。
+    fn retire<T: 'static>(&mut self, window: T) {
+        self.retired.push(Box::new(window));
     }
 
     fn window_arc(&self) -> Option<Arc<Window>> {
@@ -494,7 +510,7 @@ impl App {
                 }
             } else if let Some(window) = self.history_window.take() {
                 // 关掉功能就把窗也收掉，别留一个不会再更新的列表。
-                window.close();
+                self.retire(window);
             }
             log::info!(
                 "clipboard: enabled={}, limit={}, {} entries loaded",
@@ -596,7 +612,9 @@ impl App {
             self.save_config();
         }
         if close {
-            self.settings = None;
+            if let Some(panel) = self.settings.take() {
+                self.retire(panel);
+            }
             // 恢复配置里的置顶状态（面板期间被临时放开了）。
             if let Some(hwnd) = self.hwnd() {
                 zouwu_platform::layer::set_always_on_top(hwnd, self.config.window.always_on_top);
@@ -653,7 +671,7 @@ impl App {
     /// 摆出结果小窗。同一时刻只留一个 —— 连按两次快捷键不该叠出一摞窗。
     fn open_report(&mut self, event_loop: &ActiveEventLoop, report: Report) {
         if let Some(old) = self.report.take() {
-            old.close();
+            self.retire(old);
         }
         let title = self.i18n.t("qr.window-title");
         let copied = self.i18n.t("qr.copied");
@@ -677,8 +695,9 @@ impl App {
             }
         }
         if close {
-            window.close();
-            self.report = None;
+            if let Some(window) = self.report.take() {
+                self.retire(window);
+            }
             log::info!("qr: report window closed");
         }
     }
@@ -1601,7 +1620,7 @@ impl App {
     /// 摆出剪贴板历史窗。
     fn open_history(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(old) = self.history_window.take() {
-            old.close();
+            self.retire(old);
         }
         let entries = self.history.entries.clone();
         let window = HistoryWindow::new(
@@ -1648,7 +1667,7 @@ impl App {
         }
         if close {
             if let Some(window) = self.history_window.take() {
-                window.close();
+                self.retire(window);
             }
         }
     }
@@ -2172,6 +2191,12 @@ impl ApplicationHandler for App {
     /// 进入 `WaitUntil`。这是"空闲零开销"与"看起来活着"能同时成立的关键。
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
+
+        // 清墓地：这里已经出了事件派发（不在窗口过程里），析构 `Window` 不会重入。
+        // 见 `retired` 字段的注释——这是修“开过二维码窗再开历史窗就卡死”的关键。
+        if !self.retired.is_empty() {
+            self.retired.clear();
+        }
 
         // 轮询只是一种"叫醒输入"，它本身不应该产生任何重绘：
         // 开一枪 GetCursorPos 几微秒，醒来发现画面没变就直接接着睡。
