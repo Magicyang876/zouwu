@@ -28,7 +28,11 @@ pub const DEFAULT_SIZE: (f32, f32) = (760.0, 600.0);
 pub const MIN_SIZE: (f32, f32) = (560.0, 420.0);
 
 const MARGIN: f32 = 24.0;
-const HEADER_H: f32 = 92.0;
+/// 顶部标签页带的高度。
+///
+/// 这里**不画标题**：窗口标题栏已经写着「驺吾设置」，面板里面再写一遍
+/// 等于同一句话说两次，且白占掉 40px 垂直空间。整个 header 就是一条标签页带。
+const HEADER_H: f32 = 52.0;
 const FOOTER_H: f32 = 38.0;
 const ROW_H: f32 = 46.0;
 /// 带提示的行要多高。
@@ -129,6 +133,8 @@ pub enum Field {
     Theme,
     Skin,
     FontPack,
+    ClipboardEnabled,
+    ClipboardLimit,
     LogLevel,
     LogToFile,
 }
@@ -138,6 +144,7 @@ enum Unit {
     Ms,
     Px,
     Percent,
+    Count,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -173,6 +180,8 @@ impl Field {
             Field::Theme => "settings.theme",
             Field::Skin => "settings.skin",
             Field::FontPack => "settings.font",
+            Field::ClipboardEnabled => "settings.clipboard",
+            Field::ClipboardLimit => "settings.clipboard.limit",
             Field::LogLevel => "settings.log-level",
             Field::LogToFile => "settings.log-to-file",
         }
@@ -198,6 +207,14 @@ impl Field {
                 max: 520,
                 step: 20,
                 unit: Unit::Px,
+            },
+            Field::ClipboardLimit => NumSpec {
+                // 下限 10：历史要么有点用，要么干脆关掉；
+                // 跳一个 10 条的步子，500 条也只需按几十下。
+                min: 10,
+                max: zouwu_core::history::LIMIT_MAX as i64,
+                step: 10,
+                unit: Unit::Count,
             },
             Field::HoverFactor => NumSpec {
                 min: 100,
@@ -257,6 +274,7 @@ impl Field {
             Field::HoverDelay => cfg.interaction.hover_delay_ms as i64,
             Field::CollapseDelay => cfg.interaction.collapse_delay_ms as i64,
             Field::WindowSize => cfg.window.size.round() as i64,
+            Field::ClipboardLimit => cfg.clipboard.limit as i64,
             Field::HoverFactor => (cfg.interaction.hover_radius_factor * 100.0).round() as i64,
             Field::CollapseFactor => {
                 (cfg.interaction.collapse_radius_factor * 100.0).round() as i64
@@ -277,6 +295,7 @@ impl Field {
             Field::HoverDelay => cfg.interaction.hover_delay_ms = v.max(0) as u64,
             Field::CollapseDelay => cfg.interaction.collapse_delay_ms = v.max(0) as u64,
             Field::WindowSize => cfg.window.size = v as f32,
+            Field::ClipboardLimit => cfg.clipboard.limit = v.max(1) as usize,
             Field::HoverFactor => cfg.interaction.hover_radius_factor = v as f32 / 100.0,
             Field::CollapseFactor => cfg.interaction.collapse_radius_factor = v as f32 / 100.0,
             Field::HitTolerance => cfg.interaction.hit_tolerance = v as f32 / 100.0,
@@ -296,6 +315,7 @@ impl Field {
             Field::BringToFront => cfg.general.bring_to_front,
             Field::AlwaysOnTop => cfg.window.always_on_top,
             Field::ExpandOnClick => cfg.interaction.expand_on_click,
+            Field::ClipboardEnabled => cfg.clipboard.enabled,
             Field::Breathe => cfg.buddy.breathe,
             Field::LogToFile => cfg.log.to_file,
             _ => return None,
@@ -310,6 +330,7 @@ impl Field {
             Field::BringToFront => cfg.general.bring_to_front = on,
             Field::AlwaysOnTop => cfg.window.always_on_top = on,
             Field::ExpandOnClick => cfg.interaction.expand_on_click = on,
+            Field::ClipboardEnabled => cfg.clipboard.enabled = on,
             Field::Breathe => cfg.buddy.breathe = on,
             Field::LogToFile => cfg.log.to_file = on,
             _ => {}
@@ -397,6 +418,8 @@ pub enum Action {
     DeleteFont,
     /// 在资源管理器里打开 `fonts/`。
     OpenFontsDir,
+    /// 清空剪贴板历史（只删记录文件，不碰系统剪贴板）。
+    ClearHistory,
 }
 
 #[derive(Clone, Debug)]
@@ -668,6 +691,31 @@ pub fn build_rows(model: &Model) -> Vec<Row> {
             rows.push(toggle_row(model, Field::BringToFront));
             rows.push(toggle_row(model, Field::AlwaysOnTop));
             rows.push(step_row(model, Field::WindowSize));
+
+            rows.push(Row::section(i18n.t("settings.section.clipboard")));
+            rows.push(Row {
+                field: Some(Field::ClipboardEnabled),
+                label: i18n.t("settings.clipboard"),
+                hint: Some(i18n.t("settings.clipboard.hint")),
+                control: Control::Toggle {
+                    on: model.config.clipboard.enabled,
+                },
+            });
+            rows.push(Row {
+                field: Some(Field::ClipboardLimit),
+                label: i18n.t("settings.clipboard.limit"),
+                hint: Some(i18n.t("settings.clipboard.limit.hint")),
+                control: step_control(model, Field::ClipboardLimit),
+            });
+            rows.push(Row {
+                field: None,
+                label: i18n.t("settings.clipboard.clear"),
+                hint: Some(i18n.t("settings.clipboard.clear.hint")),
+                control: Control::Button {
+                    text: i18n.t("settings.clipboard.clear.button"),
+                    action: Action::ClearHistory,
+                },
+            });
         }
         Tab::Interaction => {
             rows.push(Row::section(i18n.t("settings.section.behavior")));
@@ -917,17 +965,22 @@ fn toggle_row(model: &Model, field: Field) -> Row {
 }
 
 fn step_row(model: &Model, field: Field) -> Row {
-    let spec = field.num_spec().expect("step field needs a spec");
-    let value = field.num(&model.config).unwrap_or(spec.min);
     Row {
         field: Some(field),
         label: model.i18n.t(field.label_key()),
         hint: None,
-        control: Control::Step {
-            text: format_value(&model.i18n, value, spec.unit),
-            at_min: value <= spec.min,
-            at_max: value >= spec.max,
-        },
+        control: step_control(model, field),
+    }
+}
+
+/// 数值行的控件部分（带提示的行自己拼 `Row`，但仍要用同一套控件）。
+fn step_control(model: &Model, field: Field) -> Control {
+    let spec = field.num_spec().expect("step field needs a spec");
+    let value = field.num(&model.config).unwrap_or(spec.min);
+    Control::Step {
+        text: format_value(&model.i18n, value, spec.unit),
+        at_min: value <= spec.min,
+        at_max: value >= spec.max,
     }
 }
 
@@ -951,6 +1004,7 @@ fn format_value(i18n: &I18n, value: i64, unit: Unit) -> String {
         Unit::Ms => i18n.t_args("settings.ms", &[("ms", &value.to_string())]),
         Unit::Px => i18n.t_args("settings.px", &[("px", &value.to_string())]),
         Unit::Percent => format!("{value}%"),
+        Unit::Count => i18n.t_args("settings.count", &[("count", &value.to_string())]),
     }
 }
 
@@ -1094,7 +1148,8 @@ pub fn layout(model: &Model, w: f32, h: f32) -> Layout {
     // 标签页：等宽铺开，右对齐到内容宽度。
     let tab_w = 108.0;
     let tab_h = 30.0;
-    let tabs_y = HEADER_H - tab_h - 10.0;
+    // 垂直居中在 header 带里，而不是贴底：header 现在只有标签页一层的厚度。
+    let tabs_y = (HEADER_H - tab_h) * 0.5;
     let mut tabs = Vec::with_capacity(4);
     for (i, tab) in Tab::ALL.iter().enumerate() {
         tabs.push((
@@ -1334,6 +1389,19 @@ pub fn activate(model: &mut Model, layout: &Layout, index: usize) -> Vec<ChangeK
             Action::ImportFont => return import_font(model),
             Action::DeleteFont => return delete_font(model),
             Action::OpenFontsDir => zouwu_platform::fontpack::reveal_dir(),
+            Action::ClearHistory => {
+                // 不可撤销，所以先问一次。问完直接写一个空的历史文件：
+                // 面板不掌握运行期数据，真正把内存里的清掉靠宿主收到
+                // `ChangeKind::Clipboard` 后重读磁盘（同一套机制管着开关与容量）。
+                if zouwu_platform::dialogs::confirm(
+                    &model.i18n.t("settings.clipboard.clear"),
+                    &model.i18n.t("settings.clipboard.clear.confirm"),
+                ) {
+                    let empty = zouwu_core::history::History::new(model.config.clipboard.limit);
+                    zouwu_platform::save_history(&empty);
+                    return vec![ChangeKind::Clipboard];
+                }
+            }
             Action::ToggleOverwrite => {
                 model.overwrite_skin = !model.overwrite_skin;
             }
@@ -1608,6 +1676,7 @@ fn changed(model: &mut Model, field: Field) -> Vec<ChangeKind> {
         Field::Theme | Field::Skin | Field::FontPack => kinds.push(ChangeKind::Appearance),
         Field::LogLevel | Field::LogToFile => kinds.push(ChangeKind::Log),
         Field::AlwaysOnTop => kinds.push(ChangeKind::WindowLevel),
+        Field::ClipboardEnabled | Field::ClipboardLimit => kinds.push(ChangeKind::Clipboard),
         Field::WindowSize => kinds.push(ChangeKind::WindowSize),
         Field::BuddyRadius | Field::Breathe => kinds.push(ChangeKind::Buddy),
         Field::RingRadius | Field::BubbleRadius | Field::FloatAmplitude | Field::ExpandStagger => {
@@ -1684,17 +1753,6 @@ pub fn draw(pixmap: &mut tiny_skia::Pixmap, layout: &Layout, model: &Model) {
 
     // 背景
     p.fill(Rect::new(0.0, 0.0, layout.w, layout.h), 0.0, pal.bg);
-    // 标题。这里刻意**不放副标题**：一行副标题会和标签页抢同一条水平带
-    // （第一版就是这么重叠的），而"当前热键"在「常规」页里已经是一等公民。
-    p.text(
-        &model.i18n.t("settings.title"),
-        MARGIN,
-        40.0,
-        20.0,
-        pal.text,
-        Weight::Bold,
-    );
-
     // 标签页
     for (tab, rect) in &layout.tabs {
         let active = *tab == model.tab;

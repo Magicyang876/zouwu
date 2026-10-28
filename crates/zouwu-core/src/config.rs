@@ -5,7 +5,7 @@
 use crate::ring::{RingConfig, DEG};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -14,6 +14,7 @@ pub struct Config {
     /// 放在最前面：这是用户最常手改的一段（语言、热键、自启）。
     pub general: General,
     pub appearance: Appearance,
+    pub clipboard: ClipboardCfg,
     pub log: LogCfg,
     pub interaction: Interaction,
     pub ring: RingCfg,
@@ -27,11 +28,34 @@ impl Default for Config {
             schema_version: SCHEMA_VERSION,
             general: General::default(),
             appearance: Appearance::default(),
+            clipboard: ClipboardCfg::default(),
             log: LogCfg::default(),
             interaction: Interaction::default(),
             ring: RingCfg::default(),
             buddy: BuddyCfg::default(),
             window: WindowCfg::default(),
+        }
+    }
+}
+
+/// 剪贴板历史。
+///
+/// 默认**开着**：这是一个小工具的典型用法——复制过的链接、地址、片段
+/// 需要回头再拿一次。关掉的入口在设置面板与配置文件里都有。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClipboardCfg {
+    /// 是否记录剪贴板历史。
+    pub enabled: bool,
+    /// 最多保留多少条。
+    pub limit: usize,
+}
+
+impl Default for ClipboardCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            limit: crate::history::DEFAULT_LIMIT,
         }
     }
 }
@@ -176,6 +200,8 @@ pub struct General {
     /// 单独一条而不是复用呼出热键：二维码是"想到才按"的动作，
     /// 不该逼用户先把小兽叫出来、再点气泡。
     pub qr_hotkey: String,
+    /// 打开剪贴板历史的热键；空串 = 不注册。
+    pub clipboard_hotkey: String,
     /// 开机自启（Windows 注册表 Run 键）。
     pub start_on_boot: bool,
     /// 启动后是否直接显示小兽（false = 先待在托盘里）。
@@ -190,6 +216,7 @@ impl Default for General {
             language: "auto".to_string(),
             hotkey: "Alt+Space".to_string(),
             qr_hotkey: "Ctrl+Alt+Q".to_string(),
+            clipboard_hotkey: "Ctrl+Alt+V".to_string(),
             start_on_boot: false,
             show_on_start: true,
             bring_to_front: true,
@@ -300,6 +327,9 @@ impl Config {
         if self.appearance != next.appearance {
             out.push(Appearance);
         }
+        if self.clipboard != next.clipboard {
+            out.push(Clipboard);
+        }
         if self.log != next.log {
             out.push(Log);
         }
@@ -336,6 +366,8 @@ pub enum ChangeKind {
     Autostart,
     /// 主题 / 皮肤
     Appearance,
+    /// 剪贴板历史开关与容量
+    Clipboard,
     /// 日志级别与落盘策略
     Log,
     /// 悬停延时 / 命中容差 / 收起半径
@@ -357,6 +389,7 @@ impl ChangeKind {
             ChangeKind::Hotkey => "hotkey",
             ChangeKind::Autostart => "autostart",
             ChangeKind::Appearance => "appearance",
+            ChangeKind::Clipboard => "clipboard",
             ChangeKind::Log => "log",
             ChangeKind::Interaction => "interaction",
             ChangeKind::Ring => "ring",

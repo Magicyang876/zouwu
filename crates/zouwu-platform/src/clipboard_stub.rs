@@ -7,3 +7,7 @@ pub fn set_text(_text: &str) -> bool {
 pub fn get_text() -> Option<String> {
     None
 }
+
+pub fn sequence() -> Option<u32> {
+    None
+}

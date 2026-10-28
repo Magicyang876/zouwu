@@ -22,6 +22,8 @@ pub enum Slot {
     Summon,
     /// 扫屏幕上的二维码。
     ScanQr,
+    /// 打开剪贴板历史。
+    Clipboard,
 }
 
 /// 热键注册器：按槽位各保留一条。

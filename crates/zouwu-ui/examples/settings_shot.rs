@@ -63,6 +63,11 @@ fn main() -> Result<(), String> {
         model.set_tab(tab);
         // 键盘焦点 + 悬停各演示一行，方便看选中/悬停态。
         model.keyboard_used = true;
+        // 页面比窗口长时，用 `ZOUWU_SCROLL=<逻辑像素>` 把下半页也出图验收。
+        model.scroll = std::env::var("ZOUWU_SCROLL")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.0);
         if tab == Tab::Skins {
             model.ensure_thumbs();
             model.hover_skin = Some(1);

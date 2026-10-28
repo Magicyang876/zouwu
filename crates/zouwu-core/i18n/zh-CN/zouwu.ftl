@@ -153,3 +153,20 @@ qr-elapsed = 用时 {$ms} 毫秒
 qr-screen = 显示器 {$index}
 qr-footer = 点一行复制内容 · Esc 关闭
 qr-copied = 已复制到剪贴板
+
+# ── 剪贴板历史 ────────────────────────────────────────────
+settings-count = {$count} 条
+settings-section-clipboard = 剪贴板
+settings-clipboard = 记录剪贴板历史
+settings-clipboard-hint = 复制过的文本会自动留下，重启后仍在
+settings-clipboard-limit = 最多保留
+settings-clipboard-limit-hint = 超出后先丢最旧的；同样的内容不会重复占一行
+settings-clipboard-clear = 清空历史
+settings-clipboard-clear-hint = 只删记录，不动系统剪贴板里的东西
+settings-clipboard-clear-button = 清空…
+settings-clipboard-clear-confirm = 确定清空全部剪贴板历史吗？这一步无法撤销。
+tray-clipboard = 剪贴板历史
+history-title = 剪贴板历史
+history-footer = ↑↓ 选择 · Enter 复制并关闭 · Delete 删除 · Esc 关闭
+history-footer-empty = 还没有记录，复制点什么就会出现在这里
+history-empty = 还没有记录

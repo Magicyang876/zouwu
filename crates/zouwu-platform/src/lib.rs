@@ -119,6 +119,25 @@ pub fn state_path() -> PathBuf {
     config_dir().join("state.toml")
 }
 
+pub fn history_path() -> PathBuf {
+    config_dir().join("history.toml")
+}
+
+/// 读剪贴板历史。文件不存在就是空历史（第一次启动的常态）。
+pub fn load_history() -> zouwu_core::history::History {
+    match read_to_string(&history_path()) {
+        Some(text) => zouwu_core::history::History::from_toml(&text),
+        None => zouwu_core::history::History::new(zouwu_core::history::DEFAULT_LIMIT),
+    }
+}
+
+pub fn save_history(history: &zouwu_core::history::History) {
+    // 写失败只记日志：历史丢了是小事，让复制这个动作本身失败才是大事。
+    if let Err(err) = write_atomic(&history_path(), &history.to_toml()) {
+        log::warn!("failed to save clipboard history: {err}");
+    }
+}
+
 /// 读取配置；文件不存在或解析失败时写回默认配置并返回默认值。
 pub fn load_config() -> Config {
     let path = config_path();

@@ -8,6 +8,7 @@ pub mod anim;
 pub mod config;
 pub mod drag;
 pub mod geom;
+pub mod history;
 pub mod hotkey;
 pub mod i18n;
 pub mod qr;

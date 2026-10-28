@@ -152,3 +152,20 @@ qr-elapsed = took {$ms} ms
 qr-screen = display {$index}
 qr-footer = Click a row to copy · Esc to close
 qr-copied = Copied to clipboard
+
+# ── Clipboard history ─────────────────────────────────────
+settings-count = {$count} items
+settings-section-clipboard = Clipboard
+settings-clipboard = Keep clipboard history
+settings-clipboard-hint = Copied text is remembered across restarts
+settings-clipboard-limit = Keep at most
+settings-clipboard-limit-hint = The oldest entries go first; repeats never take a second row
+settings-clipboard-clear = Clear history
+settings-clipboard-clear-hint = Only deletes the record; the system clipboard is untouched
+settings-clipboard-clear-button = Clear...
+settings-clipboard-clear-confirm = Clear the whole clipboard history? This cannot be undone.
+tray-clipboard = Clipboard history
+history-title = Clipboard history
+history-footer = ↑↓ select · Enter copy and close · Delete remove · Esc close
+history-footer-empty = Nothing yet; copy something and it shows up here
+history-empty = Nothing yet

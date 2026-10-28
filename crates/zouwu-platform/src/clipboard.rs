@@ -22,6 +22,11 @@ extern "system" {
     fn SetClipboardData(format: u32, mem: *mut c_void) -> *mut c_void;
     fn GetClipboardData(format: u32) -> *mut c_void;
     fn IsClipboardFormatAvailable(format: u32) -> i32;
+    /// 每次剪贴板内容变化，这个计数就 +1。
+    ///
+    /// 这是**廉价的**变化检测：不用打开剪贴板、不用碰其它进程的锁，
+    /// 一次调用约 0.1 µs。历史功能就是靠它做到"空闲不花代价"的。
+    fn GetClipboardSequenceNumber() -> u32;
 }
 
 #[link(name = "kernel32")]
@@ -115,6 +120,13 @@ fn open_with_retry() -> bool {
         }
     }
     false
+}
+
+/// 剪贴板的变化序号。返回 `None` 表示这次没问出来（极少数会话下会发生）。
+pub fn sequence() -> Option<u32> {
+    // 注意：`GetClipboardSequenceNumber` 返回 0 也是合法值（系统刚启动时），
+    // 所以不能用"非 0"判断有效性；这里 `Option` 只是让调用方少一层特判。
+    unsafe { Some(GetClipboardSequenceNumber()) }
 }
 
 #[cfg(test)]

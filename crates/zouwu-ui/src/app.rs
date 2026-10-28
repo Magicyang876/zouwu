@@ -26,12 +26,14 @@ use zouwu_core::anim::Spring;
 use zouwu_core::config::{ChangeKind, Config, WindowState};
 use zouwu_core::drag::{Drag, DragOutcome};
 use zouwu_core::geom::{Point, Rect};
+use zouwu_core::history::History;
 use zouwu_core::hotkey::Hotkey;
 use zouwu_core::i18n::I18n;
 use zouwu_core::qr;
 use zouwu_core::ring::{solve_rotation, Bubble, RingConfig};
 use zouwu_core::skin::PROCEDURAL_SKIN_ID;
 
+use crate::history::{HistoryWindow, Outcome as HistoryOutcome};
 use crate::settings_window::{Outcome as SettingsOutcome, SettingsWindow};
 use crate::skin::Skin;
 use zouwu_core::theme::Theme;
@@ -143,6 +145,14 @@ const EDGE_MARGIN: f32 = 48.0;
 /// 与 `zouwu_core::action::default_ring()` 里的 `builtin.qrcode` 对应：
 /// 气泡只负责"说出用户点了哪一项"，真正的执行在这里分派。
 const QRCODE_ACTION: &str = "builtin.qrcode";
+/// 剪贴板历史气泡的 id。
+const CLIPBOARD_ACTION: &str = "builtin.clipboard";
+
+/// 剪贴板序号轮询间隔。
+///
+/// `GetClipboardSequenceNumber` 只是读一个计数器（约 0.1 µs），250ms 一次
+/// 的代价完全不可测。再快没有意义：人不会 250ms 内连复两次。
+const CLIPBOARD_POLL: Duration = Duration::from_millis(250);
 
 struct App {
     config: Config,
@@ -227,6 +237,13 @@ struct App {
     pending_action: Option<String>,
     /// 结果小窗（二维码扫描结果等）。
     report: Option<ReportWindow>,
+    /// 剪贴板历史窗。
+    history_window: Option<HistoryWindow>,
+    /// 剪贴板历史数据。
+    history: History,
+    /// 上一次看到的剪贴板序号（`None` = 还没有基线）。
+    clipboard_seq: Option<u32>,
+    next_clipboard: Instant,
     /// 窗口当前是否可见（隐藏 = 缩进托盘，进程仍在）。
     visible: bool,
 
@@ -249,6 +266,8 @@ struct App {
     /// `ZOUWU_SCAN=1` 启动即扫一次二维码（只一次）。托盘与热键都没法脚本化，
     /// 而"截屏→找码→弹窗"这条链路最该被一键回归。
     scan_env_done: bool,
+    /// `ZOUWU_HISTORY=1` 启动即开一次剪贴板历史窗（只一次）。
+    history_env_done: bool,
 }
 
 /// 读并解码当前皮肤。任何一步失败都退回 `procedural`：
@@ -290,6 +309,10 @@ impl App {
     ) -> Self {
         let ring = config.ring.to_ring_config();
         let skin = load_skin(&config.appearance.skin);
+        // 历史容量来自配置；从磁盘读出来的条目要按它裁一遍，
+        // 否则用户把上限从 100 改成 10 之后，旧条目会一直赖着。
+        let mut history = zouwu_platform::load_history();
+        history.set_limit(config.clipboard.limit);
         let n = items.len();
         let i18n = I18n::new(&config.general.language);
         let visible = config.general.show_on_start;
@@ -300,6 +323,11 @@ impl App {
             hotkeys: None,
             pending_action: None,
             report: None,
+            history_window: None,
+            history,
+            // 启动时**只记基线**，不把当前剪贴板内容当成"刚复制"。
+            clipboard_seq: zouwu_platform::clipboard::sequence(),
+            next_clipboard: Instant::now(),
             visible,
             config,
             theme,
@@ -346,6 +374,7 @@ impl App {
             pending_settings: false,
             settings_env_done: false,
             scan_env_done: false,
+            history_env_done: false,
         }
     }
 
@@ -450,6 +479,29 @@ impl App {
             if let Some(tray) = &self.tray {
                 tray.set_autostart_checked(self.config.general.start_on_boot);
             }
+        }
+
+        if changed.contains(&ChangeKind::Clipboard) {
+            // 开关/容量/清空都在设置面板里改，但数据归这里管：重读一遍磁盘，
+            // 以文件为唯一真相。改容量时 `set_limit` 会顺手裁掉超出的旧条目。
+            self.history = zouwu_platform::load_history();
+            self.history.set_limit(self.config.clipboard.limit);
+            // 基线要重取：否则重新打开开关的下一拍会把“关闭期间的最后一次复制”补记进来。
+            self.clipboard_seq = zouwu_platform::clipboard::sequence();
+            if self.config.clipboard.enabled {
+                if self.history_window.is_some() {
+                    self.refresh_history_window();
+                }
+            } else if let Some(window) = self.history_window.take() {
+                // 关掉功能就把窗也收掉，别留一个不会再更新的列表。
+                window.close();
+            }
+            log::info!(
+                "clipboard: enabled={}, limit={}, {} entries loaded",
+                self.config.clipboard.enabled,
+                self.config.clipboard.limit,
+                self.history.len()
+            );
         }
 
         if changed.contains(&ChangeKind::Ring) {
@@ -559,6 +611,7 @@ impl App {
     fn run_action(&mut self, event_loop: &ActiveEventLoop, id: &str) {
         match id {
             QRCODE_ACTION => self.scan_qr(event_loop),
+            CLIPBOARD_ACTION => self.open_history(event_loop),
             other => log::info!("action not implemented yet: {other}"),
         }
     }
@@ -719,7 +772,12 @@ impl App {
     /// 按配置注册热键；解析失败时回退到默认值并记日志。
     fn apply_hotkey(&self, registrar: &mut HotkeyRegistrar) -> Result<(), String> {
         apply_hotkey_setting(Slot::Summon, &self.config.general.hotkey, registrar)?;
-        apply_hotkey_setting(Slot::ScanQr, &self.config.general.qr_hotkey, registrar)
+        apply_hotkey_setting(Slot::ScanQr, &self.config.general.qr_hotkey, registrar)?;
+        apply_hotkey_setting(
+            Slot::Clipboard,
+            &self.config.general.clipboard_hotkey,
+            registrar,
+        )
     }
 
     /// 显示 / 隐藏小兽（隐藏 = 缩进托盘，不退出进程）。
@@ -953,6 +1011,7 @@ impl App {
             TrayCommand::Recenter => self.pending_recenter = true,
             // 扫二维码要建窗口，得拿到 `&ActiveEventLoop` —— 同气泡点击，走待办队列。
             TrayCommand::ScanQr => self.pending_action = Some(QRCODE_ACTION.to_string()),
+            TrayCommand::Clipboard => self.pending_action = Some(CLIPBOARD_ACTION.to_string()),
             TrayCommand::SetTheme(id) => self.set_theme(id, now),
             TrayCommand::SetSkin(id) => self.set_skin(id, now),
             TrayCommand::ImportSkin => self.import_skin(now),
@@ -1000,6 +1059,7 @@ impl App {
             match slot {
                 Slot::Summon => self.toggle_visible(now),
                 Slot::ScanQr => self.pending_action = Some(QRCODE_ACTION.to_string()),
+                Slot::Clipboard => self.pending_action = Some(CLIPBOARD_ACTION.to_string()),
             }
         }
 
@@ -1185,6 +1245,7 @@ impl App {
     }
 
     /// 不用 rand crate 的轻量抖动（LCG），只为了让眨眼的节奏别太机械。
+    /// 不用 rand crate 的轻量抖动（LCG），只为了让眨眼的节奏别太机械。
     fn jitter_ms(&mut self, min: u32, max: u32) -> u32 {
         self.rng = self.rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         let span = max.saturating_sub(min).max(1);
@@ -1348,6 +1409,8 @@ impl App {
             });
         };
 
+        // 剪贴板序号闹钟：只为“看一眼有没有变”，不涉及重绘。
+        consider(self.next_clipboard);
         // 光标轮询闹钟：不是为了重绘，而是为了定期问一次光标位置。
         // 注意必须排在 `dirty` 后面、并且在上面的轮询之后计算，否则会反复到期。
         consider(self.next_poll);
@@ -1460,6 +1523,7 @@ impl App {
         // 设置面板打开时，小兽被压在面板下面，点不到它 —— 这时候还按 16ms
         // 轮询就只是白白吃掉 1~4% CPU（面板开着的实测值）。降到后台频率。
         let inside = self.settings.is_none() && self.poll_pointer(now);
+        self.poll_clipboard(now);
         self.trace_input(now, inside);
         // 窗口内高频（不漏点击）、窗口外低频（省 CPU）
         self.next_poll = now
@@ -1469,6 +1533,121 @@ impl App {
                 CURSOR_POLL_OUTSIDE
             };
     }
+    /// 看剪贴板有没有变。
+    ///
+    /// 不用 `AddClipboardFormatListener`（要找窗口收消息），而是间一次序号：
+    /// 这是唯一一种能真正做到"空闲零成本"的监听方式。
+    ///
+    /// 两个必须小心的地方：
+    /// 1. **启动时只记基线**。否则程序一开就把当前剪贴板内容当历史记上，
+    ///    用户会觉得“这东西擅自把我复制的东西存下来了”。
+    /// 2. **自己是也会写剪贴板**（复制二维码结果、从历史里挑一条），
+    ///    那也会推进序号 —— 所以同一条内容可能被再记一次，靠历史里的去重
+    ///    兜住（不会重复占一行）。
+    fn poll_clipboard(&mut self, now: Instant) {
+        if now < self.next_clipboard {
+            return;
+        }
+        self.next_clipboard = now + CLIPBOARD_POLL;
+
+        if !self.config.clipboard.enabled {
+            // 关掉时把基线也丢掉：重新打开后第一拍只记基线，
+            // 否则关着的这段时间里复制的最后一条会被“补记”进来。
+            self.clipboard_seq = None;
+            return;
+        }
+        let Some(seq) = zouwu_platform::clipboard::sequence() else {
+            return;
+        };
+        let previous = self.clipboard_seq;
+        self.clipboard_seq = Some(seq);
+        // MSRV 1.80：`is_none_or` 是 1.82 才稳定的，别用。
+        if previous.map_or(true, |old| old == seq) {
+            return;
+        }
+        // 图片/文件之类没有统一文本格式：这拍就当没看到，不报错。
+        let Some(text) = zouwu_platform::clipboard::get_text() else {
+            return;
+        };
+        let now_secs = unix_now();
+        let added = self.history.push(&text, now_secs);
+        if added || self.history_window.is_some() {
+            zouwu_platform::save_history(&self.history);
+            if self.history_window.is_some() {
+                self.refresh_history_window();
+            }
+        }
+        if added {
+            log::info!(
+                "clipboard: captured {} chars ({} entries)",
+                text.chars().count(),
+                self.history.len()
+            );
+        }
+    }
+
+    fn refresh_history_window(&mut self) {
+        let entries = self.history.entries.clone();
+        if let Some(window) = self.history_window.as_mut() {
+            window.refresh(entries);
+        }
+    }
+
+    /// 摆出剪贴板历史窗。
+    fn open_history(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(old) = self.history_window.take() {
+            old.close();
+        }
+        let entries = self.history.entries.clone();
+        let window = HistoryWindow::new(
+            event_loop,
+            entries,
+            self.theme.clone(),
+            self.i18n.t("history.title"),
+            self.i18n.t("history.footer"),
+            self.i18n.t("history.footer-empty"),
+            self.i18n.t("history.empty"),
+        );
+        match window {
+            Ok(window) => {
+                self.history_window = Some(window);
+                log::info!(
+                    "clipboard: history window opened ({} entries)",
+                    self.history.len()
+                );
+            }
+            Err(err) => log::error!("cannot open history window: {err}"),
+        }
+    }
+
+    fn history_event(&mut self, event: WindowEvent) {
+        let Some(window) = self.history_window.as_mut() else {
+            return;
+        };
+        let mut close = false;
+        let mut remove = None;
+        for outcome in window.window_event(&event) {
+            match outcome {
+                HistoryOutcome::Copied(text) => {
+                    log::info!("clipboard: re-copied {} chars", text.chars().count());
+                    close = true;
+                }
+                HistoryOutcome::Delete(index) => remove = Some(index),
+                HistoryOutcome::Close => close = true,
+            }
+        }
+        if let Some(index) = remove {
+            self.history.remove(index);
+            zouwu_platform::save_history(&self.history);
+            self.refresh_history_window();
+        }
+        if close {
+            if let Some(window) = self.history_window.take() {
+                window.close();
+            }
+        }
+    }
+
     /// 「为什么它没反应」的现场记录：`ZOUWU_INPUT=1` 时每 500ms 一行。
     ///
     /// 记录的是**判定依据**而不是结论：光标屏幕坐标、窗口原点、缩放、换算后的
@@ -1784,10 +1963,10 @@ fn apply_hotkey_setting(
             match slot {
                 // 呼出热键是"救命"通道，写错了必须回退到默认，否则用户打不开小兽。
                 Slot::Summon => Hotkey::default_summon(),
-                // 二维码是锦上添花：配置写错就干脆不注册，别占一个用户没要的键。
-                Slot::ScanQr => {
+                // 二维码 / 剪贴板是锦上添花：配置写错就干脆不注册，别占一个用户没要的键。
+                Slot::ScanQr | Slot::Clipboard => {
                     registrar.clear(slot);
-                    return Err(format!("qr hotkey `{raw}` invalid ({err}); not registered"));
+                    return Err(format!("hotkey `{raw}` invalid ({err}); not registered"));
                 }
             }
         }
@@ -1899,6 +2078,11 @@ impl ApplicationHandler for App {
         // 结果小窗同理。
         if self.report.as_ref().is_some_and(|r| r.id() == id) {
             self.report_event(event);
+            return;
+        }
+        // 剪贴板历史窗同理。
+        if self.history_window.as_ref().is_some_and(|h| h.id() == id) {
+            self.history_event(event);
             return;
         }
         let now = Instant::now();
@@ -2037,6 +2221,12 @@ impl ApplicationHandler for App {
             self.scan_env_done = true;
             self.pending_action = Some(QRCODE_ACTION.to_string());
         }
+        if !self.history_env_done
+            && std::env::var_os("ZOUWU_HISTORY").is_some_and(|v| !v.is_empty())
+        {
+            self.history_env_done = true;
+            self.pending_action = Some(CLIPBOARD_ACTION.to_string());
+        }
         if !self.settings_env_done && want_panel {
             self.settings_env_done = true;
             self.pending_settings = true;
@@ -2126,6 +2316,14 @@ fn failure_report(i18n: &I18n, headline_key: &str, reason: &str) -> Report {
 }
 
 /// 命中的码落在第几块屏上。多屏时用户才知道该去关哪个窗口。
+/// 当前 Unix 秒。剪贴板历史只需要"多久以前"这个粒度。
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 fn screen_label(i18n: &I18n, monitors: &[Rect], x: i32, y: i32) -> String {
     let p = Point::new(x as f32, y as f32);
     let index = monitors.iter().position(|m| m.contains(p));
