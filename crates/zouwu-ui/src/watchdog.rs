@@ -1,15 +1,24 @@
 //! 卡死时"停在哪"的看门狗。
 //!
-//! 用户报的卡死（调历史窗 → 调二维码窗 → 关 → 再调历史窗）在本机用合成按键
-//! 复现不出来，靠猜是猜不完的。所以加一条常开的最小证据：主线程在进入每个可能
-//! 阻塞的阶段时把 `STAGE` 写下来，另起一个线程每 2 秒看一眼。
+//! 用户报的卡死（调历史窗 → 调二维码窗 → 关 → 再调 → 冻住）在本机用合成按键
+//! 复现不出来，靠猜猜不完。所以加一条常开的最小证据：主线程在进入每个可能阻塞
+//! 的阶段时把 `STAGE` 写下来，另起一个线程每 2 秒看一眼。
 //!
-//! 如果主线程卡住（死锁、或者被 `SendMessage` 拖住），看门狗会**继续**打日志，
-//! 并且一直打出同一个阶段名 —— 那一行就是卡住的位置。反过来，如果看门狗也不
-//! 打了，说明整个进程被冻（`DestroyWindow` 之类跨进程同步），那是另一种问题。
+//! 关键设计：**看门狗不经过 `log` 宏**，自己往 `logs/watchdog.log` 写。
+//! 现场证据表明这类卡死会让整个进程冻住（连独立线程的 `log::info!` 都停了）。
+//! 那很可能是因为主线程正握着堆锁/日志锁在等别的进程——`log::info!` 要格式化
+//! （分配内存）就打不出来了。所以这里用**不分配内存**的写法（栈上定长缓冲 +
+//! 自己持有的 File），这样能区分两件事：
 //!
-//! 开销：一次 `store` + 一次 `fetch_add`，都是 relaxed，纳秒级。
+//! - `watchdog.log` 还在长，`zouwu.log` 停了 → 进程活着，主线程被锁在某个
+//!   同步调用里（USER/GDI/堆锁），位置就是 `stage=`。
+//! - 两个都停了 → 整个进程被冻死（连纯 syscall 都过不去）。
+//!
+//! 开销：一次 `store` + 一次 `fetch_add`（relaxed，纳秒级），加上每 2 秒
+//! 一次不到 64 字节的 `write`。
 
+use std::fmt::Write as _;
+use std::io::Write as _;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::time::Duration;
 
@@ -30,6 +39,9 @@ pub mod stage {
     pub const RENDER: u8 = 12;
     pub const PRESENT: u8 = 13;
     pub const EXIT: u8 = 14;
+    pub const CLOSE_WINDOW: u8 = 15;
+    pub const FOREGROUND: u8 = 16;
+    pub const TRAY: u8 = 17;
 }
 
 static STAGE: AtomicU8 = AtomicU8::new(stage::IDLE);
@@ -42,8 +54,7 @@ pub fn enter(stage: u8) {
     SEQ.fetch_add(1, Ordering::Relaxed);
 }
 
-/// 一次 100ms 轮询（光标/热键/剪贴板）跑完了。心跳里看它有没有在涨：
-/// 涨 = 主循环活着但没收到热键；不涨 = 主循环压根没转到轮询那一拍。
+/// 一次 100ms 轮询（光标/热键/剪贴板）跑完了。
 pub fn polled() {
     POLLS.fetch_add(1, Ordering::Relaxed);
 }
@@ -66,15 +77,55 @@ pub fn name(stage: u8) -> &'static str {
         stage::RENDER => "render",
         stage::PRESENT => "present",
         stage::EXIT => "exit",
+        stage::CLOSE_WINDOW => "close_window",
+        stage::FOREGROUND => "take_foreground",
+        stage::TRAY => "tray",
         _ => "unknown",
     }
 }
 
-/// 起看门狗线程。主线程连续 5 秒（约 2 拍）没换阶段就打一条 warn。
+/// 不分配内存的写手：栈上定长缓冲 + 自己持有的文件句柄。
+///
+/// 之所以不用 `String`：这个线程存在的意义就是"在主线程可能握着堆锁时也能说话"。
+struct RawLine {
+    file: Option<std::fs::File>,
+    buf: String,
+}
+
+impl RawLine {
+    fn new() -> Self {
+        let path = zouwu_platform::logging::log_dir().join("watchdog.log");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .ok();
+        if file.is_none() {
+            log::warn!("watchdog: cannot open {}", path.display());
+        }
+        Self {
+            file,
+            // 一行实际不到 100 字节；预留 256 足够，写不超就不会再分配。
+            buf: String::with_capacity(256),
+        }
+    }
+
+    fn line(&mut self, args: std::fmt::Arguments<'_>) {
+        self.buf.clear();
+        let _ = self.buf.write_fmt(args);
+        self.buf.push('\n');
+        if let Some(file) = &mut self.file {
+            let _ = file.write_all(self.buf.as_bytes());
+        }
+    }
+}
+
+/// 起看门狗线程。主线程连续 4 秒没换阶段就往两个日志里各打一条。
 pub fn spawn() {
     let spawned = std::thread::Builder::new()
         .name("zouwu-watchdog".into())
         .spawn(|| {
+            let mut sink = RawLine::new();
             let mut last_seq = SEQ.load(Ordering::Relaxed);
             let mut last_polls = POLLS.load(Ordering::Relaxed);
             let mut stuck = 0u32;
@@ -84,31 +135,30 @@ pub fn spawn() {
                 ticks += 1;
                 let seq = SEQ.load(Ordering::Relaxed);
                 let polls = POLLS.load(Ordering::Relaxed);
+                let at = STAGE.load(Ordering::Relaxed);
                 // 每 8 秒一条心跳：证明看门狗自己活着，也让人看出"卡死"时
                 // 主线程到底还在不在转（`polls` 是否在涨）。
                 if ticks % 4 == 0 {
-                    let at = STAGE.load(Ordering::Relaxed);
-                    log::info!(
-                        "watchdog: beat stage={} polls=+{} seq=+{}",
+                    sink.line(format_args!(
+                        "beat stage={} polls=+{} seq=+{}",
                         name(at),
                         polls.wrapping_sub(last_polls),
                         seq.wrapping_sub(last_seq)
-                    );
+                    ));
                     last_polls = polls;
                 }
                 if seq == last_seq {
                     stuck += 1;
-                    if stuck % 3 == 1 {
-                        let at = STAGE.load(Ordering::Relaxed);
-                        log::warn!(
-                            "watchdog: main thread stuck in `{}` for {}s (stage={at}, seq={seq})",
-                            name(at),
-                            stuck * 2
-                        );
+                    if stuck % 2 == 1 {
+                        sink.line(format_args!(
+                            "STUCK {}s in `{}` (stage={at}, seq={seq}, polls={polls})",
+                            stuck * 2,
+                            name(at)
+                        ));
                     }
                 } else {
                     if stuck > 0 {
-                        log::info!("watchdog: main thread resumed after {}s", stuck * 2);
+                        sink.line(format_args!("resumed after {}s", stuck * 2));
                     }
                     stuck = 0;
                     last_seq = seq;

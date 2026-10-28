@@ -418,6 +418,15 @@ impl App {
     ///
     /// 托盘/显隐/置前这些都是**原生窗口概念**，所以在这里取一次句柄交给
     /// `zouwu-platform`，UI 层不直接碰 win32。
+    /// 关子窗之前的固定动作：先把前台收回自己家。
+    ///
+    /// 见 `zouwu_platform::layer::activate` 的注释：隐藏/销毁持焦窗口时 USER32
+    /// 会同步决定下一个前台，候选可能是别的进程的窗口——那一次调用会把本线程
+    /// 阻塞在 USER 锁里，连带整个进程冻住（ADR-036）。
+    fn take_focus_home(&self) {
+        take_focus_home(self.hwnd());
+    }
+
     fn hwnd(&self) -> Option<isize> {
         let window = self.window.as_ref()?;
         let handle = window.window_handle().ok()?;
@@ -616,6 +625,7 @@ impl App {
         crate::watchdog::enter(crate::watchdog::stage::SETTINGS_EVENT);
         let mut pending: Vec<(Config, Vec<ChangeKind>)> = Vec::new();
         let mut close = false;
+        let home = self.hwnd();
         {
             let Some(panel) = self.settings.as_mut() else {
                 return;
@@ -629,6 +639,8 @@ impl App {
                 }
             }
             if close {
+                take_focus_home(home);
+                crate::watchdog::enter(crate::watchdog::stage::CLOSE_WINDOW);
                 panel.close();
             }
         }
@@ -639,10 +651,7 @@ impl App {
             self.save_config();
         }
         if close {
-            if let Some(panel) = self.settings.as_mut() {
-                panel.close();
-            }
-            // 恢复配置里的置顶状态（面板期间被临时放开了）。
+            // 面板已经在上面收起来了，这里只恢复置顶状态（面板期间被临时放开了）。
             if let Some(hwnd) = self.hwnd() {
                 zouwu_platform::layer::set_always_on_top(hwnd, self.config.window.always_on_top);
             }
@@ -667,7 +676,7 @@ impl App {
             }
         }
         let step = self.cycle_step;
-        self.cycle_step = (step + 1) % 5;
+        self.cycle_step = (step + 1) % 7;
         match step {
             0 => {
                 log::info!("cycle: open history ({} left)", self.cycle_left);
@@ -699,14 +708,25 @@ impl App {
                     self.window_event(event_loop, id, WindowEvent::CloseRequested);
                 }
             }
-            // 关键一步：历史窗还开着，再调一次 -> 旧的进墓地、新的立刻建。
+            // 关键一步：历史窗还开着，再调一次 -> 复用已有窗口。
             3 => {
                 log::info!("cycle: reopen history while it is still open");
                 self.open_history(event_loop);
             }
-            _ => {
+            4 => {
                 if let Some(id) = self.history_window.as_ref().map(|w| w.id()) {
                     log::info!("cycle: close history");
+                    self.window_event(event_loop, id, WindowEvent::CloseRequested);
+                }
+            }
+            // 设置面板也不能漏：它是普通可缩放窗口，关掉时同样会转交前台。
+            5 => {
+                log::info!("cycle: open settings");
+                self.open_settings(event_loop, now);
+            }
+            _ => {
+                if let Some(id) = self.settings.as_ref().map(|w| w.id()) {
+                    log::info!("cycle: close settings");
                     self.window_event(event_loop, id, WindowEvent::CloseRequested);
                 }
                 self.cycle_left -= 1;
@@ -786,16 +806,20 @@ impl App {
     fn report_event(&mut self, event: WindowEvent) {
         crate::watchdog::enter(crate::watchdog::stage::REPORT_EVENT);
         log::trace!("app: report event {event:?}");
-        let Some(window) = self.report.as_mut() else {
-            return;
-        };
         let mut close = false;
-        for outcome in window.window_event(&event) {
-            match outcome {
-                ReportOutcome::Close => close = true,
+        {
+            let Some(window) = self.report.as_mut() else {
+                return;
+            };
+            for outcome in window.window_event(&event) {
+                match outcome {
+                    ReportOutcome::Close => close = true,
+                }
             }
         }
         if close {
+            self.take_focus_home();
+            crate::watchdog::enter(crate::watchdog::stage::CLOSE_WINDOW);
             if let Some(window) = self.report.as_mut() {
                 window.close();
             }
@@ -808,6 +832,7 @@ impl App {
     /// 单独成一个函数是因为**导入新皮肤后菜单要长出这一条**：托盘菜单是静态构建的，
     /// 只能丢掉重建。热键不能跟着重建（重复注册会 already registered），所以两者分开。
     fn init_tray(&mut self) {
+        crate::watchdog::enter(crate::watchdog::stage::TRAY);
         let (rgba, w, h) = crate::paint::tray_icon(&self.theme, self.skin_for_paint(), 32);
         let autostart_on = autostart::is_enabled();
         // 主题/皮肤列表在启动时扫一次：换外观不是高频操作，为它挂目录监听不值得。
@@ -1761,19 +1786,21 @@ impl App {
     fn history_event(&mut self, event: WindowEvent) {
         crate::watchdog::enter(crate::watchdog::stage::HISTORY_EVENT);
         log::trace!("app: history event {event:?}");
-        let Some(window) = self.history_window.as_mut() else {
-            return;
-        };
         let mut close = false;
         let mut remove = None;
-        for outcome in window.window_event(&event) {
-            match outcome {
-                HistoryOutcome::Copied(text) => {
-                    log::info!("clipboard: re-copied {} chars", text.chars().count());
-                    close = true;
+        {
+            let Some(window) = self.history_window.as_mut() else {
+                return;
+            };
+            for outcome in window.window_event(&event) {
+                match outcome {
+                    HistoryOutcome::Copied(text) => {
+                        log::info!("clipboard: re-copied {} chars", text.chars().count());
+                        close = true;
+                    }
+                    HistoryOutcome::Delete(index) => remove = Some(index),
+                    HistoryOutcome::Close => close = true,
                 }
-                HistoryOutcome::Delete(index) => remove = Some(index),
-                HistoryOutcome::Close => close = true,
             }
         }
         if let Some(index) = remove {
@@ -1782,6 +1809,8 @@ impl App {
             self.refresh_history_window();
         }
         if close {
+            self.take_focus_home();
+            crate::watchdog::enter(crate::watchdog::stage::CLOSE_WINDOW);
             if let Some(window) = self.history_window.as_mut() {
                 window.close();
             }
@@ -2086,6 +2115,22 @@ impl App {
 /// 单独抽出来是因为它同时被“启动”和“热重载”两条路径使用。
 /// 配置里的热键写错时**不能**让用户失去唤醒手段，所以回退到默认热键；
 /// 空串是合法的“我不要热键”，不注册也不抱怨。
+/// 把前台还给自己的主窗口。见 `App::take_focus_home`。
+///
+/// 写成独立函数是因为它在 `settings_event` 里要在 `&mut self.settings` 的
+/// 借用内部调用——那时拿不到 `&self`。
+fn take_focus_home(home: Option<isize>) {
+    let Some(hwnd) = home else {
+        return;
+    };
+    crate::watchdog::enter(crate::watchdog::stage::FOREGROUND);
+    if zouwu_platform::layer::activate(hwnd) {
+        log::info!("app: took the foreground back before closing a child window");
+    } else {
+        log::warn!("app: could not take the foreground back before closing a child window");
+    }
+}
+
 fn apply_hotkey_setting(
     slot: Slot,
     raw: &str,
