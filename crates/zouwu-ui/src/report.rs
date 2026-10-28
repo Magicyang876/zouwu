@@ -255,7 +255,7 @@ impl ReportWindow {
         );
         let physical = window.inner_size();
         let presenter = create_soft(window.clone(), physical.width, physical.height)?;
-        crate::frame::apply_dark(&window);
+        crate::frame::apply(&window, &theme);
         window.focus_window();
         let this = Self {
             window,
@@ -335,20 +335,20 @@ impl ReportWindow {
                 // 这次绘制覆盖，所以第一帧再补一次。
                 if !self.frame_dark {
                     self.frame_dark = true;
-                    crate::frame::apply_dark(&self.window);
+                    crate::frame::apply(&self.window, &self.theme);
                 }
                 self.redraw();
                 Vec::new()
             }
             WindowEvent::Resized(size) => {
-                crate::frame::apply_dark(&self.window);
+                crate::frame::apply(&self.window, &self.theme);
                 self.presenter.resize(size.width.max(1), size.height.max(1));
                 self.request_redraw();
                 Vec::new()
             }
             WindowEvent::CloseRequested => vec![Outcome::Close],
             WindowEvent::Focused(true) => {
-                crate::frame::apply_dark(&self.window);
+                crate::frame::apply(&self.window, &self.theme);
                 Vec::new()
             }
             WindowEvent::CursorMoved { position, .. } => {

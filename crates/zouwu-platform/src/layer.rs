@@ -299,6 +299,7 @@ pub fn set_dark_title_bar(hwnd: isize, dark: bool) -> bool {
     let Some(set_attr) = proc else { return false };
     let value: i32 = i32::from(dark);
     unsafe {
+        // 旧版本只认 19，新版本认 20；哪个成功算哪个。
         for attribute in [20u32, 19u32] {
             if set_attr(
                 hwnd as Hwnd,
@@ -307,23 +308,71 @@ pub fn set_dark_title_bar(hwnd: isize, dark: bool) -> bool {
                 std::mem::size_of::<i32>() as u32,
             ) >= 0
             {
-                // DWM 属性变更不会总是立即重绘标题栏。
-                const SWP_NOZORDER: u32 = 0x0004;
-                const SWP_FRAMECHANGED: u32 = 0x0020;
-                SetWindowPos(
-                    hwnd as Hwnd,
-                    std::ptr::null_mut(),
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-                );
+                repaint_frame(hwnd);
                 return true;
             }
         }
     }
     false
+}
+
+/// 标题栏底色 / 文字色 / 边框色（Win11 22000+ 的三条 DWM 属性）。
+///
+/// 只做 `set_dark_title_bar` 是不够的：系统浅色模式下 DWM 给的是一条浅色边框，
+/// 与暗色面板并排就是两种配色。这里直接指定颜色，绕开系统主题。
+pub fn set_title_colors(hwnd: isize, caption: u32, text: u32, border: u32) -> bool {
+    type SetAttr = unsafe extern "system" fn(Hwnd, Dword, *const c_void, Dword) -> i32;
+
+    static PROC: std::sync::OnceLock<Option<SetAttr>> = std::sync::OnceLock::new();
+    let proc = *PROC.get_or_init(|| unsafe {
+        let lib = LoadLibraryA(c"dwmapi.dll".as_ptr() as *const u8);
+        if lib.is_null() {
+            return None;
+        }
+        let addr = GetProcAddress(lib, c"DwmSetWindowAttribute".as_ptr() as *const u8);
+        if addr.is_null() {
+            return None;
+        }
+        Some(std::mem::transmute::<*mut c_void, SetAttr>(addr))
+    });
+
+    let Some(set_attr) = proc else { return false };
+    let mut ok = false;
+    unsafe {
+        // 35 = CAPTION_COLOR，36 = TEXT_COLOR，34 = BORDER_COLOR。
+        for (attribute, value) in [(35u32, caption), (36u32, text), (34u32, border)] {
+            if set_attr(
+                hwnd as Hwnd,
+                attribute,
+                &value as *const u32 as *const c_void,
+                std::mem::size_of::<u32>() as u32,
+            ) >= 0
+            {
+                ok = true;
+            }
+        }
+    }
+    if ok {
+        repaint_frame(hwnd);
+    }
+    ok
+}
+
+/// DWM 属性变更不会总是立即重绘非客户区，催一次。
+fn repaint_frame(hwnd: isize) {
+    const SWP_NOZORDER: u32 = 0x0004;
+    const SWP_FRAMECHANGED: u32 = 0x0020;
+    unsafe {
+        SetWindowPos(
+            hwnd as Hwnd,
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
+    }
 }
 
 pub fn bring_to_front(hwnd: isize) {

@@ -81,7 +81,7 @@ impl SettingsWindow {
         model.refresh_fonts();
         window.set_title(&model.i18n.t("settings.title"));
         // 面板是暗色的，白标题栏很扎眼：让 DWM 一起变暗（失败也无所谓）。
-        crate::frame::apply_dark(&window);
+        crate::frame::apply(&window, &model.theme());
         window.focus_window();
 
         let mut this = Self {
@@ -179,13 +179,13 @@ impl SettingsWindow {
                 // 这次绘制覆盖，所以第一帧再补一次。
                 if !self.frame_dark {
                     self.frame_dark = true;
-                    crate::frame::apply_dark(&self.window);
+                    crate::frame::apply(&self.window, &self.model.theme());
                 }
                 self.redraw();
                 Vec::new()
             }
             WindowEvent::Resized(size) => {
-                crate::frame::apply_dark(&self.window);
+                crate::frame::apply(&self.window, &self.model.theme());
                 self.presenter.resize(size.width.max(1), size.height.max(1));
                 self.request_redraw();
                 Vec::new()
@@ -196,7 +196,7 @@ impl SettingsWindow {
             }
             WindowEvent::CloseRequested => vec![Outcome::Close],
             WindowEvent::Focused(true) => {
-                crate::frame::apply_dark(&self.window);
+                crate::frame::apply(&self.window, &self.model.theme());
                 Vec::new()
             }
             WindowEvent::Focused(false) => {
