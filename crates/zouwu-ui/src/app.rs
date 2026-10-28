@@ -26,7 +26,7 @@ use zouwu_core::anim::Spring;
 use zouwu_core::config::{ChangeKind, Config, WindowState};
 use zouwu_core::drag::{Drag, DragOutcome};
 use zouwu_core::geom::{Point, Rect};
-use zouwu_core::history::History;
+use zouwu_core::history::{History, Push};
 use zouwu_core::hotkey::Hotkey;
 use zouwu_core::i18n::I18n;
 use zouwu_core::qr;
@@ -1570,19 +1570,24 @@ impl App {
             return;
         };
         let now_secs = unix_now();
-        let added = self.history.push(&text, now_secs);
-        if added || self.history_window.is_some() {
-            zouwu_platform::save_history(&self.history);
-            if self.history_window.is_some() {
-                self.refresh_history_window();
-            }
+        let outcome = self.history.push(&text, now_secs);
+        if outcome == Push::Ignored {
+            return;
         }
-        if added {
-            log::info!(
+        // **任何变化都要落盘**，不只是新增：重复内容被提到最前也是一种变化，
+        // 不写盘的话内存里顺序对了、重启又变回去。
+        zouwu_platform::save_history(&self.history);
+        if self.history_window.is_some() {
+            self.refresh_history_window();
+        }
+        match outcome {
+            Push::Added => log::info!(
                 "clipboard: captured {} chars ({} entries)",
                 text.chars().count(),
                 self.history.len()
-            );
+            ),
+            Push::Moved => log::info!("clipboard: re-used an existing entry (moved to top)"),
+            Push::Ignored => {}
         }
     }
 

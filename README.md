@@ -245,7 +245,7 @@
 **可复现的验收方式**：
 
 ```bash
-cargo test --workspace                     # 167 个单测：几何 / 弹簧 / 布局 / 屏边避让 / 配置 / 主题 / 皮肤 / 皮肤包 / 字体包 / 日志 / 面板 / 文本 / i18n / 二维码 / 结果窗 / 剪贴板历史
+cargo test --workspace                     # 168 个单测：几何 / 弹簧 / 布局 / 屏边避让 / 配置 / 主题 / 皮肤 / 皮肤包 / 字体包 / 日志 / 面板 / 文本 / i18n / 二维码 / 结果窗 / 剪贴板历史
 cargo run -p zouwu-ui --example offscreen  # 离屏渲染 → target/zouwu-offscreen/*.png，直接看图
 cargo run -p zouwu-ui --example settings_shot   # 设置面板 4 个分页 → target/zouwu-settings/*.png（2×）
 cargo run -p zouwu-ui --example bench      # 单帧成本模型（release）

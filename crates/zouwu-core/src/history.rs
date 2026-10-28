@@ -24,6 +24,21 @@ pub const LIMIT_MAX: usize = 500;
 /// 单条文本最多保留的字符数（按 `char` 计，不是字节）。
 pub const ENTRY_MAX_CHARS: usize = 2_000;
 
+/// 一次 `push` 的结果。
+///
+/// 必须区分"新增"和"只是提到了最前"：调用方要据此决定是否落盘、是否打日志。
+/// 早期版本用 `bool` 表示"是否新增"，于是重复内容被提位之后**没有落盘** ——
+/// 内存里顺序对了，重启又变回去。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Push {
+    /// 新内容，占了一行。
+    Added,
+    /// 老内容被提到了最前（不新增行）。
+    Moved,
+    /// 空白/无效内容，什么也没发生。
+    Ignored,
+}
+
 /// 历史文件的 schema 版本。
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -94,25 +109,30 @@ impl History {
         self.entries.truncate(self.limit);
     }
 
-    /// 记一条。返回是否真的产生了一条新记录。
+    /// 记一条。
     ///
     /// 空白内容直接忽略：某些程序在启动/切换焦点时会往剪贴板塞空字符串，
     /// 把它当历史会让列表迅速变脏。
-    pub fn push(&mut self, text: &str, now: u64) -> bool {
+    pub fn push(&mut self, text: &str, now: u64) -> Push {
         let text = normalize(text);
         if text.is_empty() {
-            return false;
+            return Push::Ignored;
         }
         // 已经存在：提到最前并刷新时间，不新增一条。
+        // 已经在最前时不重复搬运（避免无谓的落盘）。
         if let Some(index) = self.entries.iter().position(|e| e.text == text) {
+            if index == 0 {
+                self.entries[0].copied_at = now;
+                return Push::Ignored;
+            }
             let mut entry = self.entries.remove(index);
             entry.copied_at = now;
             self.entries.insert(0, entry);
-            return false;
+            return Push::Moved;
         }
         self.entries.insert(0, Entry::new(text, now));
         self.entries.truncate(self.limit);
-        true
+        Push::Added
     }
 
     /// 删掉某一条（用户在历史窗里按 Delete）。
@@ -202,8 +222,8 @@ mod tests {
         let mut history = History::new(10);
         history.push("a", 1);
         history.push("b", 2);
-        let added = history.push("a", 3);
-        assert!(!added, "repeat must not create a row");
+        let outcome = history.push("a", 3);
+        assert_eq!(outcome, Push::Moved, "repeat must not create a row");
         assert_eq!(history.len(), 2);
         assert_eq!(history.get(0).unwrap().text, "a");
         assert_eq!(history.get(0).unwrap().copied_at, 3);
@@ -212,15 +232,15 @@ mod tests {
     #[test]
     fn blank_entries_are_ignored() {
         let mut history = History::new(10);
-        assert!(!history.push("", 1));
-        assert!(!history.push("  \r\n\t ", 2));
+        assert_eq!(history.push("", 1), Push::Ignored);
+        assert_eq!(history.push("  \r\n\t ", 2), Push::Ignored);
         assert!(history.is_empty());
     }
 
     #[test]
     fn oldest_entry_is_dropped_at_the_limit() {
         let mut history = History::new(2);
-        history.push("a", 1);
+        assert_eq!(history.push("a", 1), Push::Added);
         history.push("b", 2);
         history.push("c", 3);
         assert_eq!(history.len(), 2);
@@ -258,6 +278,19 @@ mod tests {
         let entry = Entry::new("\n\n  你好   世界  \n第二行", 1);
         assert_eq!(entry.preview(), "你好 世界");
         assert!(entry.is_multiline());
+    }
+
+    #[test]
+    fn pushing_the_top_entry_again_reports_ignored() {
+        let mut history = History::new(4);
+        history.push("a", 1);
+        assert_eq!(history.push("a", 2), Push::Ignored);
+        assert_eq!(
+            history.get(0).unwrap().copied_at,
+            2,
+            "timestamp still refreshes"
+        );
+        assert_eq!(history.len(), 1);
     }
 
     #[test]
