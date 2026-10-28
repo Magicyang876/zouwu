@@ -169,6 +169,7 @@
 | ADR-026 | **位置安全**：面积比例判可见（≥50% 才算活着）、启动/运行期/托盘三处归位 |
 | ADR-027 | **内置素材带版本戳**：`.zouwu-builtin` + `BUILTIN_ASSET_REVISION`，改素材必须 +1 |
 | ADR-028 | **行高按字体度量算；皮肤 `scale` 由素材占比反推**（不手调，否则口径漂移） |
+| ADR-032 | **长说明"点开才展开"**：换行在 `layout()` 里算（行高依赖换行）、行距用固定常量、折行留 4% 余量 + 行首禁则 |
 | ADR-031 | **字体包：读字体自己的 `name` 表，`AddFontResourceEx(FR_PRIVATE)` 进程私有注册**；配置 schema 4，空串 = 系统字体 |
 | ADR-030 | **面板文字被遮挡的四个成因**：半行、section 贴线、经验式基线、GDI 不选字体 |
 | ADR-029 | **贴图路径必须乘 DPI 缩放**：只有非 100% DPI 才复现，离屏验证全在 1.0 下跑 |
@@ -240,7 +241,7 @@
 **可复现的验收方式**：
 
 ```bash
-cargo test --workspace                     # 134 个单测：几何 / 弹簧 / 布局 / 屏边避让 / 配置 / 主题 / 皮肤 / 皮肤包 / 字体包 / 日志 / 面板 / 文本 / i18n
+cargo test --workspace                     # 136 个单测：几何 / 弹簧 / 布局 / 屏边避让 / 配置 / 主题 / 皮肤 / 皮肤包 / 字体包 / 日志 / 面板 / 文本 / i18n
 cargo run -p zouwu-ui --example offscreen  # 离屏渲染 → target/zouwu-offscreen/*.png，直接看图
 cargo run -p zouwu-ui --example settings_shot   # 设置面板 4 个分页 → target/zouwu-settings/*.png（2×）
 cargo run -p zouwu-ui --example bench      # 单帧成本模型（release）

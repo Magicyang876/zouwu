@@ -68,6 +68,8 @@ fn main() -> Result<(), String> {
             model.hover_skin = Some(1);
             // 勾上「覆盖已安装」：这一页的重点控件，图里必须能看见它的两种状态之一。
             model.overwrite_skin = true;
+            // 展开长说明：这条说明是"点开才看到"的，图里必须能验收它的排版。
+            model.overwrite_help_open = std::env::var("ZOUWU_NOTE").is_ok();
         }
 
         let (lw, lh) = settings::DEFAULT_SIZE;

@@ -39,6 +39,14 @@ const ROW_H: f32 = 46.0;
 const HINT_ROW_EXTRA: f32 = 18.0;
 /// 标签与提示之间的间隙。
 const HINT_GAP: f32 = 2.0;
+/// 展开说明的行距（逻辑像素）。
+///
+/// 18 而不是 `line_height(11.0)`：行高在布局阶段拿不到画笔，而 11pt 的行高
+/// 在 100%/150% DPI 下折成逻辑像素分别是 15/14.7 —— 都小于 18，所以固定 18
+/// 在两种缩放下都不会把两行压在一起，且不依赖任何运行时度量。
+const NOTE_LINE_H: f32 = 18.0;
+/// 说明块上下各留一点气口，否则第一行会贴着按钮。
+const NOTE_PAD: f32 = 7.0;
 /// section 标题占的高度：上方留白 + 一行小字 + 一条分隔线。
 ///
 /// 原来是 34，标题压在行底、分隔线紧跟其后，紧贴上一个控件行，
@@ -355,6 +363,15 @@ pub enum Control {
     Section {
         text: String,
     },
+    /// 展开后的长说明：一段会自动换行的正文。
+    ///
+    /// 行高由 `layout()` 按**实际宽度**换算出来的行数决定 —— 所以这里存原文，
+    /// 换行结果存在 `Layout::notes` 里（与 `rows` 同下标）。把换行放在布局阶段
+    /// 是有意的：`build_rows` 不知道窗口多宽，而说明文字一旦换了行，
+    /// 少一行会截断、多一行会留白，两种都很难看。
+    Note {
+        text: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -372,6 +389,8 @@ pub enum Action {
     DeleteSkin,
     /// 切换"导入时覆盖已安装皮肤"。
     ToggleOverwrite,
+    /// 展开/收起"覆盖安装"的长说明。
+    ToggleOverwriteHelp,
     /// 导入字体文件（`.ttf` / `.otf` / `.ttc`）。
     ImportFont,
     /// 删掉当前字体包。
@@ -410,6 +429,8 @@ impl Row {
         match self.control {
             Control::Section { .. } => SECTION_H,
             Control::Value { .. } | Control::Swatches => TEXT_ROW_H,
+            // 占位：真实高度要等 `layout()` 换行后才知道（见 `Control::Note`）。
+            Control::Note { .. } => 0.0,
             // 按**实际**行数给高度：只装一套皮肤时不该留两行的空白。
             Control::Gallery { count, .. } => {
                 let rows = count
@@ -464,6 +485,9 @@ pub struct Model {
     /// **故意不持久化**：覆盖是破坏性动作，每次打开面板都要重新表态，
     /// 而不是上周勾过一次、这周就默认覆盖掉别人的皮肤。
     pub overwrite_skin: bool,
+    /// "覆盖安装"的长说明是否展开。纯界面状态，不落盘：下次打开面板
+    /// 应该是干净的一屏，而不是接着上次读了一半的说明。
+    pub overwrite_help_open: bool,
     /// 缩略图缓存键：主题或皮肤列表变了才重算。
     thumbs_key: String,
 }
@@ -500,6 +524,7 @@ impl Model {
             thumbs: Vec::new(),
             hover_skin: None,
             overwrite_skin: false,
+            overwrite_help_open: false,
             thumbs_key: String::new(),
         }
     }
@@ -749,12 +774,36 @@ pub fn build_rows(model: &Model) -> Vec<Row> {
             rows.push(Row {
                 field: None,
                 label: i18n.t("settings.skin.overwrite"),
+                // 一行能说完的短句：长解释收进下面的"说明…"，需要时才展开。
                 hint: Some(i18n.t("settings.skin.overwrite.hint")),
                 control: Control::Checkbox {
                     on: model.overwrite_skin,
                     action: Action::ToggleOverwrite,
                 },
             });
+            rows.push(Row {
+                field: None,
+                label: String::new(),
+                hint: None,
+                control: Control::Button {
+                    text: i18n.t(if model.overwrite_help_open {
+                        "settings.skin.overwrite.less"
+                    } else {
+                        "settings.skin.overwrite.more"
+                    }),
+                    action: Action::ToggleOverwriteHelp,
+                },
+            });
+            if model.overwrite_help_open {
+                rows.push(Row {
+                    field: None,
+                    label: String::new(),
+                    hint: None,
+                    control: Control::Note {
+                        text: i18n.t("settings.skin.overwrite.note"),
+                    },
+                });
+            }
             for (text_key, action) in [
                 ("settings.skin.import", Action::ImportSkin),
                 ("settings.skin.export", Action::ExportSkin),
@@ -992,6 +1041,8 @@ pub struct Layout {
     pub rows_h: f32,
     pub tabs: Vec<(Tab, Rect)>,
     pub rows: Vec<(Row, RowLayout)>,
+    /// 与 `rows` 同下标的换行结果：只有 `Control::Note` 的行非空。
+    pub notes: Vec<Vec<String>>,
     pub scrollbar: Option<(Rect, Rect)>,
     /// 底部提示的基线
     pub footer: Rect,
@@ -1003,7 +1054,17 @@ pub struct Layout {
 /// （用户报的"文字遮挡"里有一半是这个）。吸附之后，边缘永远落在两行之间。
 ///
 /// 例外：滚到底时直接给 `max_scroll`，让最后一行完整可见（否则最后一行永远差几像素）。
-fn snap_scroll(rows: &[Row], raw: f32, max_scroll: f32) -> f32 {
+/// 把一段说明按**逻辑像素**宽度折行。
+///
+/// 度量在平台层是物理像素，这里传的是逻辑字号与逻辑宽度 —— 两者同比例，
+/// 折行位置因此与 DPI 无关（汉字是定宽 1em，这一点是精确的；
+/// 拉丁文在极端 DPI 下可能差一个词，且差的方向是"多一行"，由
+/// `Layout::notes` 的高度兜住，不会截断）。
+fn wrap_note(text: &str, width: f32) -> Vec<String> {
+    crate::text::TextEngine::with(|engine| engine.wrap(text, 11.0, width))
+}
+
+fn snap_scroll(heights: &[f32], raw: f32, max_scroll: f32) -> f32 {
     if raw <= 0.5 {
         return 0.0;
     }
@@ -1013,16 +1074,16 @@ fn snap_scroll(rows: &[Row], raw: f32, max_scroll: f32) -> f32 {
     let mut acc = 0.0f32;
     let mut best = 0.0f32;
     let mut best_dist = f32::MAX;
-    for row in rows {
+    for h in heights {
         // 往上、往下都试：吸到"离得最近的那条边界"。
-        for cand in [acc, acc + row.height()] {
+        for cand in [acc, acc + h] {
             let d = (cand - raw).abs();
             if d < best_dist {
                 best_dist = d;
                 best = cand;
             }
         }
-        acc += row.height();
+        acc += h;
     }
     best.clamp(0.0, max_scroll)
 }
@@ -1043,14 +1104,37 @@ pub fn layout(model: &Model, w: f32, h: f32) -> Layout {
     }
 
     let rows = build_rows(model);
-    let rows_h: f32 = rows.iter().map(|r| r.height()).sum::<f32>() + MARGIN * 2.0;
+
+    // 说明文字在这里换行：只有此刻才知道"内容区到底有多宽"。
+    // 别用整行宽度：说明块左右各内缩 4px，再留 4% 余量。
+    //
+    // 4% 不是玄学：折行用的是**逻辑**字号与逻辑宽度（布局阶段拿不到 DPI），
+    // 而绘制时字号被乘上缩放 —— GDI 的字符步进要取整，150% 下折成的宽度
+    // 会比线性外推宽几个百分点。余量吃掉这点误差，右侧才不会顶出边框。
+    let avail = ((w - MARGIN * 2.0 - 8.0) * 0.96).max(80.0);
+    let mut notes: Vec<Vec<String>> = Vec::with_capacity(rows.len());
+    let mut heights: Vec<f32> = Vec::with_capacity(rows.len());
+    for row in &rows {
+        match &row.control {
+            Control::Note { text } => {
+                let lines = wrap_note(text, avail);
+                heights.push(NOTE_PAD * 2.0 + lines.len() as f32 * NOTE_LINE_H);
+                notes.push(lines);
+            }
+            _ => {
+                heights.push(row.height());
+                notes.push(Vec::new());
+            }
+        }
+    }
+
+    let rows_h: f32 = heights.iter().sum::<f32>() + MARGIN * 2.0;
     let max_scroll = (rows_h - content.h).max(0.0);
-    let scroll = snap_scroll(&rows, model.scroll.clamp(0.0, max_scroll), max_scroll);
+    let scroll = snap_scroll(&heights, model.scroll.clamp(0.0, max_scroll), max_scroll);
 
     let mut out_rows = Vec::with_capacity(rows.len());
     let mut y = content.y + MARGIN - scroll;
-    for row in rows {
-        let rh = row.height();
+    for (row, rh) in rows.into_iter().zip(heights.iter().copied()) {
         let rect = Rect::new(MARGIN, y, w - MARGIN * 2.0, rh);
         let control = Rect::new(
             rect.right() - CONTROL_W,
@@ -1110,6 +1194,7 @@ pub fn layout(model: &Model, w: f32, h: f32) -> Layout {
         w,
         h,
         content,
+        notes,
         focus: model.focus,
         rows_h,
         tabs,
@@ -1251,6 +1336,12 @@ pub fn activate(model: &mut Model, layout: &Layout, index: usize) -> Vec<ChangeK
             Action::OpenFontsDir => zouwu_platform::fontpack::reveal_dir(),
             Action::ToggleOverwrite => {
                 model.overwrite_skin = !model.overwrite_skin;
+            }
+            Action::ToggleOverwriteHelp => {
+                model.overwrite_help_open = !model.overwrite_help_open;
+                // 展开后内容变高，滚动位置要跟着重算；收起时若停在底部，
+                // 就把滚动拉回去，避免出现"底下多出一大片空白"。
+                model.scroll = 0.0;
             }
         }
         return Vec::new();
@@ -1651,7 +1742,7 @@ pub fn draw(pixmap: &mut tiny_skia::Pixmap, layout: &Layout, model: &Model) {
             // 悬停只给一点点底色，别和"选中"抢注意力。
             p.fill(rl.rect.inset(0.0, 2.0), 8.0, pal.raised.with_alpha(0.55));
         }
-        draw_row(&mut p, &pal, model, row, rl);
+        draw_row(&mut p, &pal, model, row, rl, layout.notes.get(i));
     }
 
     // 页脚与滚动条不受内容裁剪影响。
@@ -1681,7 +1772,14 @@ pub fn draw(pixmap: &mut tiny_skia::Pixmap, layout: &Layout, model: &Model) {
     p.text_right(&hint, layout.footer, 11.0, pal.muted, Weight::Regular);
 }
 
-fn draw_row(p: &mut Painter<'_>, pal: &Palette, model: &Model, row: &Row, rl: &RowLayout) {
+fn draw_row(
+    p: &mut Painter<'_>,
+    pal: &Palette,
+    model: &Model,
+    row: &Row,
+    rl: &RowLayout,
+    note: Option<&Vec<String>>,
+) {
     let label_rect = Rect::new(
         rl.rect.x + 4.0,
         rl.rect.y,
@@ -1753,6 +1851,18 @@ fn draw_row(p: &mut Painter<'_>, pal: &Palette, model: &Model, row: &Row, rl: &R
 
     match &row.control {
         Control::Section { .. } => {}
+        Control::Note { .. } => {
+            // 说明是"读的东西"，不是"点的东西"：正常字色、正常行距、不高亮。
+            // 行已经在布局阶段折好，这里只负责按 `NOTE_LINE_H` 逐行落地 ——
+            // 再折一次会让行数与行高对不上，正是要避免的那类错位。
+            let lines = note.map(|l| l.as_slice()).unwrap_or(&[]);
+            let mut y = rl.rect.y + NOTE_PAD;
+            for line in lines {
+                let band = Rect::new(rl.rect.x + 4.0, y, rl.rect.w - 8.0, NOTE_LINE_H);
+                p.text_in(line, band, 11.0, pal.text.with_alpha(0.86), Weight::Regular);
+                y += NOTE_LINE_H;
+            }
+        }
         Control::Toggle { on } => {
             let r = rl.hit;
             let fill = if *on { pal.accent } else { pal.line };
@@ -1967,6 +2077,59 @@ mod tests {
         // 窄到只放得下一个格子也不能算成 0 列
         let (cols_tiny, _) = gallery_geom(Rect::new(0.0, 0.0, 40.0, 100.0), 3);
         assert_eq!(cols_tiny, 1);
+    }
+
+    /// "点开才展开的长说明"必须真的点得开、量得出高度、再点收得回去。
+    ///
+    /// 这里不测像素，只测三件容易写崩的事：行数（+1 行 Note）、
+    /// Note 的高度（0 是占位，真实高度由换行决定）、以及 `Layout::notes`
+    /// 里到底有没有内容（漏填的话屏幕上是一片空白，而不是报错）。
+    #[test]
+    fn overwrite_help_expands_into_a_measured_note_row() {
+        let mut m = model();
+        m.set_tab(Tab::Skins);
+
+        let collapsed = layout(&m, 760.0, 600.0);
+        let idx = collapsed
+            .rows
+            .iter()
+            .position(|(row, _)| {
+                matches!(
+                    &row.control,
+                    Control::Button {
+                        action: Action::ToggleOverwriteHelp,
+                        ..
+                    }
+                )
+            })
+            .expect("the 'explain' button should exist on the skins tab");
+
+        activate(&mut m, &collapsed, idx);
+        assert!(m.overwrite_help_open);
+
+        let expanded = layout(&m, 760.0, 600.0);
+        assert_eq!(expanded.rows.len(), collapsed.rows.len() + 1);
+        let note_i = expanded
+            .rows
+            .iter()
+            .position(|(row, _)| matches!(row.control, Control::Note { .. }))
+            .expect("expanded layout should carry a note row");
+        let lines = &expanded.notes[note_i];
+        assert!(!lines.is_empty(), "note must be wrapped into lines");
+        let (_, rl) = &expanded.rows[note_i];
+        assert!(
+            rl.rect.h > NOTE_PAD * 2.0 + NOTE_LINE_H * 0.5,
+            "note row needs real height, got {}",
+            rl.rect.h
+        );
+        // 说明行不参与键盘焦点：它不是可操作项。
+        assert!(!expanded.rows[note_i].0.focusable());
+
+        // 再点一次回到原状。
+        activate(&mut m, &expanded, idx);
+        assert!(!m.overwrite_help_open);
+        let again = layout(&m, 760.0, 600.0);
+        assert_eq!(again.rows.len(), collapsed.rows.len());
     }
 
     #[test]

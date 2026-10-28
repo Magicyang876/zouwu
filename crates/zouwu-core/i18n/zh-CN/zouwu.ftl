@@ -108,7 +108,11 @@ settings-skin-export = 导出当前形象…
 settings-skin-open-dir = 打开形象目录
 settings-skin-delete = 删除这套形象
 settings-skin-overwrite = 覆盖已安装的同名皮肤
-settings-skin-overwrite-hint = 勾上后导入会整个替换掉同名皮肤（会弹窗确认这套皮肤被换掉）；不勾则拒绝导入已存在的皮肤
+settings-skin-overwrite-hint = 导入同名皮肤时直接替换，而不是拒绝
+settings-skin-overwrite-more = 详细说明…
+settings-skin-overwrite-less = 收起说明
+settings-skin-overwrite-note = 皮肤包靠内部的名字（id）区分。导入一套与已安装皮肤同名的包时：勾上就整套替换 —— 原来的图层、配色、几何参数全部丢掉，改成新包里的，导入前会弹一次确认；不勾则直接拒绝导入，保留已经装好的那套。
+  想保留旧皮肤又想装新的，可以先把当前这套导出备份，或者改名后再导入。这个勾选只影响"这一次导入"，不会记住。
 settings-skin-overwrite-confirm = 覆盖已安装的皮肤？
 settings-skin-delete-hint = 内置形象删掉后，下次启动会自动补回来
 settings-skin-delete-failed = 删除失败

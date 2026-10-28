@@ -35,6 +35,33 @@ pub struct TextEngine {
     _private: (),
 }
 
+/// 行首禁则：这些标点不该出现在一行的开头。
+///
+/// 中文排版里 `，。、；：？！）」』】` 若落在行首，读起来像断错了句。
+/// 这里做最朴素的处理——把它挪到上一行行尾。因为折行时留了余量
+/// （见 `NOTE_WRAP_SAFETY`），挪一个标点不会溢出。
+fn pull_down_line_start_punctuation(lines: &mut [String]) {
+    const FORBIDDEN: &str = "，。、；：？！）」』】〉》,.;:?!)]}";
+    for i in 1..lines.len() {
+        let mut moved = 0;
+        // 最多挪 3 个：一行开头连续的全角标点不会超过这个数，
+        // 加个上限是为了防止全是标点的异常行把上一行撑爆。
+        while moved < 3 {
+            let Some(first) = lines[i].chars().next() else {
+                break;
+            };
+            // 整行都是标点时不挪，否则会把整行搬空。
+            if !FORBIDDEN.contains(first) || lines[i].chars().count() <= 1 {
+                break;
+            }
+            let rest = lines[i][first.len_utf8()..].to_string();
+            lines[i - 1].push(first);
+            lines[i] = rest;
+            moved += 1;
+        }
+    }
+}
+
 impl TextEngine {
     fn new() -> Self {
         Self { _private: () }
@@ -120,8 +147,16 @@ impl TextEngine {
             }
             let advance = self.advance(ch, px);
             if width + advance > max_width && !line.is_empty() {
-                match last_space.take() {
+                // 空格断行只在"空格离行尾够近"时才算数。
+                //
+                // 反例（实测）：中文段里只有一个空格（`…整套替换 —— 原来的图层…`），
+                // 空间一到就回退到那个空格，会把整整半段中文推到下一行，
+                // 于是每行都短一大截、右边一片参差。中文本来就能在任意字间断，
+                // 所以宁可在这里断开。
+                let nearby_space = last_space.filter(|&(_, at)| max_width - at <= max_width * 0.3);
+                match nearby_space {
                     Some((idx, _)) => {
+                        last_space = None;
                         let rest: String = line[idx..].trim_start().to_string();
                         line.truncate(idx);
                         lines.push(line.trim_end().to_string());
@@ -131,6 +166,7 @@ impl TextEngine {
                     None => {
                         lines.push(std::mem::take(&mut line));
                         width = 0.0;
+                        last_space = None;
                     }
                 }
             }
@@ -146,6 +182,7 @@ impl TextEngine {
         if lines.is_empty() {
             lines.push(String::new());
         }
+        pull_down_line_start_punctuation(&mut lines);
         lines
     }
 
@@ -200,6 +237,32 @@ mod tests {
         let mut e = TextEngine::new();
         let lines = e.wrap("驺吾驺吾驺吾驺吾", 16.0, 40.0);
         assert!(lines.len() > 1, "long CJK run must wrap: {lines:?}");
+    }
+
+    /// 远在天边的空格不该把整段文字推到下一行。
+    ///
+    /// 真实来源：皮肤页的"覆盖安装"说明里有 `…整套替换 —— 原来的图层…`，
+    /// 按旧逻辑每行都退回到那个破折号后的空格，右边参差一大片。
+    #[test]
+    fn wrap_ignores_a_far_away_space() {
+        let mut e = TextEngine::new();
+        let text = "驺吾驺吾驺吾 —— 驺吾驺吾驺吾驺吾驺吾驺吾驺吾驺吾驺吾驺吾";
+        let max = 120.0;
+        let lines = e.wrap(text, 16.0, max);
+        assert!(lines.len() > 2, "should take several lines: {lines:?}");
+        // 除最后一行外，每行都该填到接近满宽（允许一个字的余量）。
+        for line in &lines[..lines.len() - 1] {
+            let w = e.measure(line, 16.0, false);
+            assert!(w > max * 0.6, "line too short ({w} of {max}): {line:?}");
+        }
+        // 内容不能丢。
+        let joined: String = lines
+            .concat()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let want: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        assert_eq!(joined, want);
     }
 
     #[test]
