@@ -17,6 +17,7 @@ pub mod settings_window;
 pub mod skin;
 pub mod text;
 pub mod thumb;
+pub mod watchdog;
 pub mod widget;
 
 pub use app::run;

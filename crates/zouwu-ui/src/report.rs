@@ -256,6 +256,7 @@ impl ReportWindow {
         let physical = window.inner_size();
         let presenter = create_soft(window.clone(), physical.width, physical.height)?;
         crate::frame::apply(&window, &theme);
+        crate::frame::life("report", "created", &window);
         window.focus_window();
         let this = Self {
             window,
@@ -282,6 +283,7 @@ impl ReportWindow {
     }
 
     pub fn close(&self) {
+        crate::frame::life("report", "hidden", &self.window);
         self.window.set_visible(false);
     }
 
@@ -418,6 +420,12 @@ impl ReportWindow {
             log::warn!("clipboard busy; could not copy {text}");
         }
         self.request_redraw();
+    }
+}
+
+impl Drop for ReportWindow {
+    fn drop(&mut self) {
+        crate::frame::life("report", "destroyed", &self.window);
     }
 }
 

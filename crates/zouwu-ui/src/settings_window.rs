@@ -82,6 +82,7 @@ impl SettingsWindow {
         window.set_title(&model.i18n.t("settings.title"));
         // 面板是暗色的，白标题栏很扎眼：让 DWM 一起变暗（失败也无所谓）。
         crate::frame::apply(&window, &model.theme());
+        crate::frame::life("settings", "created", &window);
         window.focus_window();
 
         let mut this = Self {
@@ -117,6 +118,7 @@ impl SettingsWindow {
 
     /// 面板也需要"Esc 关掉"之外的关闭入口：宿主（托盘再次点"设置"）用它。
     pub fn close(&mut self) {
+        crate::frame::life("settings", "hidden", &self.window);
         self.window.set_visible(false);
     }
 
@@ -505,6 +507,12 @@ impl SettingsWindow {
         } else {
             vec![Outcome::Changed(kinds)]
         }
+    }
+}
+
+impl Drop for SettingsWindow {
+    fn drop(&mut self) {
+        crate::frame::life("settings", "destroyed", &self.window);
     }
 }
 

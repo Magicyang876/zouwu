@@ -128,6 +128,7 @@ impl HistoryWindow {
         let physical = window.inner_size();
         let presenter = create_soft(window.clone(), physical.width, physical.height)?;
         crate::frame::apply(&window, &theme);
+        crate::frame::life("history", "created", &window);
         window.focus_window();
         let this = Self {
             window,
@@ -153,6 +154,7 @@ impl HistoryWindow {
     }
 
     pub fn close(&self) {
+        crate::frame::life("history", "hidden", &self.window);
         self.window.set_visible(false);
     }
 
@@ -377,6 +379,13 @@ impl HistoryWindow {
             }
             _ => Vec::new(),
         }
+    }
+}
+
+/// 真析构。卡死问题就出在“把这个时刻放进了事件回调”，所以单独打一行。
+impl Drop for HistoryWindow {
+    fn drop(&mut self) {
+        crate::frame::life("history", "destroyed", &self.window);
     }
 }
 

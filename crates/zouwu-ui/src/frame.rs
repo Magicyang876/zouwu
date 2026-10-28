@@ -20,6 +20,21 @@ fn colorref(c: Rgba) -> u32 {
     u32::from(c.r) | (u32::from(c.g) << 8) | (u32::from(c.b) << 16)
 }
 
+/// 窗口生命周期日志。
+///
+/// 卡死这类问题看不到屏幕就没法猜，所以把"建/隐/毁"三个时刻各打一行，
+/// 并且都带 hwnd——同一类窗口在日志里能按句柄区分代次。
+pub fn life(kind: &str, phase: &str, window: &Window) {
+    let hwnd = window
+        .window_handle()
+        .ok()
+        .and_then(|handle| match handle.as_raw() {
+            RawWindowHandle::Win32(win32) => Some(win32.hwnd.get()),
+            _ => None,
+        });
+    log::info!("window {kind}: {phase} hwnd={hwnd:?}");
+}
+
 /// 把窗口标题栏刷成当前主题的颜色。幂等，失败只记一次日志。
 pub fn apply(window: &Window, theme: &Theme) {
     let Ok(handle) = window.window_handle() else {

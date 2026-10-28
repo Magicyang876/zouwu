@@ -88,6 +88,8 @@ pub fn run() -> Result<(), String> {
     let config = zouwu_platform::load_config();
     // 配置里的日志级别/落盘策略现在才生效（RUST_LOG 仍然优先）。
     zouwu_platform::logging::apply(&config.log);
+    // 卡死是"看不见现场"的问题，看门狗从这一刻起就一直盯着主线程卡在哪。
+    crate::watchdog::spawn();
     // 主题/皮肤都是"用户可能写错"的输入：加载失败一律退回内置，不让程序打不开。
     let themes = zouwu_platform::assets::load_themes();
     let theme = zouwu_platform::assets::theme_by_id(&themes, &config.appearance.theme);
@@ -276,6 +278,13 @@ struct App {
     /// 所以关闭只 mark 一下，把结构体挪进这个墓地，统一在 `about_to_wait`
     /// （事件派发已结束）里清掉。
     retired: Vec<Box<dyn std::any::Any>>,
+    /// `ZOUWU_CYCLE=<n>`：自动重复 n 轮"开历史→关历史→开二维码→关二维码"。
+    ///
+    /// 这份代码存在的唯一理由是：用户报的卡死在本机用合成按键复现不出来
+    /// （`SendKeys` 不会触发 `RegisterHotKey`），只能让程序自己把那条序列走一遍。
+    cycle_left: u32,
+    cycle_step: u8,
+    cycle_next: Option<std::time::Instant>,
 }
 
 /// 读并解码当前皮肤。任何一步失败都退回 `procedural`：
@@ -384,6 +393,12 @@ impl App {
             scan_env_done: false,
             history_env_done: false,
             retired: Vec::new(),
+            cycle_left: std::env::var("ZOUWU_CYCLE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            cycle_step: 0,
+            cycle_next: None,
         }
     }
 
@@ -391,6 +406,7 @@ impl App {
     ///
     /// 见 `retired` 字段的注释：在事件回调里析构 `Window` 会重入事件派发。
     fn retire<T: 'static>(&mut self, window: T) {
+        log::info!("app: retire -> queue ({} pending)", self.retired.len() + 1);
         self.retired.push(Box::new(window));
     }
 
@@ -566,6 +582,7 @@ impl App {
 
     /// 打开（或唤到前面）设置面板。
     fn open_settings(&mut self, event_loop: &ActiveEventLoop, _now: Instant) {
+        crate::watchdog::enter(crate::watchdog::stage::OPEN_SETTINGS);
         if let Some(panel) = self.settings.as_ref() {
             panel.focus();
             return;
@@ -587,6 +604,7 @@ impl App {
 
     /// 面板窗口的事件分发。返回的 [`SettingsOutcome`] 在这里落地。
     fn settings_event(&mut self, _event_loop: &ActiveEventLoop, event: WindowEvent) {
+        crate::watchdog::enter(crate::watchdog::stage::SETTINGS_EVENT);
         let mut pending: Vec<(Config, Vec<ChangeKind>)> = Vec::new();
         let mut close = false;
         {
@@ -626,7 +644,74 @@ impl App {
     /// 一个动作真的被执行。
     ///
     /// 目前只有二维码是完整链路，其余气泡仍是占位（日志里能看出来点到的是谁）。
+    /// `ZOUWU_CYCLE` 的驱动器。见 `cycle_left` 字段的注释。
+    ///
+    /// 关闭走的是 `self.window_event(.., CloseRequested)`，而不是直接 `take()`：
+    /// 要复现的正是"在事件分发里关窗"这个形状，绕过去就测不到。
+    fn cycle_tick(&mut self, event_loop: &ActiveEventLoop, now: Instant) {
+        if self.cycle_left == 0 {
+            return;
+        }
+        if let Some(next) = self.cycle_next {
+            if now < next {
+                return;
+            }
+        }
+        let step = self.cycle_step;
+        self.cycle_step = (step + 1) % 5;
+        match step {
+            0 => {
+                log::info!("cycle: open history ({} left)", self.cycle_left);
+                // 顺手改一下剪贴板：真实使用中历史窗开着时剪贴板会变，
+                // 那条路径会 rebuild_layout + request_inner_size。
+                let text = format!("cycle {}", self.cycle_left);
+                if !zouwu_platform::clipboard::set_text(&text) {
+                    log::warn!("cycle: clipboard set failed");
+                }
+                self.open_history(event_loop);
+            }
+            // 不关历史窗，直接在它上面开二维码报告窗：用户就是这么用的。
+            1 => {
+                log::info!("cycle: open report on top of history");
+                let report = Report {
+                    headline: "cycle".into(),
+                    detail: None,
+                    entries: vec![crate::report::Entry {
+                        text: "cycle".into(),
+                        screen: "s".into(),
+                    }],
+                    footer: "cycle".into(),
+                };
+                self.open_report(event_loop, report);
+            }
+            2 => {
+                if let Some(id) = self.report.as_ref().map(|w| w.id()) {
+                    log::info!("cycle: close report");
+                    self.window_event(event_loop, id, WindowEvent::CloseRequested);
+                }
+            }
+            // 关键一步：历史窗还开着，再调一次 -> 旧的进墓地、新的立刻建。
+            3 => {
+                log::info!("cycle: reopen history while it is still open");
+                self.open_history(event_loop);
+            }
+            _ => {
+                if let Some(id) = self.history_window.as_ref().map(|w| w.id()) {
+                    log::info!("cycle: close history");
+                    self.window_event(event_loop, id, WindowEvent::CloseRequested);
+                }
+                self.cycle_left -= 1;
+                if self.cycle_left == 0 {
+                    log::info!("cycle: done");
+                }
+            }
+        }
+        self.cycle_next = Some(now + Duration::from_millis(150));
+    }
+
     fn run_action(&mut self, event_loop: &ActiveEventLoop, id: &str) {
+        crate::watchdog::enter(crate::watchdog::stage::RUN_ACTION);
+        log::info!("app: run action `{id}`");
         match id {
             QRCODE_ACTION => self.scan_qr(event_loop),
             CLIPBOARD_ACTION => self.open_history(event_loop),
@@ -639,6 +724,7 @@ impl App {
     /// 截的是**整个虚拟桌面**而不是当前显示器：二维码很可能就开在另一块屏上的文档里，
     /// 让用户先把窗口拖过来再扫，等于把这个功能的手感毁掉一半。
     fn scan_qr(&mut self, event_loop: &ActiveEventLoop) {
+        crate::watchdog::enter(crate::watchdog::stage::RUN_ACTION);
         let started = Instant::now();
         let capture = match zouwu_platform::screen::capture_virtual_screen() {
             Ok(capture) => capture,
@@ -670,6 +756,8 @@ impl App {
 
     /// 摆出结果小窗。同一时刻只留一个 —— 连按两次快捷键不该叠出一摞窗。
     fn open_report(&mut self, event_loop: &ActiveEventLoop, report: Report) {
+        crate::watchdog::enter(crate::watchdog::stage::OPEN_REPORT);
+        log::info!("app: open report (was open: {})", self.report.is_some());
         if let Some(old) = self.report.take() {
             self.retire(old);
         }
@@ -685,6 +773,8 @@ impl App {
     }
 
     fn report_event(&mut self, event: WindowEvent) {
+        crate::watchdog::enter(crate::watchdog::stage::REPORT_EVENT);
+        log::trace!("app: report event {event:?}");
         let Some(window) = self.report.as_mut() else {
             return;
         };
@@ -1075,6 +1165,7 @@ impl App {
         }
 
         if let Some(slot) = self.hotkeys.as_ref().and_then(|h| h.poll_pressed()) {
+            log::info!("hotkey: {slot:?} pressed");
             match slot {
                 Slot::Summon => self.toggle_visible(now),
                 Slot::ScanQr => self.pending_action = Some(QRCODE_ACTION.to_string()),
@@ -1564,6 +1655,7 @@ impl App {
     ///    那也会推进序号 —— 所以同一条内容可能被再记一次，靠历史里的去重
     ///    兜住（不会重复占一行）。
     fn poll_clipboard(&mut self, now: Instant) {
+        crate::watchdog::enter(crate::watchdog::stage::POLL_CLIPBOARD);
         if now < self.next_clipboard {
             return;
         }
@@ -1619,6 +1711,11 @@ impl App {
 
     /// 摆出剪贴板历史窗。
     fn open_history(&mut self, event_loop: &ActiveEventLoop) {
+        crate::watchdog::enter(crate::watchdog::stage::OPEN_HISTORY);
+        log::info!(
+            "app: open history (was open: {})",
+            self.history_window.is_some()
+        );
         if let Some(old) = self.history_window.take() {
             self.retire(old);
         }
@@ -1645,6 +1742,8 @@ impl App {
     }
 
     fn history_event(&mut self, event: WindowEvent) {
+        crate::watchdog::enter(crate::watchdog::stage::HISTORY_EVENT);
+        log::trace!("app: history event {event:?}");
         let Some(window) = self.history_window.as_mut() else {
             return;
         };
@@ -1896,6 +1995,7 @@ impl App {
     }
 
     fn render_frame(&mut self, now: Instant) -> Result<(), String> {
+        crate::watchdog::enter(crate::watchdog::stage::RENDER);
         let Some(win) = self.window_arc() else {
             return Ok(());
         };
@@ -2094,6 +2194,7 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        crate::watchdog::enter(crate::watchdog::stage::WINDOW_EVENT);
         // 面板是另一个窗口：按 id 分流，别把它的鼠标事件当成分层窗口的。
         if self.settings.as_ref().is_some_and(|p| p.id() == id) {
             self.settings_event(event_loop, event);
@@ -2190,12 +2291,15 @@ impl ApplicationHandler for App {
     /// 没有待办时进入 `Wait`（真正 0 帧、0 CPU），有动画/悬停计时/眨眼计划时
     /// 进入 `WaitUntil`。这是"空闲零开销"与"看起来活着"能同时成立的关键。
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        crate::watchdog::enter(crate::watchdog::stage::ABOUT_TO_WAIT);
         let now = Instant::now();
 
         // 清墓地：这里已经出了事件派发（不在窗口过程里），析构 `Window` 不会重入。
         // 见 `retired` 字段的注释——这是修“开过二维码窗再开历史窗就卡死”的关键。
         if !self.retired.is_empty() {
+            log::info!("app: draining {} retired window(s)", self.retired.len());
             self.retired.clear();
+            log::info!("app: drain done");
         }
 
         // 轮询只是一种"叫醒输入"，它本身不应该产生任何重绘：
@@ -2264,6 +2368,7 @@ impl ApplicationHandler for App {
         if std::mem::take(&mut self.pending_settings) {
             self.open_settings(event_loop, now);
         }
+        self.cycle_tick(event_loop, now);
 
         match self.next_deadline(now) {
             Some(t) if t <= now => {
