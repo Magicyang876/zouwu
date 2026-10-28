@@ -158,11 +158,29 @@ impl HistoryWindow {
         self.window.set_visible(false);
     }
 
+    /// 重新上图（换肤后子窗口也得跟着变，否则旧配色会一直粘着）。
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+        crate::frame::apply(&self.window, &self.theme);
+        self.window.request_redraw();
+    }
+
     /// 历史变了（新条目进来 / 删掉一条）：保位置、重排。
     pub fn refresh(&mut self, entries: Vec<Entry>) {
         self.entries = entries;
         self.clamp_selection();
         self.rebuild_layout();
+        self.window.request_redraw();
+    }
+
+    /// 重新展示（窗口是复用的，不是重建的）。
+    ///
+    /// **不要改成“关掉就销毁”**：析构一个当时正持有焦点的窗口会让
+    /// USER32 同步去通知另一个进程的窗口，那边慢一点整进程就冻住了。
+    pub fn show(&mut self, entries: Vec<Entry>) {
+        self.refresh(entries);
+        self.window.set_visible(true);
+        self.window.focus_window();
         self.window.request_redraw();
     }
 

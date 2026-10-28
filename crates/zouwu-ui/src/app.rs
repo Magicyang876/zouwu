@@ -566,6 +566,14 @@ impl App {
             self.set_theme(self.config.appearance.theme.clone(), now);
             self.set_skin(self.config.appearance.skin.clone(), now);
             self.set_font_pack(self.config.appearance.font_pack.clone(), now);
+            // 子窗口是复用的（不再销毁重建），所以换肤也得主动告诉他们。
+            let theme = self.theme.clone();
+            if let Some(window) = self.history_window.as_mut() {
+                window.set_theme(theme.clone());
+            }
+            if let Some(window) = self.report.as_mut() {
+                window.set_theme(theme);
+            }
         }
 
         if changed.contains(&ChangeKind::Log) {
@@ -583,8 +591,9 @@ impl App {
     /// 打开（或唤到前面）设置面板。
     fn open_settings(&mut self, event_loop: &ActiveEventLoop, _now: Instant) {
         crate::watchdog::enter(crate::watchdog::stage::OPEN_SETTINGS);
-        if let Some(panel) = self.settings.as_ref() {
-            panel.focus();
+        if let Some(panel) = self.settings.as_mut() {
+            let skins = zouwu_platform::assets::skin_choices(&self.i18n);
+            panel.reload(self.config.clone(), self.themes.clone(), skins);
             return;
         }
         // 皮肤列表每次都重扫：用户刚往 `skins/` 里丢了新形象，打开面板就该看得见。
@@ -630,8 +639,8 @@ impl App {
             self.save_config();
         }
         if close {
-            if let Some(panel) = self.settings.take() {
-                self.retire(panel);
+            if let Some(panel) = self.settings.as_mut() {
+                panel.close();
             }
             // 恢复配置里的置顶状态（面板期间被临时放开了）。
             if let Some(hwnd) = self.hwnd() {
@@ -758,8 +767,10 @@ impl App {
     fn open_report(&mut self, event_loop: &ActiveEventLoop, report: Report) {
         crate::watchdog::enter(crate::watchdog::stage::OPEN_REPORT);
         log::info!("app: open report (was open: {})", self.report.is_some());
-        if let Some(old) = self.report.take() {
-            self.retire(old);
+        if let Some(window) = self.report.as_mut() {
+            window.show(report);
+            log::info!("qr: report window reused");
+            return;
         }
         let title = self.i18n.t("qr.window-title");
         let copied = self.i18n.t("qr.copied");
@@ -785,8 +796,8 @@ impl App {
             }
         }
         if close {
-            if let Some(window) = self.report.take() {
-                self.retire(window);
+            if let Some(window) = self.report.as_mut() {
+                window.close();
             }
             log::info!("qr: report window closed");
         }
@@ -1717,10 +1728,15 @@ impl App {
             "app: open history (was open: {})",
             self.history_window.is_some()
         );
-        if let Some(old) = self.history_window.take() {
-            self.retire(old);
-        }
         let entries = self.history.entries.clone();
+        if let Some(window) = self.history_window.as_mut() {
+            window.show(entries);
+            log::info!(
+                "clipboard: history window reused ({} entries)",
+                self.history.len()
+            );
+            return;
+        }
         let window = HistoryWindow::new(
             event_loop,
             entries,
@@ -1766,8 +1782,8 @@ impl App {
             self.refresh_history_window();
         }
         if close {
-            if let Some(window) = self.history_window.take() {
-                self.retire(window);
+            if let Some(window) = self.history_window.as_mut() {
+                window.close();
             }
         }
     }

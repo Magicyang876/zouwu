@@ -103,6 +103,32 @@ impl SettingsWindow {
         Ok(this)
     }
 
+    /// 重新展示（窗口是复用的，不是重建的）。
+    ///
+    /// 面板关掉后配置可能被别处改过（热键、皮肤……），所以重建整个 `Model`
+    /// 而不是指望熟面板自己知道。参数和 [`Self::new`] 一致。
+    ///
+    /// **不要改成“关掉就销毁”**：析构一个当时正持有焦点的窗口会让 USER32
+    /// 同步去通知别的进程的窗口，那边慢一点整个进程就冻住了（ADR-035）。
+    pub fn reload(&mut self, config: Config, themes: Vec<Theme>, skins: Vec<(String, String)>) {
+        let paths = Paths {
+            config: zouwu_platform::config_path().display().to_string(),
+            log: zouwu_platform::logging::log_path().display().to_string(),
+        };
+        let mut model = Model::new(config, themes, skins, paths);
+        model.refresh_fonts();
+        self.window.set_title(&model.i18n.t("settings.title"));
+        self.model = model;
+        self.layout = None;
+        self.hover = None;
+        crate::frame::apply(&self.window, &self.model.theme());
+        self.window.set_visible(true);
+        self.window.focus_window();
+        self.rebuild_layout();
+        self.request_redraw();
+        log::info!("settings panel reopened");
+    }
+
     pub fn id(&self) -> WindowId {
         self.window.id()
     }

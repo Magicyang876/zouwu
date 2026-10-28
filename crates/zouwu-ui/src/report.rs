@@ -287,6 +287,26 @@ impl ReportWindow {
         self.window.set_visible(false);
     }
 
+    /// 重新上图（换肤后子窗口也得跟着变）。
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+        crate::frame::apply(&self.window, &self.theme);
+        self.request_redraw();
+    }
+
+    /// 重新展示（窗口是复用的，不是重建的）。
+    ///
+    /// `ReportWindow` 是通用结果窗，再来一次得先把内容换掉再重排。
+    pub fn show(&mut self, report: Report) {
+        self.report = report;
+        self.copied = false;
+        self.hover = None;
+        self.rebuild_layout();
+        self.window.set_visible(true);
+        self.window.focus_window();
+        self.request_redraw();
+    }
+
     fn rebuild_layout(&mut self) {
         let mut l = layout(&self.report);
         // 窗口大小可能在 Resized 里变过（用户拖不了，但 DPI 变化会改），
