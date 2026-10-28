@@ -44,3 +44,10 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# 发布版：剥符号 + thin LTO。
+# 实测 10.6 MB → 6.9 MB（单条 `strip` 只到 7.9 MB，LTO 再省掉一层泛型重复实例化）。
+# 不设 `panic = "abort"`：winit 的事件循环里一旦 panic 直接 abort 会留下看不见的窗口。
+[profile.release]
+strip = "symbols"
+lto = "thin"
