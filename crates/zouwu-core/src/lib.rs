@@ -10,6 +10,7 @@ pub mod drag;
 pub mod geom;
 pub mod hotkey;
 pub mod i18n;
+pub mod qr;
 pub mod ring;
 pub mod skin;
 pub mod theme;

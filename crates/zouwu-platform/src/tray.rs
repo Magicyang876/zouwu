@@ -36,6 +36,8 @@ pub const ID_SKIN_EXPORT: &str = "zouwu.skin-export";
 /// 打开字体目录。字体包的选择放在设置面板里（那里能看见实际效果），
 /// 托盘只留一个"把目录翻出来"的入口 —— 用户想自己塞字体进去时不至于找不着路。
 pub const ID_FONT_DIR: &str = "zouwu.font-dir";
+/// 扫描二维码。排在显示/隐藏与回到主屏之后的"动作区"。
+pub const ID_SCAN_QR: &str = "zouwu.scan-qr";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TrayCommand {
@@ -49,6 +51,8 @@ pub enum TrayCommand {
     OpenLogs,
     /// 打开字体目录。
     OpenFontsDir,
+    /// 扫全屏找二维码（结果用一个独立小窗展示）。
+    ScanQr,
     /// 把小工具搬回主屏。存在的理由很具体：多屏拔掉之后，
     /// 旧坐标落在不存在的桌面上，用户看不见、也拖不到它。
     Recenter,
@@ -71,6 +75,7 @@ struct Items {
     settings: MenuItem,
     config_dir: MenuItem,
     open_logs: MenuItem,
+    scan_qr: MenuItem,
     autostart: CheckMenuItem,
     quit: MenuItem,
     language_menu: Submenu,
@@ -126,6 +131,7 @@ impl Tray {
         let config_dir = MenuItem::with_id(ID_CONFIG_DIR, i18n.t("tray.config"), true, None);
         let open_logs = MenuItem::with_id(ID_OPEN_LOGS, i18n.t("tray.open-logs"), true, None);
         let recenter = MenuItem::with_id(ID_RECENTER, i18n.t("tray.recenter"), true, None);
+        let scan_qr = MenuItem::with_id(ID_SCAN_QR, i18n.t("tray.scan-qr"), true, None);
         let autostart_item = CheckMenuItem::with_id(
             ID_AUTOSTART,
             i18n.t("tray.autostart"),
@@ -215,6 +221,7 @@ impl Tray {
         let menu = Menu::new();
         menu.append_items(&[
             &show_hide,
+            &scan_qr,
             &recenter,
             &settings,
             &PredefinedMenuItem::separator(),
@@ -259,6 +266,7 @@ impl Tray {
                 settings,
                 config_dir,
                 open_logs,
+                scan_qr,
                 autostart: autostart_item,
                 quit,
                 language_menu,
@@ -318,6 +326,7 @@ impl Tray {
         self.items.settings.set_text(i18n.t("tray.settings"));
         self.items.config_dir.set_text(i18n.t("tray.config"));
         self.items.open_logs.set_text(i18n.t("tray.open-logs"));
+        self.items.scan_qr.set_text(i18n.t("tray.scan-qr"));
         self.items.font_dir.set_text(i18n.t("tray.font-dir"));
         self.items.autostart.set_text(i18n.t("tray.autostart"));
         self.items.quit.set_text(i18n.t("tray.quit"));
@@ -377,6 +386,9 @@ impl Tray {
         }
         if id == ID_FONT_DIR {
             return Some(TrayCommand::OpenFontsDir);
+        }
+        if id == ID_SCAN_QR {
+            return Some(TrayCommand::ScanQr);
         }
         if id == ID_AUTOSTART {
             return Some(TrayCommand::SetAutostart(self.items.autostart.is_checked()));

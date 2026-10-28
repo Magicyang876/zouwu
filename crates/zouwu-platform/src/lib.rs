@@ -6,6 +6,11 @@
 pub mod assets;
 #[cfg(target_os = "windows")]
 pub mod autostart;
+#[cfg(target_os = "windows")]
+pub mod clipboard;
+#[cfg(not(target_os = "windows"))]
+#[path = "clipboard_stub.rs"]
+pub mod clipboard;
 /// 字体文件的 `name` 表解析（纯 Rust，可测）。
 pub mod fontfile;
 pub mod fontpack;
@@ -32,6 +37,11 @@ pub mod tray;
 
 pub mod dialogs;
 pub mod reload;
+#[cfg(target_os = "windows")]
+pub mod screen;
+#[cfg(not(target_os = "windows"))]
+#[path = "screen_stub.rs"]
+pub mod screen;
 pub mod skinpack;
 
 use std::fs;

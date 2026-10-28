@@ -28,6 +28,7 @@ use zouwu_core::drag::{Drag, DragOutcome};
 use zouwu_core::geom::{Point, Rect};
 use zouwu_core::hotkey::Hotkey;
 use zouwu_core::i18n::I18n;
+use zouwu_core::qr;
 use zouwu_core::ring::{solve_rotation, Bubble, RingConfig};
 use zouwu_core::skin::PROCEDURAL_SKIN_ID;
 
@@ -36,13 +37,14 @@ use crate::skin::Skin;
 use zouwu_core::theme::Theme;
 
 use zouwu_platform::autostart;
-use zouwu_platform::hotkey::HotkeyRegistrar;
+use zouwu_platform::hotkey::{HotkeyRegistrar, Slot};
 use zouwu_platform::reload::{ConfigWatcher, ReloadEvent};
 use zouwu_platform::single_instance::InstanceSignal;
 use zouwu_platform::tray::{Tray, TrayCommand, TrayOptions};
 
 use crate::paint::{render, BubblePaint, Scene};
 use crate::presenter::Presenter;
+use crate::report::{Entry, Outcome as ReportOutcome, Report, ReportWindow};
 
 /// 启动 zouwu。
 ///
@@ -136,6 +138,12 @@ const MONITOR_CHECK: Duration = Duration::from_secs(3);
 /// 重新落位时离屏幕右下边缘的距离。
 const EDGE_MARGIN: f32 = 48.0;
 
+/// 气泡环里「二维码」那一项的动作 id。
+///
+/// 与 `zouwu_core::action::default_ring()` 里的 `builtin.qrcode` 对应：
+/// 气泡只负责"说出用户点了哪一项"，真正的执行在这里分派。
+const QRCODE_ACTION: &str = "builtin.qrcode";
+
 struct App {
     config: Config,
     theme: Theme,
@@ -197,6 +205,8 @@ struct App {
     pending_recenter: bool,
     /// 上一次检查显示器的时刻
     last_monitor_check: Instant,
+    /// 上一次打「输入诊断」日志的时刻（`ZOUWU_INPUT=1` 才用）。
+    last_input_trace: Instant,
     /// 位置待落盘
     state_pending: bool,
     /// 上一次位置落盘的时刻（节流）
@@ -210,6 +220,13 @@ struct App {
     /// 下一次启动的信号（第二实例 → 呼出窗口）。
     tray: Option<Tray>,
     hotkeys: Option<HotkeyRegistrar>,
+    /// 待执行的动作（点击气泡时记下，下一轮事件循环里执行）。
+    ///
+    /// 不直接在 `on_click` 里执行：有些动作要建窗口，而建窗口需要
+    /// `&ActiveEventLoop`，那个引用只在 `about_to_wait` / `window_event` 里拿得到。
+    pending_action: Option<String>,
+    /// 结果小窗（二维码扫描结果等）。
+    report: Option<ReportWindow>,
     /// 窗口当前是否可见（隐藏 = 缩进托盘，进程仍在）。
     visible: bool,
 
@@ -229,6 +246,9 @@ struct App {
     pending_settings: bool,
     /// `ZOUWU_SETTINGS=1` 已消费过（一次性）。
     settings_env_done: bool,
+    /// `ZOUWU_SCAN=1` 启动即扫一次二维码（只一次）。托盘与热键都没法脚本化，
+    /// 而"截屏→找码→弹窗"这条链路最该被一键回归。
+    scan_env_done: bool,
 }
 
 /// 读并解码当前皮肤。任何一步失败都退回 `procedural`：
@@ -278,6 +298,8 @@ impl App {
             instance: Some(instance),
             tray: None,
             hotkeys: None,
+            pending_action: None,
+            report: None,
             visible,
             config,
             theme,
@@ -312,6 +334,7 @@ impl App {
             state_pos: None,
             pending_recenter: false,
             last_monitor_check: Instant::now(),
+            last_input_trace: Instant::now(),
             state_pending: false,
             state_saved_at: Instant::now(),
             perf_trace: std::env::var("ZOUWU_PERF").is_ok(),
@@ -322,6 +345,7 @@ impl App {
             settings: None,
             pending_settings: false,
             settings_env_done: false,
+            scan_env_done: false,
         }
     }
 
@@ -411,8 +435,12 @@ impl App {
         }
 
         if changed.contains(&ChangeKind::Hotkey) {
-            if let Some(registrar) = self.hotkeys.as_mut() {
-                if let Err(err) = apply_hotkey_setting(&self.config.general.hotkey, registrar) {
+            // 热键注册表本身存在 `self.hotkeys` 里，而 `apply_hotkey` 要读 `self.config`：
+            // 先把它取出来，免得同一个 `self` 同时被可变借用与不可变借用。
+            if let Some(mut registrar) = self.hotkeys.take() {
+                let result = self.apply_hotkey(&mut registrar);
+                self.hotkeys = Some(registrar);
+                if let Err(err) = result {
                     log::warn!("{err}");
                 }
             }
@@ -525,6 +553,83 @@ impl App {
         }
     }
 
+    /// 一个动作真的被执行。
+    ///
+    /// 目前只有二维码是完整链路，其余气泡仍是占位（日志里能看出来点到的是谁）。
+    fn run_action(&mut self, event_loop: &ActiveEventLoop, id: &str) {
+        match id {
+            QRCODE_ACTION => self.scan_qr(event_loop),
+            other => log::info!("action not implemented yet: {other}"),
+        }
+    }
+
+    /// 截全屏 → 找码 → 弹结果框。
+    ///
+    /// 截的是**整个虚拟桌面**而不是当前显示器：二维码很可能就开在另一块屏上的文档里，
+    /// 让用户先把窗口拖过来再扫，等于把这个功能的手感毁掉一半。
+    fn scan_qr(&mut self, event_loop: &ActiveEventLoop) {
+        let started = Instant::now();
+        let capture = match zouwu_platform::screen::capture_virtual_screen() {
+            Ok(capture) => capture,
+            Err(err) => {
+                log::warn!("qr: capture failed: {err}");
+                self.open_report(event_loop, failure_report(&self.i18n, "qr.error", &err));
+                return;
+            }
+        };
+        let shot = qr::Shot {
+            width: capture.width,
+            height: capture.height,
+            rgba: &capture.rgba,
+        };
+        let scan = qr::scan(&shot);
+        let elapsed = started.elapsed().as_millis() as u64;
+        log::info!(
+            "qr: {} code(s), {} unreadable, {} ms, desktop {}x{}",
+            scan.hits.len(),
+            scan.unreadable,
+            elapsed,
+            capture.width,
+            capture.height
+        );
+        let monitors = App::monitor_rects(event_loop);
+        let report = build_report(&self.i18n, &scan, &capture, elapsed, &monitors);
+        self.open_report(event_loop, report);
+    }
+
+    /// 摆出结果小窗。同一时刻只留一个 —— 连按两次快捷键不该叠出一摞窗。
+    fn open_report(&mut self, event_loop: &ActiveEventLoop, report: Report) {
+        if let Some(old) = self.report.take() {
+            old.close();
+        }
+        let title = self.i18n.t("qr.window-title");
+        let copied = self.i18n.t("qr.copied");
+        match ReportWindow::new(event_loop, report, self.theme.clone(), &title, copied) {
+            Ok(window) => {
+                self.report = Some(window);
+                log::info!("qr: report window opened");
+            }
+            Err(err) => log::error!("qr: cannot open report window: {err}"),
+        }
+    }
+
+    fn report_event(&mut self, event: WindowEvent) {
+        let Some(window) = self.report.as_mut() else {
+            return;
+        };
+        let mut close = false;
+        for outcome in window.window_event(&event) {
+            match outcome {
+                ReportOutcome::Close => close = true,
+            }
+        }
+        if close {
+            window.close();
+            self.report = None;
+            log::info!("qr: report window closed");
+        }
+    }
+
     /// 建（或重建）托盘图标。
     ///
     /// 单独成一个函数是因为**导入新皮肤后菜单要长出这一条**：托盘菜单是静态构建的，
@@ -613,7 +718,8 @@ impl App {
 
     /// 按配置注册热键；解析失败时回退到默认值并记日志。
     fn apply_hotkey(&self, registrar: &mut HotkeyRegistrar) -> Result<(), String> {
-        apply_hotkey_setting(&self.config.general.hotkey, registrar)
+        apply_hotkey_setting(Slot::Summon, &self.config.general.hotkey, registrar)?;
+        apply_hotkey_setting(Slot::ScanQr, &self.config.general.qr_hotkey, registrar)
     }
 
     /// 显示 / 隐藏小兽（隐藏 = 缩进托盘，不退出进程）。
@@ -845,6 +951,8 @@ impl App {
                 }
             }
             TrayCommand::Recenter => self.pending_recenter = true,
+            // 扫二维码要建窗口，得拿到 `&ActiveEventLoop` —— 同气泡点击，走待办队列。
+            TrayCommand::ScanQr => self.pending_action = Some(QRCODE_ACTION.to_string()),
             TrayCommand::SetTheme(id) => self.set_theme(id, now),
             TrayCommand::SetSkin(id) => self.set_skin(id, now),
             TrayCommand::ImportSkin => self.import_skin(now),
@@ -888,13 +996,11 @@ impl App {
             exit |= self.handle_tray(cmd, now);
         }
 
-        if self
-            .hotkeys
-            .as_ref()
-            .map(|h| h.poll_pressed())
-            .unwrap_or(false)
-        {
-            self.toggle_visible(now);
+        if let Some(slot) = self.hotkeys.as_ref().and_then(|h| h.poll_pressed()) {
+            match slot {
+                Slot::Summon => self.toggle_visible(now),
+                Slot::ScanQr => self.pending_action = Some(QRCODE_ACTION.to_string()),
+            }
         }
 
         exit
@@ -1354,6 +1460,7 @@ impl App {
         // 设置面板打开时，小兽被压在面板下面，点不到它 —— 这时候还按 16ms
         // 轮询就只是白白吃掉 1~4% CPU（面板开着的实测值）。降到后台频率。
         let inside = self.settings.is_none() && self.poll_pointer(now);
+        self.trace_input(now, inside);
         // 窗口内高频（不漏点击）、窗口外低频（省 CPU）
         self.next_poll = now
             + if inside {
@@ -1362,6 +1469,39 @@ impl App {
                 CURSOR_POLL_OUTSIDE
             };
     }
+    /// 「为什么它没反应」的现场记录：`ZOUWU_INPUT=1` 时每 500ms 一行。
+    ///
+    /// 记录的是**判定依据**而不是结论：光标屏幕坐标、窗口原点、缩放、换算后的
+    /// 本地坐标、是否在窗口内、按键状态、`visible`、`drag`、`expanded`。
+    /// 光看结论（"没反应"）永远猜不出是哪一步断的。
+    fn trace_input(&mut self, now: Instant, inside: bool) {
+        if std::env::var_os("ZOUWU_INPUT").is_none() {
+            return;
+        }
+        if now.duration_since(self.last_input_trace) < Duration::from_millis(500) {
+            return;
+        }
+        self.last_input_trace = now;
+        let cursor = zouwu_platform::layer::cursor_position();
+        let window = self.window.clone();
+        let (origin, scale) = match window.as_ref() {
+            Some(w) => (w.outer_position().unwrap_or_default(), w.scale_factor()),
+            None => (PhysicalPosition::new(0, 0), 1.0),
+        };
+        log::info!(
+            "input: cursor {:?} origin {},{} scale {scale} inside {inside} left {} right {} visible {} expanded {} drag {} cursor_state {:?}",
+            cursor,
+            origin.x,
+            origin.y,
+            zouwu_platform::layer::left_button_down(),
+            zouwu_platform::layer::right_button_down(),
+            self.visible,
+            self.expanded,
+            self.drag.is_some(),
+            self.cursor,
+        );
+    }
+
     /// 主动问系统要光标/按键状态，作为窗口鼠标事件的兑底。
     ///
     /// 返回光标是否落在窗口矩形内。坐标换算：`GetCursorPos` 给的是屏幕物理像素，
@@ -1515,8 +1655,8 @@ impl App {
             MouseButton::Left => {
                 if let Some(idx) = self.hover_test(pos) {
                     if let Some(item) = self.items.get(idx) {
-                        // M0：先验证交互链路，真正的能力在 M3 接入
                         log::info!("bubble activated: {} ({})", item.id, item.label_key);
+                        self.pending_action = Some(item.id.to_string());
                     }
                 } else if on_buddy {
                     // 按住本体先别急着展开：这次按住可能是想**搬动**它。
@@ -1626,21 +1766,33 @@ impl App {
 /// 单独抽出来是因为它同时被“启动”和“热重载”两条路径使用。
 /// 配置里的热键写错时**不能**让用户失去唤醒手段，所以回退到默认热键；
 /// 空串是合法的“我不要热键”，不注册也不抱怨。
-fn apply_hotkey_setting(raw: &str, registrar: &mut HotkeyRegistrar) -> Result<(), String> {
+fn apply_hotkey_setting(
+    slot: Slot,
+    raw: &str,
+    registrar: &mut HotkeyRegistrar,
+) -> Result<(), String> {
     let raw = raw.trim();
     if raw.is_empty() {
-        registrar.clear();
-        log::info!("hotkey disabled by config");
+        registrar.clear(slot);
+        log::info!("hotkey for {slot:?} disabled by config");
         return Ok(());
     }
     let spec = match Hotkey::parse(raw) {
         Ok(spec) => spec,
         Err(err) => {
             log::warn!("invalid hotkey `{raw}` ({err}); falling back to default");
-            Hotkey::default_summon()
+            match slot {
+                // 呼出热键是"救命"通道，写错了必须回退到默认，否则用户打不开小兽。
+                Slot::Summon => Hotkey::default_summon(),
+                // 二维码是锦上添花：配置写错就干脆不注册，别占一个用户没要的键。
+                Slot::ScanQr => {
+                    registrar.clear(slot);
+                    return Err(format!("qr hotkey `{raw}` invalid ({err}); not registered"));
+                }
+            }
         }
     };
-    registrar.set(&spec)
+    registrar.set(slot, &spec)
 }
 
 impl ApplicationHandler for App {
@@ -1742,6 +1894,11 @@ impl ApplicationHandler for App {
         // 面板是另一个窗口：按 id 分流，别把它的鼠标事件当成分层窗口的。
         if self.settings.as_ref().is_some_and(|p| p.id() == id) {
             self.settings_event(event_loop, event);
+            return;
+        }
+        // 结果小窗同理。
+        if self.report.as_ref().is_some_and(|r| r.id() == id) {
+            self.report_event(event);
             return;
         }
         let now = Instant::now();
@@ -1854,6 +2011,12 @@ impl ApplicationHandler for App {
             }
         }
 
+        // 气泡/热键记下的动作在这里执行：建窗口要 `&ActiveEventLoop`，
+        // 而点击处理（`on_click`）与热键轮询（`poll_shell`）都拿不到它。
+        if let Some(id) = self.pending_action.take() {
+            self.run_action(event_loop, &id);
+        }
+
         // 外壳（托盘/热键/第二实例）与光标轮询同节拍：一次唤醒问完所有事。
         if self.poll_shell(now) {
             self.save_state();
@@ -1870,6 +2033,10 @@ impl ApplicationHandler for App {
         // 只认非空值：`ZOUWU_SETTINGS=`（空字符串）在 shell 里很常见，
         // 不该因此弹出一个用户没要的面板。
         let want_panel = std::env::var_os("ZOUWU_SETTINGS").is_some_and(|v| !v.is_empty());
+        if !self.scan_env_done && std::env::var_os("ZOUWU_SCAN").is_some_and(|v| !v.is_empty()) {
+            self.scan_env_done = true;
+            self.pending_action = Some(QRCODE_ACTION.to_string());
+        }
         if !self.settings_env_done && want_panel {
             self.settings_env_done = true;
             self.pending_settings = true;
@@ -1891,5 +2058,178 @@ impl ApplicationHandler for App {
             Some(t) => event_loop.set_control_flow(ControlFlow::WaitUntil(t)),
             None => event_loop.set_control_flow(ControlFlow::Wait),
         }
+    }
+}
+
+/// 把一次扫描结果翻成人话。
+fn build_report(
+    i18n: &I18n,
+    scan: &qr::Scan,
+    capture: &zouwu_platform::screen::Capture,
+    elapsed_ms: u64,
+    monitors: &[Rect],
+) -> Report {
+    let elapsed = i18n.t_args("qr.elapsed", &[("ms", &elapsed_ms.to_string())]);
+    if scan.hits.is_empty() {
+        let detail = i18n.t_args(
+            "qr.none-detail",
+            &[
+                ("width", &capture.width.to_string()),
+                ("height", &capture.height.to_string()),
+            ],
+        );
+        return Report {
+            headline: i18n.t("qr.none"),
+            detail: Some(format!("{detail} · {elapsed}")),
+            entries: Vec::new(),
+            footer: i18n.t("qr.footer"),
+        };
+    }
+
+    let headline = i18n.t_args("qr.found", &[("count", &scan.hits.len().to_string())]);
+    let mut detail = elapsed;
+    if scan.unreadable > 0 {
+        // "找到了但读不出来"和"一个都没有"是两件事，混成一句会让用户到处找码。
+        detail = format!(
+            "{detail} · {}",
+            i18n.t_args("qr.unreadable", &[("count", &scan.unreadable.to_string())])
+        );
+    }
+    let entries = scan
+        .hits
+        .iter()
+        .map(|hit| {
+            let center_x = hit.rect.0 + hit.rect.2 / 2;
+            let center_y = hit.rect.1 + hit.rect.3 / 2;
+            let (dx, dy) = capture.to_desktop(center_x, center_y);
+            Entry {
+                text: hit.text.clone(),
+                screen: screen_label(i18n, monitors, dx, dy),
+            }
+        })
+        .collect();
+    Report {
+        headline,
+        detail: Some(detail),
+        entries,
+        footer: i18n.t("qr.footer"),
+    }
+}
+
+fn failure_report(i18n: &I18n, headline_key: &str, reason: &str) -> Report {
+    Report {
+        headline: i18n.t(headline_key),
+        detail: Some(reason.to_string()),
+        entries: Vec::new(),
+        footer: i18n.t("qr.footer"),
+    }
+}
+
+/// 命中的码落在第几块屏上。多屏时用户才知道该去关哪个窗口。
+fn screen_label(i18n: &I18n, monitors: &[Rect], x: i32, y: i32) -> String {
+    let p = Point::new(x as f32, y as f32);
+    let index = monitors.iter().position(|m| m.contains(p));
+    match index {
+        Some(i) => i18n.t_args("qr.screen", &[("index", &(i + 1).to_string())]),
+        None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod qr_report_tests {
+    use super::*;
+
+    fn i18n() -> I18n {
+        I18n::new("zh-CN")
+    }
+
+    fn capture(w: usize, h: usize) -> zouwu_platform::screen::Capture {
+        zouwu_platform::screen::Capture {
+            x: 0,
+            y: 0,
+            width: w,
+            height: h,
+            rgba: vec![0; w * h * 4],
+        }
+    }
+
+    /// `(内容, 命中框)` —— 命中框是 `(x, y, w, h)`，与 `qr::Hit` 一致。
+    type HitFixture<'a> = (&'a str, (u32, u32, u32, u32));
+
+    fn scan_with(hits: Vec<HitFixture<'_>>, unreadable: usize) -> qr::Scan {
+        let mut scan = qr::Scan::default();
+        for (text, rect) in hits {
+            scan.hits.push(qr::Hit {
+                text: text.to_string(),
+                rect,
+            });
+        }
+        scan.unreadable = unreadable;
+        scan
+    }
+
+    #[test]
+    fn no_code_says_so_and_states_what_was_scanned() {
+        let cap = capture(1920, 1080);
+        let report = build_report(&i18n(), &scan_with(Vec::new(), 0), &cap, 41, &[]);
+        assert!(report.entries.is_empty());
+        assert!(report.headline.contains("没有找到"), "{}", report.headline);
+        let detail = report.detail.unwrap_or_default();
+        // 用户最容易误判的情形是"我明明看到了码"——所以要写清扫的是多大一块桌面。
+        assert!(detail.contains("1920"), "{detail}");
+        assert!(detail.contains("41"), "{detail}");
+    }
+
+    #[test]
+    fn each_hit_gets_its_own_row_and_screen() {
+        let cap = capture(3840, 1080);
+        let monitors = [
+            Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            Rect::new(1920.0, 0.0, 1920.0, 1080.0),
+        ];
+        // 第二个码落在第二块屏上（虚拟桌面坐标 2400 → 显示器 2）。
+        let scan = scan_with(
+            vec![
+                ("https://a.example", (100, 100, 200, 200)),
+                ("https://b.example", (2400, 400, 200, 200)),
+            ],
+            0,
+        );
+        let report = build_report(&i18n(), &scan, &cap, 90, &monitors);
+        assert_eq!(report.entries.len(), 2);
+        assert_eq!(report.entries[0].screen, "显示器 1");
+        assert_eq!(report.entries[1].screen, "显示器 2");
+        assert!(report.headline.contains('2'), "{}", report.headline);
+    }
+
+    #[test]
+    fn unreadable_codes_are_reported_apart_from_none() {
+        let cap = capture(1280, 720);
+        let report = build_report(&i18n(), &scan_with(Vec::new(), 2), &cap, 30, &[]);
+        // 有码但读不出来时，标题仍然是"没有找到"（确实没解出内容），
+        // 但详情必须把"有 2 个读不出来"说出来，否则用户会以为工具坏了。
+        let detail = report.detail.unwrap_or_default();
+        assert!(detail.contains('2'), "{detail}");
+    }
+
+    #[test]
+    fn missing_screen_still_produces_a_row() {
+        let cap = capture(800, 600);
+        let report = build_report(
+            &i18n(),
+            &scan_with(vec![("x", (10, 10, 50, 50))], 0),
+            &cap,
+            1,
+            &[],
+        );
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.entries[0].screen, "");
+    }
+
+    #[test]
+    fn failure_report_carries_the_reason_verbatim() {
+        let report = failure_report(&i18n(), "qr.error", "no desktop to capture");
+        assert!(report.headline.contains("失败"), "{}", report.headline);
+        assert_eq!(report.detail.as_deref(), Some("no desktop to capture"));
     }
 }

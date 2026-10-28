@@ -9,6 +9,7 @@ pub mod paint;
 pub mod presenter;
 #[cfg(feature = "gpu")]
 pub mod presenter_gpu;
+pub mod report;
 pub mod settings;
 pub mod settings_window;
 pub mod skin;

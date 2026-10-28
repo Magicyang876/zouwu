@@ -140,3 +140,16 @@ settings-font-delete-hint = 删掉后立即回到系统默认字体
 settings-font-delete-confirm = 确定删除字体包“{$name}”吗？字体文件会被删掉，无法撤销。
 settings-font-delete-failed = 字体删除失败
 settings-font-no-cjk = 该字体没有中文字形：中文会退回系统字体（宽度仍按它算，可能显得偏窄）
+
+tray-scan-qr = 扫描二维码
+qr-title = 二维码
+qr-window-title = 二维码扫描结果
+qr-found = 识别到 {$count} 个二维码
+qr-none = 没有找到二维码
+qr-none-detail = 已扫描 {$width}×{$height} 的整个桌面
+qr-error = 扫描失败
+qr-unreadable = 有 {$count} 个码读不出来
+qr-elapsed = 用时 {$ms} 毫秒
+qr-screen = 显示器 {$index}
+qr-footer = 点一行复制内容 · Esc 关闭
+qr-copied = 已复制到剪贴板

@@ -12,3 +12,7 @@ fluent = { workspace = true }
 sys-locale = { workspace = true }
 unic-langid = { workspace = true }
 log = { workspace = true }
+rqrr = { workspace = true }
+
+[dev-dependencies]
+qrcode = "0.14"

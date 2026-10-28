@@ -139,3 +139,16 @@ settings-font-delete-hint = Deleting falls back to the system font right away
 settings-font-delete-confirm = Delete the font pack "{$name}"? The files are removed and this cannot be undone.
 settings-font-delete-failed = Could not delete the font
 settings-font-no-cjk = This font has no Chinese glyphs: Chinese text falls back to the system font (but keeps this font's widths, so it may look squeezed)
+
+tray-scan-qr = Scan QR code
+qr-title = QR code
+qr-window-title = QR scan results
+qr-found = Found {$count} code(s)
+qr-none = No QR code found
+qr-none-detail = Scanned the whole desktop ({$width}×{$height})
+qr-error = Scan failed
+qr-unreadable = {$count} code(s) could not be read
+qr-elapsed = took {$ms} ms
+qr-screen = display {$index}
+qr-footer = Click a row to copy · Esc to close
+qr-copied = Copied to clipboard

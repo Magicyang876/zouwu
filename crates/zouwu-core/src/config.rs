@@ -5,7 +5,7 @@
 use crate::ring::{RingConfig, DEG};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -171,6 +171,11 @@ pub struct General {
     pub language: String,
     /// 全局热键，形如 `"Alt+Space"`；空串 = 不注册。
     pub hotkey: String,
+    /// 扫屏幕二维码的热键；空串 = 不注册。
+    ///
+    /// 单独一条而不是复用呼出热键：二维码是"想到才按"的动作，
+    /// 不该逼用户先把小兽叫出来、再点气泡。
+    pub qr_hotkey: String,
     /// 开机自启（Windows 注册表 Run 键）。
     pub start_on_boot: bool,
     /// 启动后是否直接显示小兽（false = 先待在托盘里）。
@@ -184,6 +189,7 @@ impl Default for General {
         Self {
             language: "auto".to_string(),
             hotkey: "Alt+Space".to_string(),
+            qr_hotkey: "Ctrl+Alt+Q".to_string(),
             start_on_boot: false,
             show_on_start: true,
             bring_to_front: true,
