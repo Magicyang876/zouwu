@@ -22,7 +22,6 @@ use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
-use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::{CursorIcon, Window, WindowId};
 
 use zouwu_core::history::Entry;
@@ -36,7 +35,7 @@ pub const WIDTH: f32 = 560.0;
 pub const MAX_ROWS: usize = 10;
 pub const ROW_H: f32 = 44.0;
 const PAD: f32 = 16.0;
-const HEADER_H: f32 = 52.0;
+const HEADER_H: f32 = 8.0;
 const FOOTER_H: f32 = 34.0;
 
 /// 一次能在窗口里看到的条数。
@@ -55,7 +54,7 @@ pub struct Layout {
 
 pub fn layout(total: usize) -> Layout {
     let rows_n = visible_rows(total);
-    let list_h = rows_n as f32 * ROW_H;
+    let list_h = rows_n.max(1) as f32 * ROW_H;
     let h = HEADER_H + list_h + FOOTER_H;
     Layout {
         size: (WIDTH, h),
@@ -97,10 +96,11 @@ pub struct HistoryWindow {
     scroll: usize,
     hover: Option<usize>,
     layout: Layout,
-    title: String,
     footer_help: String,
     footer_empty: String,
     empty_text: String,
+    /// 第一帧已经补刷过暗色标题栏。
+    frame_dark: bool,
 }
 
 impl HistoryWindow {
@@ -127,11 +127,7 @@ impl HistoryWindow {
         );
         let physical = window.inner_size();
         let presenter = create_soft(window.clone(), physical.width, physical.height)?;
-        if let Ok(handle) = window.window_handle() {
-            if let RawWindowHandle::Win32(win32) = handle.as_raw() {
-                zouwu_platform::layer::set_dark_title_bar(win32.hwnd.get(), true);
-            }
-        }
+        crate::frame::apply_dark(&window);
         window.focus_window();
         let this = Self {
             window,
@@ -143,10 +139,10 @@ impl HistoryWindow {
             scroll: 0,
             hover: None,
             layout,
-            title,
             footer_help,
             footer_empty,
             empty_text,
+            frame_dark: false,
         };
         this.window.request_redraw();
         Ok(this)
@@ -268,7 +264,6 @@ impl HistoryWindow {
                 selected: self.selected,
                 scroll: self.scroll,
                 hover: self.hover,
-                title: &self.title,
                 footer,
                 empty: &self.empty_text,
             },
@@ -282,15 +277,26 @@ impl HistoryWindow {
     pub fn window_event(&mut self, event: &WindowEvent) -> Vec<Outcome> {
         match event {
             WindowEvent::RedrawRequested => {
+                // 窗口第一次上屏时 DWM 会先按浅色画一帧边框，创建时设的属性可能被
+                // 这次绘制覆盖，所以第一帧再补一次。
+                if !self.frame_dark {
+                    self.frame_dark = true;
+                    crate::frame::apply_dark(&self.window);
+                }
                 self.redraw();
                 Vec::new()
             }
             WindowEvent::Resized(size) => {
+                crate::frame::apply_dark(&self.window);
                 self.presenter.resize(size.width.max(1), size.height.max(1));
                 self.window.request_redraw();
                 Vec::new()
             }
             WindowEvent::CloseRequested => vec![Outcome::Close],
+            WindowEvent::Focused(true) => {
+                crate::frame::apply_dark(&self.window);
+                Vec::new()
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = self.window.scale_factor() as f32;
                 let scale = if scale > 0.01 { scale } else { 1.0 };
@@ -379,7 +385,6 @@ pub struct View<'a> {
     pub selected: usize,
     pub scroll: usize,
     pub hover: Option<usize>,
-    pub title: &'a str,
     pub footer: &'a str,
     pub empty: &'a str,
 }
@@ -399,12 +404,6 @@ pub fn draw(
         0.0,
         pal.bg,
     );
-
-    // 头部：只写条数。窗口标题栏已经有“剪贴板历史”，面板里不必再说一遍
-    // （设置面板刚因为这件事被要求去掉重复标题）。
-    let head = Rect::new(PAD, 14.0, layout.header.w, 24.0);
-    p.text_in(view.title, head, 15.0, pal.text, Weight::Bold);
-    p.hline(PAD, layout.size.0 - PAD, HEADER_H - 1.0, pal.line);
 
     // 列表
     p.set_clip(layout.list);
@@ -461,7 +460,6 @@ struct Palette {
     raised: Rgba,
     text: Rgba,
     dim: Rgba,
-    line: Rgba,
     accent: Rgba,
 }
 
@@ -471,7 +469,6 @@ fn palette(theme: &Theme) -> Palette {
         raised: theme.bubble_bg_active.with_alpha(0.9),
         text: theme.glyph,
         dim: theme.glyph.with_alpha(0.62),
-        line: theme.bubble_edge,
         accent: theme.accent,
     }
 }

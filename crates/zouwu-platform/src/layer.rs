@@ -271,8 +271,7 @@ pub fn is_visible(hwnd: isize) -> bool {
     unsafe { IsWindowVisible(hwnd as Hwnd) != 0 }
 }
 
-/// 呼出时贴回最前层，但不激活（不打断当前输入焦点）。
-/// 让标题栏跟随系统暗色（设置面板是暗色的，白标题栏很扎眼）。
+/// 为深色面板设置暗色标题栏，并立即刷新非客户区。
 ///
 /// `dwmapi.dll` 是**运行时加载**的：`x86_64-w64-mingw32` 工具链没有 `libdwmapi`
 /// 导入库（链接期 `ld: cannot find -ldwmapi`），而这条调用纯属观感，
@@ -281,7 +280,7 @@ pub fn is_visible(hwnd: isize) -> bool {
 ///
 /// `DWMWA_USE_IMMERSIVE_DARK_MODE` 在 Win10 1809~1903 上是 19、1909 之后是 20，
 /// 两个都试一次，失败不报错。
-pub fn set_dark_title_bar(hwnd: isize, dark: bool) {
+pub fn set_dark_title_bar(hwnd: isize, dark: bool) -> bool {
     type SetAttr = unsafe extern "system" fn(Hwnd, Dword, *const c_void, Dword) -> i32;
 
     static PROC: std::sync::OnceLock<Option<SetAttr>> = std::sync::OnceLock::new();
@@ -297,18 +296,34 @@ pub fn set_dark_title_bar(hwnd: isize, dark: bool) {
         Some(std::mem::transmute::<*mut c_void, SetAttr>(addr))
     });
 
-    let Some(set_attr) = proc else { return };
+    let Some(set_attr) = proc else { return false };
     let value: i32 = i32::from(dark);
     unsafe {
         for attribute in [20u32, 19u32] {
-            set_attr(
+            if set_attr(
                 hwnd as Hwnd,
                 attribute,
                 &value as *const i32 as *const c_void,
                 std::mem::size_of::<i32>() as u32,
-            );
+            ) >= 0
+            {
+                // DWM 属性变更不会总是立即重绘标题栏。
+                const SWP_NOZORDER: u32 = 0x0004;
+                const SWP_FRAMECHANGED: u32 = 0x0020;
+                SetWindowPos(
+                    hwnd as Hwnd,
+                    std::ptr::null_mut(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                );
+                return true;
+            }
         }
     }
+    false
 }
 
 pub fn bring_to_front(hwnd: isize) {

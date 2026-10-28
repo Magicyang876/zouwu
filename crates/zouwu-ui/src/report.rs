@@ -9,7 +9,6 @@
 
 use std::sync::Arc;
 
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tiny_skia::Pixmap;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -224,6 +223,8 @@ pub struct ReportWindow {
     hover: Option<usize>,
     /// 复制成功后把底部的提示换掉，让"复制了"这件事有反馈。
     copied: bool,
+    /// 第一帧已经补刷过暗色标题栏。
+    frame_dark: bool,
     pub footer_copied: String,
 }
 
@@ -254,11 +255,7 @@ impl ReportWindow {
         );
         let physical = window.inner_size();
         let presenter = create_soft(window.clone(), physical.width, physical.height)?;
-        if let Ok(handle) = window.window_handle() {
-            if let RawWindowHandle::Win32(win32) = handle.as_raw() {
-                zouwu_platform::layer::set_dark_title_bar(win32.hwnd.get(), true);
-            }
-        }
+        crate::frame::apply_dark(&window);
         window.focus_window();
         let this = Self {
             window,
@@ -269,6 +266,7 @@ impl ReportWindow {
             layout: Some(layout),
             hover: None,
             copied: false,
+            frame_dark: false,
             footer_copied,
         };
         this.request_redraw();
@@ -333,15 +331,26 @@ impl ReportWindow {
     pub fn window_event(&mut self, event: &WindowEvent) -> Vec<Outcome> {
         match event {
             WindowEvent::RedrawRequested => {
+                // 窗口第一次上屏时 DWM 会先按浅色画一帧边框，创建时设的属性可能被
+                // 这次绘制覆盖，所以第一帧再补一次。
+                if !self.frame_dark {
+                    self.frame_dark = true;
+                    crate::frame::apply_dark(&self.window);
+                }
                 self.redraw();
                 Vec::new()
             }
             WindowEvent::Resized(size) => {
+                crate::frame::apply_dark(&self.window);
                 self.presenter.resize(size.width.max(1), size.height.max(1));
                 self.request_redraw();
                 Vec::new()
             }
             WindowEvent::CloseRequested => vec![Outcome::Close],
+            WindowEvent::Focused(true) => {
+                crate::frame::apply_dark(&self.window);
+                Vec::new()
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = self.window.scale_factor() as f32;
                 let scale = if scale > 0.01 { scale } else { 1.0 };

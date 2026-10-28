@@ -5,6 +5,7 @@
 //! * [`app`]：winit 事件循环 + 状态机（托盘/悬停展开/动画驱动）。
 
 pub mod app;
+pub mod frame;
 pub mod history;
 pub mod paint;
 pub mod presenter;

@@ -51,7 +51,6 @@ fn main() {
         let w = (l.size.0 * dpi).round() as u32;
         let h = (l.size.1 * dpi).round() as u32;
         let mut pixmap = Pixmap::new(w, h).expect("pixmap");
-        let title = format!("剪贴板历史 · {} 条", entries.len());
         draw(
             &mut pixmap,
             entries,
@@ -61,7 +60,6 @@ fn main() {
                 selected,
                 scroll,
                 hover: if entries.is_empty() { None } else { Some(2) },
-                title: &title,
                 footer: "↑↓ 选择 · Enter 复制并关闭 · Delete 删除 · Esc 关闭",
                 empty: "还没有记录",
             },
