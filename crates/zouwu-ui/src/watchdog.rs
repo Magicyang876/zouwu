@@ -34,11 +34,18 @@ pub mod stage {
 
 static STAGE: AtomicU8 = AtomicU8::new(stage::IDLE);
 static SEQ: AtomicU64 = AtomicU64::new(0);
+static POLLS: AtomicU64 = AtomicU64::new(0);
 
 /// 主线程进入某个阶段。幂等、无锁。
 pub fn enter(stage: u8) {
     STAGE.store(stage, Ordering::Relaxed);
     SEQ.fetch_add(1, Ordering::Relaxed);
+}
+
+/// 一次 100ms 轮询（光标/热键/剪贴板）跑完了。心跳里看它有没有在涨：
+/// 涨 = 主循环活着但没收到热键；不涨 = 主循环压根没转到轮询那一拍。
+pub fn polled() {
+    POLLS.fetch_add(1, Ordering::Relaxed);
 }
 
 /// 阶段编号 → 名字（日志里给人看）。
@@ -69,10 +76,26 @@ pub fn spawn() {
         .name("zouwu-watchdog".into())
         .spawn(|| {
             let mut last_seq = SEQ.load(Ordering::Relaxed);
+            let mut last_polls = POLLS.load(Ordering::Relaxed);
             let mut stuck = 0u32;
+            let mut ticks = 0u32;
             loop {
                 std::thread::sleep(Duration::from_secs(2));
+                ticks += 1;
                 let seq = SEQ.load(Ordering::Relaxed);
+                let polls = POLLS.load(Ordering::Relaxed);
+                // 每 8 秒一条心跳：证明看门狗自己活着，也让人看出"卡死"时
+                // 主线程到底还在不在转（`polls` 是否在涨）。
+                if ticks % 4 == 0 {
+                    let at = STAGE.load(Ordering::Relaxed);
+                    log::info!(
+                        "watchdog: beat stage={} polls=+{} seq=+{}",
+                        name(at),
+                        polls.wrapping_sub(last_polls),
+                        seq.wrapping_sub(last_seq)
+                    );
+                    last_polls = polls;
+                }
                 if seq == last_seq {
                     stuck += 1;
                     if stuck % 3 == 1 {

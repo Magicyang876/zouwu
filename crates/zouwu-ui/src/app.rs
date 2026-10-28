@@ -1642,6 +1642,7 @@ impl App {
             } else {
                 CURSOR_POLL_OUTSIDE
             };
+        crate::watchdog::polled();
     }
     /// 看剪贴板有没有变。
     ///
@@ -2292,6 +2293,10 @@ impl ApplicationHandler for App {
     /// 进入 `WaitUntil`。这是"空闲零开销"与"看起来活着"能同时成立的关键。
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         crate::watchdog::enter(crate::watchdog::stage::ABOUT_TO_WAIT);
+        if std::env::var_os("ZOUWU_HANG").is_some_and(|v| !v.is_empty()) {
+            log::warn!("debug: sleeping 20s to test the watchdog");
+            std::thread::sleep(Duration::from_secs(20));
+        }
         let now = Instant::now();
 
         // 清墓地：这里已经出了事件派发（不在窗口过程里），析构 `Window` 不会重入。
