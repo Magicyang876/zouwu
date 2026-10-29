@@ -135,6 +135,8 @@ pub enum Field {
     FontPack,
     ClipboardEnabled,
     ClipboardLimit,
+    EyeCareEnabled,
+    EyeCareStrength,
     LogLevel,
     LogToFile,
 }
@@ -182,6 +184,8 @@ impl Field {
             Field::FontPack => "settings.font",
             Field::ClipboardEnabled => "settings.clipboard",
             Field::ClipboardLimit => "settings.clipboard.limit",
+            Field::EyeCareEnabled => "settings.eye-care",
+            Field::EyeCareStrength => "settings.eye-care.strength",
             Field::LogLevel => "settings.log-level",
             Field::LogToFile => "settings.log-to-file",
         }
@@ -219,6 +223,13 @@ impl Field {
             Field::HoverFactor => NumSpec {
                 min: 100,
                 max: 250,
+                step: 5,
+                unit: Unit::Percent,
+            },
+            Field::EyeCareStrength => NumSpec {
+                // 下限 5：配置里 0 等于“什么都没涂”，不如让用户直接关开关。
+                min: 5,
+                max: zouwu_core::config::EyeCare::MAX_STRENGTH as i64,
                 step: 5,
                 unit: Unit::Percent,
             },
@@ -275,6 +286,7 @@ impl Field {
             Field::CollapseDelay => cfg.interaction.collapse_delay_ms as i64,
             Field::WindowSize => cfg.window.size.round() as i64,
             Field::ClipboardLimit => cfg.clipboard.limit as i64,
+            Field::EyeCareStrength => cfg.eye_care.strength as i64,
             Field::HoverFactor => (cfg.interaction.hover_radius_factor * 100.0).round() as i64,
             Field::CollapseFactor => {
                 (cfg.interaction.collapse_radius_factor * 100.0).round() as i64
@@ -296,6 +308,10 @@ impl Field {
             Field::CollapseDelay => cfg.interaction.collapse_delay_ms = v.max(0) as u64,
             Field::WindowSize => cfg.window.size = v as f32,
             Field::ClipboardLimit => cfg.clipboard.limit = v.max(1) as usize,
+            Field::EyeCareStrength => {
+                cfg.eye_care.strength =
+                    v.clamp(0, zouwu_core::config::EyeCare::MAX_STRENGTH as i64) as u8
+            }
             Field::HoverFactor => cfg.interaction.hover_radius_factor = v as f32 / 100.0,
             Field::CollapseFactor => cfg.interaction.collapse_radius_factor = v as f32 / 100.0,
             Field::HitTolerance => cfg.interaction.hit_tolerance = v as f32 / 100.0,
@@ -316,6 +332,7 @@ impl Field {
             Field::AlwaysOnTop => cfg.window.always_on_top,
             Field::ExpandOnClick => cfg.interaction.expand_on_click,
             Field::ClipboardEnabled => cfg.clipboard.enabled,
+            Field::EyeCareEnabled => cfg.eye_care.enabled,
             Field::Breathe => cfg.buddy.breathe,
             Field::LogToFile => cfg.log.to_file,
             _ => return None,
@@ -331,6 +348,7 @@ impl Field {
             Field::AlwaysOnTop => cfg.window.always_on_top = on,
             Field::ExpandOnClick => cfg.interaction.expand_on_click = on,
             Field::ClipboardEnabled => cfg.clipboard.enabled = on,
+            Field::EyeCareEnabled => cfg.eye_care.enabled = on,
             Field::Breathe => cfg.buddy.breathe = on,
             Field::LogToFile => cfg.log.to_file = on,
             _ => {}
@@ -691,6 +709,22 @@ pub fn build_rows(model: &Model) -> Vec<Row> {
             rows.push(toggle_row(model, Field::BringToFront));
             rows.push(toggle_row(model, Field::AlwaysOnTop));
             rows.push(step_row(model, Field::WindowSize));
+
+            rows.push(Row::section(i18n.t("settings.section.eye-care")));
+            rows.push(Row {
+                field: Some(Field::EyeCareEnabled),
+                label: i18n.t("settings.eye-care"),
+                hint: Some(i18n.t("settings.eye-care.hint")),
+                control: Control::Toggle {
+                    on: model.config.eye_care.enabled,
+                },
+            });
+            rows.push(Row {
+                field: Some(Field::EyeCareStrength),
+                label: i18n.t("settings.eye-care.strength"),
+                hint: Some(i18n.t("settings.eye-care.strength.hint")),
+                control: step_control(model, Field::EyeCareStrength),
+            });
 
             rows.push(Row::section(i18n.t("settings.section.clipboard")));
             rows.push(Row {
@@ -1677,6 +1711,7 @@ fn changed(model: &mut Model, field: Field) -> Vec<ChangeKind> {
         Field::LogLevel | Field::LogToFile => kinds.push(ChangeKind::Log),
         Field::AlwaysOnTop => kinds.push(ChangeKind::WindowLevel),
         Field::ClipboardEnabled | Field::ClipboardLimit => kinds.push(ChangeKind::Clipboard),
+        Field::EyeCareEnabled | Field::EyeCareStrength => kinds.push(ChangeKind::EyeCare),
         Field::WindowSize => kinds.push(ChangeKind::WindowSize),
         Field::BuddyRadius | Field::Breathe => kinds.push(ChangeKind::Buddy),
         Field::RingRadius | Field::BubbleRadius | Field::FloatAmplitude | Field::ExpandStagger => {
@@ -1695,6 +1730,8 @@ fn reset(model: &mut Model) {
     model.config.ring = defaults.ring;
     model.config.buddy = defaults.buddy;
     model.config.window = defaults.window;
+    // 护眼是“屏幕观感”：重置外观时一并回到默认（关掉、强度 40）。
+    model.config.eye_care = defaults.eye_care;
     model.notice = Some(model.i18n.t("settings.reset.done"));
 }
 
@@ -2227,6 +2264,62 @@ mod tests {
             assert!(!l.rows.is_empty());
             assert!(l.rows_h > 0.0);
         }
+    }
+
+    #[test]
+    fn eye_care_rows_toggle_and_step() {
+        let mut m = model();
+        let l = layout(&m, 760.0, 600.0);
+
+        // 标签必须真的翻译过：`t()` 找不到 key 时会原样回吐 key。
+        let index = l
+            .rows
+            .iter()
+            .position(|(row, _)| row.field == Some(Field::EyeCareEnabled))
+            .expect("eye care toggle row");
+        let label = l.rows[index].0.label.clone();
+        assert_eq!(label, m.i18n.t("settings.eye-care"));
+        assert_ne!(label, "settings.eye-care", "ftl 里缺 settings-eye-care");
+
+        // 默认关着，一次点击就开，并且报出“该重新贴遮罩”。
+        assert!(!m.config.eye_care.enabled);
+        assert_eq!(activate(&mut m, &l, index), vec![ChangeKind::EyeCare]);
+        assert!(m.config.eye_care.enabled);
+
+        // 强度行：默认 40，步长 5，顶到上限后不再动。
+        let strength = l
+            .rows
+            .iter()
+            .position(|(row, _)| row.field == Some(Field::EyeCareStrength))
+            .expect("eye care strength row");
+        assert!(matches!(l.rows[strength].0.control, Control::Step { .. }));
+        assert_eq!(m.config.eye_care.strength, 40);
+        assert_eq!(
+            step(&mut m, Field::EyeCareStrength, 1),
+            vec![ChangeKind::EyeCare]
+        );
+        assert_eq!(m.config.eye_care.strength, 45);
+        for _ in 0..20 {
+            step(&mut m, Field::EyeCareStrength, 1);
+        }
+        assert_eq!(
+            m.config.eye_care.strength,
+            zouwu_core::config::EyeCare::MAX_STRENGTH
+        );
+        // 关掉也是“该重新贴遮罩”（这次是撤掉）。行模型要重建：`activate`
+        // 读的是布局里缓存的状态，真实 UI 每次变化后都会重建布局。
+        let l = layout(&m, 760.0, 600.0);
+        let index = l
+            .rows
+            .iter()
+            .position(|(row, _)| row.field == Some(Field::EyeCareEnabled))
+            .expect("eye care toggle row");
+        assert!(matches!(
+            l.rows[index].0.control,
+            Control::Toggle { on: true }
+        ));
+        assert_eq!(activate(&mut m, &l, index), vec![ChangeKind::EyeCare]);
+        assert!(!m.config.eye_care.enabled);
     }
 
     #[test]

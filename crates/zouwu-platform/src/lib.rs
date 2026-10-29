@@ -36,6 +36,12 @@ pub mod text_gdi;
 pub mod tray;
 
 pub mod dialogs;
+/// 护眼遮罩（蓝光过滤）：一层点击穿透的暖色窗口。
+#[cfg(target_os = "windows")]
+pub mod eyecare;
+#[cfg(not(target_os = "windows"))]
+#[path = "eyecare_stub.rs"]
+pub mod eyecare;
 pub mod reload;
 #[cfg(target_os = "windows")]
 pub mod screen;

@@ -154,6 +154,13 @@ qr-screen = 显示器 {$index}
 qr-footer = 点一行复制内容 · Esc 关闭
 qr-copied = 已复制到剪贴板
 
+# ── 护眼（蓝光过滤） ────────────────────────────────────
+settings-section-eye-care = 护眼
+settings-eye-care = 过滤蓝光
+settings-eye-care-hint = 整个屏幕加一层暖色，蓝色少了，长时间看没那么刺眼
+settings-eye-care-strength = 过滤强度
+settings-eye-care-strength-hint = 越大越暖；开到最大约 55% 的暖色遮罩
+
 # ── 剪贴板历史 ────────────────────────────────────────────
 settings-count = {$count} 条
 settings-section-clipboard = 剪贴板

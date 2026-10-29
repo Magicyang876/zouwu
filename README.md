@@ -48,6 +48,7 @@
 | F-14 | 快捷启动 / 命令面板 | 输入即搜：应用、文件、内置动作、自定义命令 |
 | F-15 | 颜色拾取 / 取色器 | 屏幕取色，复制 HEX/RGB/HSL |
 | F-16 | 番茄钟 / 提醒 | 与"小兽状态"绑定（专注时小兽进入打盹/专注形态） |
+| F-17 | 护眼（蓝光过滤） | ✔ 全屏暖色遮罩（点穿透、不抢焦点），强度 0~100 可调，默认关（ADR-040） |
 
 ### 3.3 P2 · 扩展与生态
 
@@ -173,6 +174,7 @@
 | ADR-035 | **子窗口只隐藏不销毁**：析构持有焦点的窗口会让 USER32 同步通知别的进程，把整个进程冻住；改为复用（`show`/`reload`）|
 | ADR-036 | **关窗之前先把前台交还给自己**：隐藏持焦窗口同样会让 USER32 同步转交前台；看门狗改用不分配内存的独立日志（`logs/watchdog.log`）|
 | ADR-034 | **剪贴板历史：轮询 `GetClipboardSequenceNumber`、`history.toml` 为唯一真相、只存文本**（250ms 一次，空闲零成本） |
+| ADR-040 | **护眼：贴一整块半透明暖色遮罩，不动伽马表**（伽马是全局硬件状态，崩了就回不去；强度 = 遮罩不透明度；新置顶窗口靠 `SetWinEventHook` 毫秒级重抬遮罩） |
 | ADR-032 | **长说明"点开才展开"**：换行在 `layout()` 里算（行高依赖换行）、行距用固定常量、折行留 4% 余量 + 行首禁则 |
 | ADR-031 | **字体包：读字体自己的 `name` 表，`AddFontResourceEx(FR_PRIVATE)` 进程私有注册**；配置 schema 4，空串 = 系统字体 |
 | ADR-030 | **面板文字被遮挡的四个成因**：半行、section 贴线、经验式基线、GDI 不选字体 |
@@ -232,6 +234,7 @@
 | 文本渲染 | ✔ 系统 GDI 栅格化（中文/符号 fallback 免费，常驻增量≈0），面板 RSS 879MB → 23MB（ADR-016） |
 | **二维码扫描** | ✔ `Ctrl+Alt+Q` / 托盘 / 气泡 → 截整个虚拟桌面（多屏）→ 找码 → 结果窗：点一行复制、Esc 关闭；一个码都没找到或扫描失败同样弹窗说明（ADR-033） |
 | **剪贴板历史** | ✔ `Ctrl+Alt+V` / 托盘 / 气泡 → 历史窗：↑↓ 选择、Enter 复制并关窗、Delete 删一条、点击即复制；同内容不重复占行、超容量丢最旧、多行内容保留（ADR-034） |
+| **护眼（蓝光过滤）** | ✔ 整个虚拟桌面盖一层琥珀色分层窗（点穿透 / 不抢焦点 / 不进 Alt+Tab）；设置面板「通用 → 护眼」开关 + 强度 0~100 步进 5，默认关；新开窗口（含自建置顶的悬浮窗）毫秒级被遮，启动、显示器变化、退出都跟到底（ADR-040） |
 | 托盘常驻 | ✔ 左键切显隐，右键菜单（显示/隐藏、扫描二维码、剪贴板历史、回到主屏、配置文件…、开机自启、语言、退出） |
 | 位置安全 | ✔ 启动与运行期（每 3s）都校验「还有多少面积在真实屏幕上」，不足 50% 自动搬回宠物位；托盘可强制归位（ADR-026） |
 | 全局热键 | ✔ 默认 `Alt+Space`，可在 `config.toml` 改；解析失败回退默认 |
@@ -247,7 +250,7 @@
 **可复现的验收方式**：
 
 ```bash
-cargo test --workspace                     # 168 个单测：几何 / 弹簧 / 布局 / 屏边避让 / 配置 / 主题 / 皮肤 / 皮肤包 / 字体包 / 日志 / 面板 / 文本 / i18n / 二维码 / 结果窗 / 剪贴板历史
+cargo test --workspace                     # 175 个单测：几何 / 弹簧 / 布局 / 屏边避让 / 配置 / 主题 / 皮肤 / 皮肤包 / 字体包 / 日志 / 面板 / 文本 / i18n / 二维码 / 结果窗 / 剪贴板历史 / 护眼
 cargo run -p zouwu-ui --example offscreen  # 离屏渲染 → target/zouwu-offscreen/*.png，直接看图
 cargo run -p zouwu-ui --example settings_shot   # 设置面板 4 个分页 → target/zouwu-settings/*.png（2×）
 cargo run -p zouwu-ui --example bench      # 单帧成本模型（release）
@@ -260,6 +263,7 @@ ZOUWU_PERF=1 cargo run --release -p zouwu-app   # 每 60 帧报一次实际帧�
 ZOUWU_SETTINGS=1 cargo run --release -p zouwu-app   # 启动即开设置面板（托盘菜单没法脚本化）
 cargo run -p zouwu-platform --example autostart_check -- status   # 开机自启读写（有副作用，故不做成单测）
 powershell -File packaging/package.ps1     # 打包 → dist/ 与 target/dist/ 各一份 zip + sha256（约 1.9 MB）
+powershell -File packaging/publish.ps1     # 打包 + 发布：替换 C:\X\Zouwu\dist\zouwu-0.1.0\zouwu.exe 并重启（校验字节）
 target/release/zouwu.exe --install         # 装到 %LOCALAPPDATA%\Programs\zouwu（退出码 0/1，可脚本化）
 target/release/zouwu.exe --uninstall --purge   # 卸载，连配置/皮肤/日志一起删
 ```

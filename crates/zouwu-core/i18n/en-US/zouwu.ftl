@@ -153,6 +153,13 @@ qr-screen = display {$index}
 qr-footer = Click a row to copy · Esc to close
 qr-copied = Copied to clipboard
 
+# ── Eye care (blue light filter) ─────────────────────────
+settings-section-eye-care = Eye care
+settings-eye-care = Filter blue light
+settings-eye-care-hint = Adds a warm layer over the whole screen; less blue is easier on the eyes
+settings-eye-care-strength = Filter strength
+settings-eye-care-strength-hint = Higher is warmer; the maximum is roughly a 55% warm overlay
+
 # ── Clipboard history ─────────────────────────────────────
 settings-count = {$count} items
 settings-section-clipboard = Clipboard

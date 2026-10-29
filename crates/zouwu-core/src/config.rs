@@ -5,7 +5,7 @@
 use crate::ring::{RingConfig, DEG};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -14,6 +14,8 @@ pub struct Config {
     /// 放在最前面：这是用户最常手改的一段（语言、热键、自启）。
     pub general: General,
     pub appearance: Appearance,
+    /// 护眼（蓝光过滤）：一层暖色半透明遮罩，强度可调。
+    pub eye_care: EyeCare,
     pub clipboard: ClipboardCfg,
     pub log: LogCfg,
     pub interaction: Interaction,
@@ -28,6 +30,7 @@ impl Default for Config {
             schema_version: SCHEMA_VERSION,
             general: General::default(),
             appearance: Appearance::default(),
+            eye_care: EyeCare::default(),
             clipboard: ClipboardCfg::default(),
             log: LogCfg::default(),
             interaction: Interaction::default(),
@@ -252,6 +255,50 @@ impl Default for Appearance {
     }
 }
 
+/// 护眼（蓝光过滤）。
+///
+/// 实现是**一层暖色半透明遮罩**贴在所有屏幕内容之上（点击穿透，不影响操作），
+/// 和 f.lux / 护眼宝那类工具的做法一致：不做 ICC/伽马改写，
+/// 因为改伽马会影响整个桌面且难以可靠恢复。
+///
+/// 默认**关着**：它是有感的功能，不该在用户没要求时就把屏幕染黄。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EyeCare {
+    /// 是否开启遮罩。
+    pub enabled: bool,
+    /// 过滤强度，`0..=100`。0 = 只有一点点暖色，100 = 最重（约 55% 不透明度）。
+    pub strength: u8,
+}
+
+impl Default for EyeCare {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            strength: 40,
+        }
+    }
+}
+
+impl EyeCare {
+    /// 上限：再重就看不清内容了，护眼宝一类工具也停在这个量级。
+    pub const MAX_STRENGTH: u8 = 100;
+
+    /// 强度 -> 遮罩不透明度（`0..=255`）。
+    ///
+    /// 线性映射到 0..=140：`strength=40` 约 22%，肉眼刚好“黄一点但不刺眼”。
+    pub fn alpha(self) -> u8 {
+        let s = self.strength.min(Self::MAX_STRENGTH) as u32;
+        (s * 140 / 100) as u8
+    }
+
+    /// 越界的强度就地收敛（配置文件是手改的，不能信任）。
+    pub fn clamped(mut self) -> Self {
+        self.strength = self.strength.min(Self::MAX_STRENGTH);
+        self
+    }
+}
+
 /// 日志落盘。写在文件里的一行应该让人**不用开着控制台**也能定位问题。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -302,6 +349,7 @@ impl Config {
         if self.schema_version < SCHEMA_VERSION {
             self.schema_version = SCHEMA_VERSION;
         }
+        self.eye_care = self.eye_care.clamped();
         self
     }
 
@@ -326,6 +374,9 @@ impl Config {
         }
         if self.appearance != next.appearance {
             out.push(Appearance);
+        }
+        if self.eye_care != next.eye_care {
+            out.push(EyeCare);
         }
         if self.clipboard != next.clipboard {
             out.push(Clipboard);
@@ -366,6 +417,8 @@ pub enum ChangeKind {
     Autostart,
     /// 主题 / 皮肤
     Appearance,
+    /// 护眼遮罩的开关与强度
+    EyeCare,
     /// 剪贴板历史开关与容量
     Clipboard,
     /// 日志级别与落盘策略
@@ -389,6 +442,7 @@ impl ChangeKind {
             ChangeKind::Hotkey => "hotkey",
             ChangeKind::Autostart => "autostart",
             ChangeKind::Appearance => "appearance",
+            ChangeKind::EyeCare => "eye_care",
             ChangeKind::Clipboard => "clipboard",
             ChangeKind::Log => "log",
             ChangeKind::Interaction => "interaction",
@@ -558,6 +612,69 @@ language = \"en-US\"
             base.diff(&next),
             vec![ChangeKind::Appearance, ChangeKind::Log]
         );
+    }
+
+    #[test]
+    fn eye_care_defaults_alpha_and_clamp() {
+        let cfg = Config::default();
+        assert!(!cfg.eye_care.enabled, "必须默认关着，不能擅自把屏幕染黄");
+        assert_eq!(cfg.eye_care.strength, 40);
+        assert_eq!(cfg.eye_care.alpha(), 56, "40% 强度 -> 56/255 不透明度");
+        assert_eq!(
+            EyeCare {
+                enabled: true,
+                strength: 0
+            }
+            .alpha(),
+            0,
+            "强度 0 不该有任何颜色"
+        );
+        assert_eq!(
+            EyeCare {
+                enabled: true,
+                strength: EyeCare::MAX_STRENGTH
+            }
+            .alpha(),
+            140,
+            "最强也只到 ~55%"
+        );
+        // 手改 toml 能把强度写成 240（u8 装得下），加载时要收敛。
+        let cfg = Config::from_toml("[eye_care]\nenabled = true\nstrength = 240\n").expect("parse");
+        assert_eq!(cfg.eye_care.strength, 240);
+        let cfg = cfg.migrated();
+        assert_eq!(cfg.eye_care.strength, EyeCare::MAX_STRENGTH);
+        assert_eq!(cfg.eye_care.alpha(), 140);
+    }
+
+    #[test]
+    fn eye_care_section_roundtrips() {
+        let mut cfg = Config::default();
+        cfg.eye_care = EyeCare {
+            enabled: true,
+            strength: 72,
+        };
+        let text = cfg.to_toml();
+        assert!(text.contains("[eye_care]"), "got:\n{text}");
+        assert_eq!(
+            Config::from_toml(&text).expect("roundtrip").eye_care,
+            cfg.eye_care
+        );
+    }
+
+    #[test]
+    fn old_config_without_eye_care_stays_off() {
+        let cfg = Config::from_toml("[general]\nlanguage = \"en-US\"\n").expect("parse");
+        assert_eq!(cfg.eye_care, EyeCare::default());
+    }
+
+    #[test]
+    fn diff_reports_eye_care() {
+        let base = Config::default();
+        let mut next = base.clone();
+        next.eye_care.enabled = true;
+        assert_eq!(base.diff(&next), vec![ChangeKind::EyeCare]);
+        next.eye_care.strength = 80;
+        assert_eq!(base.diff(&next), vec![ChangeKind::EyeCare]);
     }
 
     #[test]

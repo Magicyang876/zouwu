@@ -581,6 +581,11 @@ impl App {
             }
         }
 
+        if changed.contains(&ChangeKind::EyeCare) {
+            // 面板里拖值时要实时看到变暖变淡，所以这里不等到重启。
+            self.apply_eye_care("config", true);
+        }
+
         if changed.contains(&ChangeKind::Log) {
             // 日志是**唯一在配置之前就启动**的子系统（坏配置的排查线索全靠它），
             // 所以这里不是"重启它"，而是把新级别/新落盘策略推给已在跑的那个。
@@ -591,6 +596,38 @@ impl App {
         self.last_frame = now;
         self.dirty = true;
         log::info!("config applied from {origin}: {}", names.join(", "));
+    }
+
+    /// 把护眼遮罩推到平台层。
+    ///
+    /// 失败只记一条 warn：遮罩是附加效果，不该因为“这台机器上建不了
+    /// 窗口”而让挂件启动失败，也不该变成每次配置重载都刷屏的错误。
+    fn apply_eye_care(&self, origin: &str, verbose: bool) {
+        let care = self.config.eye_care;
+        match zouwu_platform::eyecare::apply(care.enabled, care.alpha()) {
+            Ok(()) => {
+                if verbose {
+                    // 关着的时候不报 alpha：那个数字只是“开着会是多不透明”，
+                    // 混在日志里很容易被误读成“已经贴上了”。
+                    if care.enabled {
+                        log::info!(
+                            "eye care: strength {} -> alpha {}/255 ({origin})",
+                            care.strength,
+                            care.alpha()
+                        );
+                    } else {
+                        log::info!("eye care: off ({origin})");
+                    }
+                }
+            }
+            Err(err) => {
+                if verbose {
+                    log::warn!("eye care unavailable: {err}");
+                } else {
+                    log::debug!("eye care unavailable: {err}");
+                }
+            }
+        }
     }
 
     /// 打开（或唤到前面）设置面板。
@@ -900,6 +937,9 @@ impl App {
                 self.save_config();
             }
         }
+
+        // 护眼遮罩：开机恢复上次的开关与强度。
+        self.apply_eye_care("startup", true);
 
         // 一行交代清楚"以什么姿态在跑"：排查问题时先看这一行。
         log::info!(
@@ -2260,6 +2300,8 @@ impl ApplicationHandler for App {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.save_state();
         self.save_config();
+        // 遮罩窗口是我们自己建的，退出前收掉（不依赖进程退出时的系统清理）。
+        zouwu_platform::eyecare::shutdown();
         log::info!("zouwu exiting");
     }
 
@@ -2403,6 +2445,10 @@ impl ApplicationHandler for App {
                         self.dirty = true;
                         window.request_redraw();
                     }
+                }
+                // 遮罩盖的是整个虚拟桌面：换了分辨率/插拔了屏，几何得重贴一次。
+                if self.config.eye_care.enabled {
+                    self.apply_eye_care("monitors", false);
                 }
             }
         }
