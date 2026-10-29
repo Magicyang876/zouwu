@@ -160,6 +160,11 @@ settings-eye-care-hint = Adds a warm layer over the whole screen; less blue is e
 settings-eye-care-strength = Filter strength
 settings-eye-care-strength-hint = Higher is warmer; the maximum is roughly a 55% warm overlay
 
+# ── Window drag (AltSnap style) ─────────────────────────
+settings-section-alt-drag = Window drag
+settings-alt-drag = Hold Alt to drag windows
+settings-alt-drag-hint = Hold Alt and drag with the left button to move the window under the cursor; double-click to maximize (again to restore); wheel up maximizes, wheel down minimizes
+
 # ── Clipboard history ─────────────────────────────────────
 settings-count = {$count} items
 settings-section-clipboard = Clipboard

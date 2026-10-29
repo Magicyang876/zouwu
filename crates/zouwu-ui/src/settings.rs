@@ -137,6 +137,7 @@ pub enum Field {
     ClipboardLimit,
     EyeCareEnabled,
     EyeCareStrength,
+    AltDragEnabled,
     LogLevel,
     LogToFile,
 }
@@ -186,6 +187,7 @@ impl Field {
             Field::ClipboardLimit => "settings.clipboard.limit",
             Field::EyeCareEnabled => "settings.eye-care",
             Field::EyeCareStrength => "settings.eye-care.strength",
+            Field::AltDragEnabled => "settings.alt-drag",
             Field::LogLevel => "settings.log-level",
             Field::LogToFile => "settings.log-to-file",
         }
@@ -330,6 +332,7 @@ impl Field {
             Field::ShowOnStart => cfg.general.show_on_start,
             Field::BringToFront => cfg.general.bring_to_front,
             Field::AlwaysOnTop => cfg.window.always_on_top,
+            Field::AltDragEnabled => cfg.alt_drag.enabled,
             Field::ExpandOnClick => cfg.interaction.expand_on_click,
             Field::ClipboardEnabled => cfg.clipboard.enabled,
             Field::EyeCareEnabled => cfg.eye_care.enabled,
@@ -346,6 +349,7 @@ impl Field {
             Field::ShowOnStart => cfg.general.show_on_start = on,
             Field::BringToFront => cfg.general.bring_to_front = on,
             Field::AlwaysOnTop => cfg.window.always_on_top = on,
+            Field::AltDragEnabled => cfg.alt_drag.enabled = on,
             Field::ExpandOnClick => cfg.interaction.expand_on_click = on,
             Field::ClipboardEnabled => cfg.clipboard.enabled = on,
             Field::EyeCareEnabled => cfg.eye_care.enabled = on,
@@ -724,6 +728,16 @@ pub fn build_rows(model: &Model) -> Vec<Row> {
                 label: i18n.t("settings.eye-care.strength"),
                 hint: Some(i18n.t("settings.eye-care.strength.hint")),
                 control: step_control(model, Field::EyeCareStrength),
+            });
+
+            rows.push(Row::section(i18n.t("settings.section.alt-drag")));
+            rows.push(Row {
+                field: Some(Field::AltDragEnabled),
+                label: i18n.t("settings.alt-drag"),
+                hint: Some(i18n.t("settings.alt-drag.hint")),
+                control: Control::Toggle {
+                    on: model.config.alt_drag.enabled,
+                },
             });
 
             rows.push(Row::section(i18n.t("settings.section.clipboard")));
@@ -1712,6 +1726,7 @@ fn changed(model: &mut Model, field: Field) -> Vec<ChangeKind> {
         Field::AlwaysOnTop => kinds.push(ChangeKind::WindowLevel),
         Field::ClipboardEnabled | Field::ClipboardLimit => kinds.push(ChangeKind::Clipboard),
         Field::EyeCareEnabled | Field::EyeCareStrength => kinds.push(ChangeKind::EyeCare),
+        Field::AltDragEnabled => kinds.push(ChangeKind::AltDrag),
         Field::WindowSize => kinds.push(ChangeKind::WindowSize),
         Field::BuddyRadius | Field::Breathe => kinds.push(ChangeKind::Buddy),
         Field::RingRadius | Field::BubbleRadius | Field::FloatAmplitude | Field::ExpandStagger => {
@@ -1732,6 +1747,8 @@ fn reset(model: &mut Model) {
     model.config.window = defaults.window;
     // 护眼是“屏幕观感”：重置外观时一并回到默认（关掉、强度 40）。
     model.config.eye_care = defaults.eye_care;
+    // Alt 拖动窗口是“操作方式”而不是外观，重置不动它：
+    // 把用户的鼠标习惯改回去，比“重置得不彻底”更讨厌。
     model.notice = Some(model.i18n.t("settings.reset.done"));
 }
 
@@ -2264,6 +2281,51 @@ mod tests {
             assert!(!l.rows.is_empty());
             assert!(l.rows_h > 0.0);
         }
+    }
+
+    #[test]
+    fn alt_drag_row_toggles_and_is_translated() {
+        let mut m = model();
+        let l = layout(&m, 760.0, 600.0);
+        let index = l
+            .rows
+            .iter()
+            .position(|(row, _)| row.field == Some(Field::AltDragEnabled))
+            .expect("alt drag toggle row");
+
+        // 标签必须真的翻译过：`t()` 找不到 key 时会原样回吐 key。
+        let label = l.rows[index].0.label.clone();
+        assert_eq!(label, m.i18n.t("settings.alt-drag"));
+        assert_ne!(label, "settings.alt-drag", "ftl 里缺 settings-alt-drag");
+        assert!(matches!(
+            l.rows[index].0.control,
+            Control::Toggle { on: true }
+        ));
+
+        // 关掉 -> 报“该卸钩子”；再开回来 -> 报“该重新装”。
+        assert_eq!(activate(&mut m, &l, index), vec![ChangeKind::AltDrag]);
+        assert!(!m.config.alt_drag.enabled);
+        let l = layout(&m, 760.0, 600.0);
+        let index = l
+            .rows
+            .iter()
+            .position(|(row, _)| row.field == Some(Field::AltDragEnabled))
+            .expect("alt drag toggle row");
+        assert!(matches!(
+            l.rows[index].0.control,
+            Control::Toggle { on: false }
+        ));
+        assert_eq!(activate(&mut m, &l, index), vec![ChangeKind::AltDrag]);
+        assert!(m.config.alt_drag.enabled);
+    }
+
+    #[test]
+    fn reset_keeps_alt_drag_alone() {
+        let mut m = model();
+        m.config.alt_drag.enabled = false;
+        reset(&mut m);
+        // 重置的是外观，不该把用户的鼠标习惯也一并改回去。
+        assert!(!m.config.alt_drag.enabled);
     }
 
     #[test]

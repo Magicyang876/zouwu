@@ -35,6 +35,12 @@ pub mod text_gdi;
 #[cfg(target_os = "windows")]
 pub mod tray;
 
+/// Alt 拖动窗口（AltSnap 的最小集：拖动 / 双击最大化 / 滚轮最大最小化）。
+#[cfg(target_os = "windows")]
+pub mod altdrag;
+#[cfg(not(target_os = "windows"))]
+#[path = "altdrag_stub.rs"]
+pub mod altdrag;
 pub mod dialogs;
 /// 护眼遮罩（蓝光过滤）：一层点击穿透的暖色窗口。
 #[cfg(target_os = "windows")]

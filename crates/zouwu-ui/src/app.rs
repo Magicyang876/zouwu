@@ -586,6 +586,10 @@ impl App {
             self.apply_eye_care("config", true);
         }
 
+        if changed.contains(&ChangeKind::AltDrag) {
+            self.apply_alt_drag("config");
+        }
+
         if changed.contains(&ChangeKind::Log) {
             // 日志是**唯一在配置之前就启动**的子系统（坏配置的排查线索全靠它），
             // 所以这里不是"重启它"，而是把新级别/新落盘策略推给已在跑的那个。
@@ -596,6 +600,18 @@ impl App {
         self.last_frame = now;
         self.dirty = true;
         log::info!("config applied from {origin}: {}", names.join(", "));
+    }
+
+    /// 把“Alt 拖动窗口”推到平台层（装 / 卸低层鼠标钩子）。
+    ///
+    /// 钩子跑在平台层自己的线程里（见 `zouwu_platform::altdrag` 的模块文档），
+    /// 主线程只是开关它，所以开机、改配置、退出这三条路径都不会被它拖住。
+    fn apply_alt_drag(&self, origin: &str) {
+        let on = self.config.alt_drag.enabled;
+        match zouwu_platform::altdrag::apply(on) {
+            Ok(()) => log::info!("alt drag: {} ({origin})", if on { "on" } else { "off" }),
+            Err(err) => log::warn!("alt drag unavailable: {err}"),
+        }
     }
 
     /// 把护眼遮罩推到平台层。
@@ -940,6 +956,9 @@ impl App {
 
         // 护眼遮罩：开机恢复上次的开关与强度。
         self.apply_eye_care("startup", true);
+
+        // Alt 拖动窗口：开机按配置装（或是不装）那个低层鼠标钩子。
+        self.apply_alt_drag("startup");
 
         // 一行交代清楚"以什么姿态在跑"：排查问题时先看这一行。
         log::info!(
@@ -2302,6 +2321,8 @@ impl ApplicationHandler for App {
         self.save_config();
         // 遮罩窗口是我们自己建的，退出前收掉（不依赖进程退出时的系统清理）。
         zouwu_platform::eyecare::shutdown();
+        // 鼠标钩子同理：给钩子线程投个退出消息，让它自己卸钩子。
+        zouwu_platform::altdrag::shutdown();
         log::info!("zouwu exiting");
     }
 

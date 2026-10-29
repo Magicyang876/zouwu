@@ -16,6 +16,8 @@ pub struct Config {
     pub appearance: Appearance,
     /// 护眼（蓝光过滤）：一层暖色半透明遮罩，强度可调。
     pub eye_care: EyeCare,
+    /// Alt 拖动窗口（移动 / 双击最大化 / 滚轮最大最小化）。
+    pub alt_drag: AltDrag,
     pub clipboard: ClipboardCfg,
     pub log: LogCfg,
     pub interaction: Interaction,
@@ -31,6 +33,7 @@ impl Default for Config {
             general: General::default(),
             appearance: Appearance::default(),
             eye_care: EyeCare::default(),
+            alt_drag: AltDrag::default(),
             clipboard: ClipboardCfg::default(),
             log: LogCfg::default(),
             interaction: Interaction::default(),
@@ -299,6 +302,29 @@ impl EyeCare {
     }
 }
 
+/// Alt 拖动窗口（AltSnap 那一套的最小集）。
+///
+/// * 按住 `Alt` + 左键拖动 = 移动光标下的窗口；
+/// * 按住 `Alt` + 双击 = 最大化 / 还原；
+/// * 按住 `Alt` + 滚轮上 = 最大化，滚轮下 = 最小化。
+///
+/// 默认**开着**：这个功能只在“按住 Alt 并动了鼠标”时才介入，不抢普通点击，
+/// 而且是用户明确要的东西；开关留在设置面板里（“通用 → 窗口拖动”）。
+///
+/// 修饰键固定是 Alt，不做可配置：这条需求的全部价值就是"和 AltSnap 一个手感"，
+/// 再多一个可选项只会多一种“为什么我按了没反应”的配置错误。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AltDrag {
+    pub enabled: bool,
+}
+
+impl Default for AltDrag {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 /// 日志落盘。写在文件里的一行应该让人**不用开着控制台**也能定位问题。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -378,6 +404,9 @@ impl Config {
         if self.eye_care != next.eye_care {
             out.push(EyeCare);
         }
+        if self.alt_drag != next.alt_drag {
+            out.push(AltDrag);
+        }
         if self.clipboard != next.clipboard {
             out.push(Clipboard);
         }
@@ -419,6 +448,8 @@ pub enum ChangeKind {
     Appearance,
     /// 护眼遮罩的开关与强度
     EyeCare,
+    /// Alt 拖动窗口的开关（装 / 卸低层鼠标钩子）
+    AltDrag,
     /// 剪贴板历史开关与容量
     Clipboard,
     /// 日志级别与落盘策略
@@ -443,6 +474,7 @@ impl ChangeKind {
             ChangeKind::Autostart => "autostart",
             ChangeKind::Appearance => "appearance",
             ChangeKind::EyeCare => "eye_care",
+            ChangeKind::AltDrag => "alt_drag",
             ChangeKind::Clipboard => "clipboard",
             ChangeKind::Log => "log",
             ChangeKind::Interaction => "interaction",
@@ -675,6 +707,31 @@ language = \"en-US\"
         assert_eq!(base.diff(&next), vec![ChangeKind::EyeCare]);
         next.eye_care.strength = 80;
         assert_eq!(base.diff(&next), vec![ChangeKind::EyeCare]);
+    }
+
+    #[test]
+    fn alt_drag_is_on_by_default_and_roundtrips() {
+        let cfg = Config::default();
+        assert!(cfg.alt_drag.enabled, "用户要的就是“装上就能用”");
+
+        let text = cfg.to_toml();
+        assert!(text.contains("[alt_drag]"), "got:\n{text}");
+        assert_eq!(
+            Config::from_toml(&text).expect("roundtrip").alt_drag,
+            cfg.alt_drag
+        );
+
+        // 老配置里没有 `[alt_drag]` 这一段：补全成默认值（开着），不是关掉。
+        let old = Config::from_toml("[general]\nlanguage = \"en-US\"\n").expect("parse");
+        assert_eq!(old.alt_drag, AltDrag::default());
+    }
+
+    #[test]
+    fn diff_reports_alt_drag() {
+        let base = Config::default();
+        let mut next = base.clone();
+        next.alt_drag.enabled = false;
+        assert_eq!(base.diff(&next), vec![ChangeKind::AltDrag]);
     }
 
     #[test]

@@ -161,6 +161,11 @@ settings-eye-care-hint = 整个屏幕加一层暖色，蓝色少了，长时间�
 settings-eye-care-strength = 过滤强度
 settings-eye-care-strength-hint = 越大越暖；开到最大约 55% 的暖色遮罩
 
+# ── 窗口拖动（AltSnap 那一套） ─────────────────
+settings-section-alt-drag = 窗口拖动
+settings-alt-drag = 按住 Alt 拖动窗口
+settings-alt-drag-hint = 按住 Alt 拖左键可移动光标下的窗口；双击最大化（再双击还原）；滚轮上滚最大化、下滚最小化
+
 # ── 剪贴板历史 ────────────────────────────────────────────
 settings-count = {$count} 条
 settings-section-clipboard = 剪贴板
