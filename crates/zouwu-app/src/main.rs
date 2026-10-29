@@ -14,7 +14,7 @@ use std::process::ExitCode;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn main() -> ExitCode {
-    // 日志由 `zouwu_platform::logging` 接管（stderr + 落盘 + 轮转 + panic hook）。
+    // 日志由 `zouwu_platform::logging` 接管（落盘 + 轮转 + panic hook）。
     //
     // 这里**不能**再装 env_logger：`log::set_logger` 只成功一次，先装 env_logger
     // 会让后面真装的文件日志静默失效——"日志文件一直是 0 字节"就是这么来的。

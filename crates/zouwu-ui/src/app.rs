@@ -248,6 +248,11 @@ struct App {
     next_clipboard: Instant,
     /// 窗口当前是否可见（隐藏 = 缩进托盘，进程仍在）。
     visible: bool,
+    /// 上一次子窗口（设置/历史/报告）关闭的时刻。
+    ///
+    /// 用户在子窗口按 Esc 关闭时，Win32 前台切换可能把正在按下的 Esc 键事件
+    /// 泄漏给刚拿到焦点的主窗口。500ms 内到达主窗口的 Esc 绝不能把小兽藏进托盘。
+    last_child_closed_at: Instant,
 
     perf_trace: bool,
     perf_frames: u32,
@@ -382,6 +387,7 @@ impl App {
             last_input_trace: Instant::now(),
             state_pending: false,
             state_saved_at: Instant::now(),
+            last_child_closed_at: Instant::now() - Duration::from_secs(10),
             perf_trace: std::env::var("ZOUWU_PERF").is_ok(),
             perf_frames: 0,
             perf_mark: Instant::now(),
@@ -417,16 +423,6 @@ impl App {
     /// 平台的原始窗口句柄（Windows 下是 HWND）。
     ///
     /// 托盘/显隐/置前这些都是**原生窗口概念**，所以在这里取一次句柄交给
-    /// `zouwu-platform`，UI 层不直接碰 win32。
-    /// 关子窗之前的固定动作：先把前台收回自己家。
-    ///
-    /// 见 `zouwu_platform::layer::activate` 的注释：隐藏/销毁持焦窗口时 USER32
-    /// 会同步决定下一个前台，候选可能是别的进程的窗口——那一次调用会把本线程
-    /// 阻塞在 USER 锁里，连带整个进程冻住（ADR-036）。
-    fn take_focus_home(&self) {
-        take_focus_home(self.hwnd());
-    }
-
     fn hwnd(&self) -> Option<isize> {
         let window = self.window.as_ref()?;
         let handle = window.window_handle().ok()?;
@@ -610,11 +606,8 @@ impl App {
         match SettingsWindow::new(event_loop, self.config.clone(), self.themes.clone(), skins) {
             Ok(panel) => {
                 self.settings = Some(panel);
-                // 小兽是置顶窗口，会飘在设置面板上面。面板打开期间暂时放开置顶，
-                // 让小兽留在面板下方——但仍然看得见，改主题/皮肤能立刻看到效果。
-                if let Some(hwnd) = self.hwnd() {
-                    zouwu_platform::layer::set_always_on_top(hwnd, false);
-                }
+                // 所有面板一视同仁：开面板**不动**小兽的 Z 序（ADR-039）。
+                // 小兽留在它该在的那一层，面板开着也照样能拖能点。
             }
             Err(err) => log::error!("cannot open settings panel: {err}"),
         }
@@ -625,7 +618,6 @@ impl App {
         crate::watchdog::enter(crate::watchdog::stage::SETTINGS_EVENT);
         let mut pending: Vec<(Config, Vec<ChangeKind>)> = Vec::new();
         let mut close = false;
-        let home = self.hwnd();
         {
             let Some(panel) = self.settings.as_mut() else {
                 return;
@@ -639,7 +631,6 @@ impl App {
                 }
             }
             if close {
-                take_focus_home(home);
                 crate::watchdog::enter(crate::watchdog::stage::CLOSE_WINDOW);
                 panel.close();
             }
@@ -651,10 +642,13 @@ impl App {
             self.save_config();
         }
         if close {
-            // 面板已经在上面收起来了，这里只恢复置顶状态（面板期间被临时放开了）。
-            if let Some(hwnd) = self.hwnd() {
-                zouwu_platform::layer::set_always_on_top(hwnd, self.config.window.always_on_top);
-            }
+            // 关闭按钮的按下/松开不属于小兽，先同步按键基线再恢复轮询。
+            self.buttons_down = (
+                zouwu_platform::layer::left_button_down(),
+                zouwu_platform::layer::right_button_down(),
+            );
+            self.next_poll = Instant::now();
+            self.last_child_closed_at = Instant::now();
             log::info!("settings panel closed");
         }
     }
@@ -818,11 +812,16 @@ impl App {
             }
         }
         if close {
-            self.take_focus_home();
             crate::watchdog::enter(crate::watchdog::stage::CLOSE_WINDOW);
             if let Some(window) = self.report.as_mut() {
                 window.close();
             }
+            self.last_child_closed_at = Instant::now();
+            self.buttons_down = (
+                zouwu_platform::layer::left_button_down(),
+                zouwu_platform::layer::right_button_down(),
+            );
+            self.next_poll = Instant::now();
             log::info!("qr: report window closed");
         }
     }
@@ -935,6 +934,11 @@ impl App {
             // 隐藏期间时间照样在走，dt 会很大：把帧节拍对齐到现在。
             self.last_frame = now;
             self.dirty = true;
+            self.buttons_down = (
+                zouwu_platform::layer::left_button_down(),
+                zouwu_platform::layer::right_button_down(),
+            );
+            self.next_poll = now;
             if let Some(hwnd) = self.hwnd() {
                 zouwu_platform::layer::set_visible(hwnd, true);
                 if self.config.general.bring_to_front {
@@ -1666,9 +1670,7 @@ impl App {
 
     /// 按自适应间隔轮询一次光标，并安排下一次轮询。
     fn poll_now(&mut self, now: Instant) {
-        // 设置面板打开时，小兽被压在面板下面，点不到它 —— 这时候还按 16ms
-        // 轮询就只是白白吃掉 1~4% CPU（面板开着的实测值）。降到后台频率。
-        let inside = self.settings.is_none() && self.poll_pointer(now);
+        let inside = self.poll_pointer(now);
         self.poll_clipboard(now);
         self.trace_input(now, inside);
         // 窗口内高频（不漏点击）、窗口外低频（省 CPU）
@@ -1809,11 +1811,16 @@ impl App {
             self.refresh_history_window();
         }
         if close {
-            self.take_focus_home();
             crate::watchdog::enter(crate::watchdog::stage::CLOSE_WINDOW);
             if let Some(window) = self.history_window.as_mut() {
                 window.close();
             }
+            self.last_child_closed_at = Instant::now();
+            self.buttons_down = (
+                zouwu_platform::layer::left_button_down(),
+                zouwu_platform::layer::right_button_down(),
+            );
+            self.next_poll = Instant::now();
         }
     }
 
@@ -1909,7 +1916,24 @@ impl App {
             }
         }
 
-        if !inside {
+        // 仅阻止穿透到被我们自己的面板盖住的小兽；拖动一旦开始则继续跟踪。
+        let covered_by_panel = inside
+            && (self.settings.is_some() || self.report.is_some() || self.history_window.is_some())
+            && zouwu_platform::layer::window_at(sx, sy).is_some_and(|hwnd| {
+                let id = WindowId::from(hwnd as u64);
+                self.settings
+                    .as_ref()
+                    .is_some_and(|p| p.is_visible() && p.id() == id)
+                    || self
+                        .report
+                        .as_ref()
+                        .is_some_and(|p| p.is_visible() && p.id() == id)
+                    || self
+                        .history_window
+                        .as_ref()
+                        .is_some_and(|p| p.is_visible() && p.id() == id)
+            });
+        if !inside || covered_by_panel {
             if self.cursor.is_some() {
                 log::debug!(
                     "cursor outside: screen {sx},{sy} origin {:?} size {w}x{h} scale {scale} local {:?}",
@@ -2115,22 +2139,6 @@ impl App {
 /// 单独抽出来是因为它同时被“启动”和“热重载”两条路径使用。
 /// 配置里的热键写错时**不能**让用户失去唤醒手段，所以回退到默认热键；
 /// 空串是合法的“我不要热键”，不注册也不抱怨。
-/// 把前台还给自己的主窗口。见 `App::take_focus_home`。
-///
-/// 写成独立函数是因为它在 `settings_event` 里要在 `&mut self.settings` 的
-/// 借用内部调用——那时拿不到 `&self`。
-fn take_focus_home(home: Option<isize>) {
-    let Some(hwnd) = home else {
-        return;
-    };
-    crate::watchdog::enter(crate::watchdog::stage::FOREGROUND);
-    if zouwu_platform::layer::activate(hwnd) {
-        log::info!("app: took the foreground back before closing a child window");
-    } else {
-        log::warn!("app: could not take the foreground back before closing a child window");
-    }
-}
-
 fn apply_hotkey_setting(
     slot: Slot,
     raw: &str,
@@ -2329,9 +2337,22 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state == ElementState::Pressed {
                     if let Key::Named(NamedKey::Escape) = event.logical_key {
-                        // 小工具的心智：Esc 是"收起来"，不是"杀掉我"。
-                        // 真的退出走托盘菜单（上面写着"退出"）。
-                        self.set_visible(false, now);
+                        // 子窗口刚关闭或仍处于打开状态时，Esc 不属于小兽本体。
+                        if now.duration_since(self.last_child_closed_at)
+                            < Duration::from_millis(500)
+                            || self.settings.as_ref().is_some_and(|p| p.is_visible())
+                            || self.report.as_ref().is_some_and(|p| p.is_visible())
+                            || self.history_window.as_ref().is_some_and(|p| p.is_visible())
+                        {
+                            return;
+                        }
+                        if self.expanded {
+                            self.set_expanded(false, now);
+                        } else {
+                            // 小工具的心智：Esc 是"收起来"，不是"杀掉我"。
+                            // 真的退出走托盘菜单（上面写着"退出"）。
+                            self.set_visible(false, now);
+                        }
                     }
                 }
             }
@@ -2531,6 +2552,211 @@ fn screen_label(i18n: &I18n, monitors: &[Rect], x: i32, y: i32) -> String {
     match index {
         Some(i) => i18n.t_args("qr.screen", &[("index", &(i + 1).to_string())]),
         None => String::new(),
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod settings_pointer_tests {
+    use super::*;
+    use winit::dpi::PhysicalSize;
+    use winit::platform::windows::EventLoopBuilderExtWindows;
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn SetWindowPos(
+            hwnd: isize,
+            after: isize,
+            x: i32,
+            y: i32,
+            width: i32,
+            height: i32,
+            flags: u32,
+        ) -> i32;
+        fn GetWindowLongW(hwnd: isize, index: i32) -> i32;
+    }
+
+    /// 窗口现在是不是 `WS_EX_TOPMOST`。桌面上有其他窗口时这是判定
+    /// “开面板有没有把小兽弄下来”最可靠的办法。
+    fn is_topmost(hwnd: isize) -> bool {
+        const GWL_EXSTYLE: i32 = -20;
+        const WS_EX_TOPMOST: i32 = 0x0000_0008;
+        unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST != 0 }
+    }
+    fn move_panel(hwnd: isize, x: i32, y: i32) {
+        const HWND_TOPMOST: isize = -1;
+        const SWP_NOSIZE: u32 = 0x0001;
+        const SWP_NOACTIVATE: u32 = 0x0010;
+        assert_ne!(
+            unsafe { SetWindowPos(hwnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE) },
+            0
+        );
+    }
+
+    /// 只改面板的 Z 序层级（置顶/取消置顶），位置尺寸不动。
+    fn panel_z(hwnd: isize, topmost: bool) {
+        const HWND_TOPMOST: isize = -1;
+        const HWND_NOTOPMOST: isize = -2;
+        const SWP_NOSIZE: u32 = 0x0001;
+        const SWP_NOMOVE: u32 = 0x0002;
+        const SWP_NOACTIVATE: u32 = 0x0010;
+        let after = if topmost {
+            HWND_TOPMOST
+        } else {
+            HWND_NOTOPMOST
+        };
+        assert_ne!(
+            unsafe {
+                SetWindowPos(
+                    hwnd,
+                    after,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
+                )
+            },
+            0
+        );
+    }
+
+    // 需要交互式 Windows 桌面，会短暂打开设置窗；普通测试不应打扰用户。
+    #[test]
+    #[ignore = "requires an interactive Windows desktop"]
+    fn pointer_polling_works_with_open_or_reused_panels() {
+        struct Test;
+        impl ApplicationHandler for Test {
+            fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+                let (x, y) = zouwu_platform::layer::cursor_position().expect("cursor position");
+                assert!(
+                    !zouwu_platform::layer::left_button_down(),
+                    "release mouse first"
+                );
+                let instance =
+                    InstanceSignal::acquire(&format!("settings-test-{}", std::process::id()))
+                        .unwrap()
+                        .unwrap();
+                let mut config = Config::default();
+                config.clipboard.enabled = false;
+                let theme = Theme::builtin("zouwu-warm").unwrap();
+                let mut app =
+                    App::new(config, theme.clone(), vec![theme], default_ring(), instance);
+                let window = event_loop
+                    .create_window(
+                        Window::default_attributes()
+                            .with_visible(false)
+                            .with_decorations(false)
+                            .with_inner_size(PhysicalSize::new(400, 400))
+                            .with_window_level(WindowLevel::AlwaysOnTop)
+                            .with_position(PhysicalPosition::new(x - 200, y - 200)),
+                    )
+                    .unwrap();
+                app.window = Some(Arc::new(window));
+                app.visible = true;
+
+                let now = Instant::now();
+                app.poll_now(now);
+                assert_eq!(app.next_poll, now + CURSOR_POLL_INSIDE);
+                for _ in 0..2 {
+                    for kind in 0..3 {
+                        match kind {
+                            0 => app.open_settings(event_loop, now),
+                            1 => app.open_history(event_loop),
+                            _ => app.open_report(event_loop, Report::default()),
+                        }
+                        let id = match kind {
+                            0 => app.settings.as_ref().unwrap().id(),
+                            1 => app.history_window.as_ref().unwrap().id(),
+                            _ => app.report.as_ref().unwrap().id(),
+                        };
+                        let hwnd = u64::from(id) as isize;
+                        // ADR-039：面板打开/复用不得改变小兽的置顶层。
+                        // （不能用 `window_at` 验层级：分层窗口未渲染时对命中测试
+                        // 是全透明的，`WindowFromPoint` 会直接跳过它。）
+                        {
+                            panel_z(hwnd, false);
+                            if let Some(pet) =
+                                app.window.as_ref().map(|w| u64::from(w.id()) as isize)
+                            {
+                                assert!(
+                                    is_topmost(pet),
+                                    "opening a panel must not drop the pet from topmost (kind={kind})"
+                                );
+                            }
+                        }
+                        for covered in [false, true] {
+                            // 这个测试跑在真人桌面上，鼠标随时会动：每次都把小兽
+                            // 摆到光标下，判定就不再依赖进入测试那一刻的鼠标位置。
+                            let (x, y) = zouwu_platform::layer::cursor_position().unwrap();
+                            app.window
+                                .as_ref()
+                                .unwrap()
+                                .set_outer_position(PhysicalPosition::new(x - 200, y - 200));
+                            let offset = if covered { -100 } else { 100 };
+                            move_panel(hwnd, x + offset, y + offset);
+                            assert_eq!(
+                                zouwu_platform::layer::window_at(x, y) == Some(hwnd),
+                                covered,
+                                "test requires panel to be the topmost window at the cursor"
+                            );
+                            // 有无面板遮挡都要继续处理已经开始的拖动和释放。
+                            app.drag = Some(Drag {
+                                moved: true,
+                                ..Drag::begin((x, y), (x - 200, y - 200))
+                            });
+                            app.poll_now(Instant::now());
+                            assert!(
+                                app.drag.is_none(),
+                                "drag release must be processed with panel open"
+                            );
+                            assert!(app.state_pending, "dragged position must be saved");
+                            app.state_pending = false;
+
+                            let poll_at = Instant::now();
+                            app.poll_now(poll_at);
+                            if covered {
+                                assert!(
+                                    app.cursor.is_none(),
+                                    "panel must block pointer input behind it"
+                                );
+                                assert_eq!(app.next_poll, poll_at + CURSOR_POLL_OUTSIDE);
+                            } else {
+                                assert!(
+                                    app.cursor.is_some(),
+                                    "uncovered pet must remain interactive: kind={kind}, cycle cursor={:?}, widget origin={:?}, size={:?}, top window={:?}",
+                                    zouwu_platform::layer::cursor_position(),
+                                    app.window.as_ref().unwrap().outer_position(),
+                                    app.window.as_ref().unwrap().inner_size(),
+                                    zouwu_platform::layer::window_at(x, y),
+                                );
+                                assert_eq!(app.next_poll, poll_at + CURSOR_POLL_INSIDE);
+                            }
+                        }
+                        app.window_event(event_loop, id, WindowEvent::CloseRequested);
+                        assert!(app.visible, "pet widget must remain visible");
+                        {
+                            let (x, y) = zouwu_platform::layer::cursor_position().unwrap();
+                            app.window
+                                .as_ref()
+                                .unwrap()
+                                .set_outer_position(PhysicalPosition::new(x - 200, y - 200));
+                        }
+                        app.poll_now(Instant::now());
+                        assert!(
+                            app.cursor.is_some(),
+                            "polling must continue after panel closes"
+                        );
+                    }
+                }
+                event_loop.exit();
+            }
+
+            fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+        }
+
+        let mut builder = EventLoop::builder();
+        builder.with_any_thread(true);
+        builder.build().unwrap().run_app(&mut Test).unwrap();
     }
 }
 

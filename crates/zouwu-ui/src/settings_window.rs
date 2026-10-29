@@ -133,6 +133,10 @@ impl SettingsWindow {
         self.window.id()
     }
 
+    pub fn is_visible(&self) -> bool {
+        self.window.is_visible().unwrap_or(true)
+    }
+
     pub fn focus(&self) {
         self.window.focus_window();
         self.request_redraw();

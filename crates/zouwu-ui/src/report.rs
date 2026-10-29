@@ -282,6 +282,10 @@ impl ReportWindow {
         self.window.request_redraw();
     }
 
+    pub fn is_visible(&self) -> bool {
+        self.window.is_visible().unwrap_or(true)
+    }
+
     pub fn close(&self) {
         crate::frame::life("report", "hidden", &self.window);
         self.window.set_visible(false);

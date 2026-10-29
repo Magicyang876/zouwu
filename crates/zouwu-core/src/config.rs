@@ -259,7 +259,7 @@ pub struct LogCfg {
     /// `off` / `error` / `warn` / `info` / `debug` / `trace`。
     /// 环境变量 `RUST_LOG` 优先（临时排查时不想改用户的持久配置）。
     pub level: String,
-    /// 是否写文件（关掉后只剩 stderr，从资源管理器启动时等于什么也没留下）。
+    /// 是否写文件（关掉后不保留普通日志）。
     pub to_file: bool,
     /// 单个日志文件的上限（KB），超过就在下次启动时轮转。
     pub max_size_kb: u64,

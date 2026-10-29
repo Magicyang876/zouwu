@@ -2,7 +2,7 @@
 //!
 //! 为什么不用 `env_logger`：这个程序**没有控制台**。用户从资源管理器双击起来，
 //! stderr 直接进了黑洞；出问题时唯一能拿到的东西是磁盘上的文件。所以日志必须
-//! 同时写文件，并且这份文件要能自己长大而不撑爆磁盘（轮转）。
+//! 写文件，并且这份文件要能自己长大而不撑爆磁盘（轮转）。
 //!
 //! 设计取舍：
 //! - **自己实现 `log::Log`**（约 200 行）而不是套一层 env_logger：需要运行期
@@ -16,10 +16,6 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
-
-/// 只抱怨一次，避免日志故障本身刷屏。
-static WRITE_FAILED: AtomicBool = AtomicBool::new(false);
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, RwLock};
 
@@ -32,7 +28,7 @@ const FILE_NAME: &str = "zouwu.log";
 /// 进程内唯一的日志器。
 static LOGGER: OnceLock<FileLogger> = OnceLock::new();
 
-/// 文件写入状态。`None` = 关掉了文件日志（配置里 `to_file = false`）。
+/// 文件写入状态。`None` = 文件日志关闭或打开失败。
 struct Sink {
     file: Option<File>,
     max_bytes: u64,
@@ -103,27 +99,11 @@ impl Log for FileLogger {
             record.args()
         );
 
-        // stderr：开发时（有控制台）能立刻看到；从托盘启动时写失败也无所谓。
-        let _ = std::io::stderr().write_all(line.as_bytes());
-
-        match self.sink.lock() {
-            Ok(mut sink) => {
-                if let Some(file) = sink.file.as_mut() {
-                    // 单次失败就够吵一次了：静默吞掉写入错误会让"日志没落盘"
-                    // 变成一个极难查的问题（我们就这么查过一次）。
-                    if let Err(err) = file.write_all(line.as_bytes()) {
-                        if !WRITE_FAILED.swap(true, Ordering::Relaxed) {
-                            eprintln!("zouwu: log write failed: {err}");
-                        }
-                    }
-                    // 常驻进程可能被直接杀掉，行缓冲比攒在内存里安全得多。
-                    let _ = file.flush();
-                }
-            }
-            Err(_) => {
-                if !WRITE_FAILED.swap(true, Ordering::Relaxed) {
-                    eprintln!("zouwu: log sink lock poisoned");
-                }
+        // stderr 可能是无人读取的管道；同步写会把 UI 线程永远堵住。
+        if let Ok(mut sink) = self.sink.lock() {
+            if let Some(file) = sink.file.as_mut() {
+                let _ = file.write_all(line.as_bytes());
+                let _ = file.flush();
             }
         }
     }
@@ -219,19 +199,15 @@ pub fn apply(cfg: &LogCfg) {
     let keep = cfg.keep_files.min(32);
     // 注意：**不能在持有 sink 锁时打日志**。`log::info!` 会再次去锁同一个
     // Mutex，`std::sync::Mutex` 不可重入，结果是进程静默死锁（真踩过）。
-    let mut just_disabled = false;
     if let Ok(mut sink) = logger.sink.lock() {
         let reopen = sink.max_bytes != max_bytes || sink.keep_files != keep;
         sink.max_bytes = max_bytes;
         sink.keep_files = keep;
         if !cfg.to_file {
-            just_disabled = sink.file.take().is_some();
+            sink.file.take();
         } else if sink.file.is_none() || reopen {
             sink.file = open_sink(max_bytes, keep);
         }
-    }
-    if just_disabled {
-        log::info!("file logging disabled by config");
     }
 
     log::info!(
@@ -279,8 +255,6 @@ impl Filter {
                 Some((target, level)) => {
                     if let Some(level) = parse_level(level) {
                         seen.insert(target.trim().to_string(), level);
-                    } else {
-                        eprintln!("zouwu: ignoring RUST_LOG part `{part}` (unknown level)");
                     }
                 }
                 None => {
@@ -313,19 +287,14 @@ fn parse_level(text: &str) -> Option<LevelFilter> {
 /// 打开（必要时先轮转）日志文件。
 fn open_sink(max_bytes: u64, keep_files: u32) -> Option<File> {
     let dir = log_dir();
-    if let Err(err) = fs::create_dir_all(&dir) {
-        eprintln!("zouwu: cannot create log dir {}: {err}", dir.display());
-        return None;
-    }
+    fs::create_dir_all(&dir).ok()?;
     let path = dir.join(FILE_NAME);
     rotate_if_needed(&path, max_bytes, keep_files);
-    match OpenOptions::new().create(true).append(true).open(&path) {
-        Ok(file) => Some(file),
-        Err(err) => {
-            eprintln!("zouwu: cannot open log file {}: {err}", path.display());
-            None
-        }
-    }
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()
 }
 
 /// 超过上限就从最老的一份开始腾位置：`a.log` → `a.1.log`，`a.3.log` 删除。
@@ -449,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_levels_are_reported_not_fatal() {
+    fn unknown_levels_are_not_fatal() {
         let f = Filter::parse("info,verbose");
         assert_eq!(f.global, LevelFilter::Info);
         // `verbose` 不是级别 → 当成模块名开 debug
@@ -483,6 +452,62 @@ mod tests {
         rotate_if_needed(&path, 4, 2);
         assert!(!dir.join("zouwu.3.log").exists());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn logging_does_not_block_on_unread_stderr() {
+        const CHILD: &str = "ZOUWU_TEST_UNREAD_STDERR";
+        if let Some(path) = std::env::var_os(CHILD) {
+            let logger = FileLogger {
+                filter: RwLock::new(Filter::parse("info")),
+                sink: Mutex::new(Sink {
+                    file: Some(File::create(path).unwrap()),
+                    max_bytes: 0,
+                    keep_files: 0,
+                }),
+            };
+            let message = "x".repeat(1024);
+            for _ in 0..1024 {
+                logger.log(
+                    &Record::builder()
+                        .level(log::Level::Info)
+                        .args(format_args!("{message}"))
+                        .build(),
+                );
+            }
+            return;
+        }
+
+        let path = std::env::temp_dir().join(format!(
+            "zouwu-test-unread-stderr-{}.log",
+            std::process::id()
+        ));
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "logging::tests::logging_does_not_block_on_unread_stderr",
+                "--nocapture",
+            ])
+            .env(CHILD, &path)
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = fs::remove_file(&path);
+                panic!("logging blocked on unread stderr");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(fs::metadata(&path).unwrap().len() >= 1024 * 1024);
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

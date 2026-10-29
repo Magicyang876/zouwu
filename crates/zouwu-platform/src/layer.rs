@@ -95,6 +95,8 @@ extern "system" {
     fn GetDC(hwnd: Hwnd) -> Hdc;
     fn ReleaseDC(hwnd: Hwnd, hdc: Hdc) -> i32;
     fn GetCursorPos(point: *mut Point) -> Bool;
+    fn WindowFromPoint(point: Point) -> Hwnd;
+    fn GetAncestor(hwnd: Hwnd, flags: u32) -> Hwnd;
     fn GetAsyncKeyState(vkey: i32) -> i16;
     fn GetWindowLongPtrW(hwnd: Hwnd, index: i32) -> isize;
     fn SetWindowLongPtrW(hwnd: Hwnd, index: i32, value: isize) -> isize;
@@ -257,6 +259,17 @@ pub fn hide_from_taskbar(hwnd: isize) {
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, wanted);
         }
     }
+}
+
+/// 返回屏幕坐标处最上层命中窗口的顶层窗口句柄。
+pub fn window_at(x: i32, y: i32) -> Option<isize> {
+    const GA_ROOT: u32 = 2;
+    let hwnd = unsafe { WindowFromPoint(Point { x, y }) };
+    if hwnd.is_null() {
+        return None;
+    }
+    let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
+    (!root.is_null()).then_some(root as isize)
 }
 
 /// 显示 / 隐藏（"缩进托盘"就是隐藏窗口，不是退出进程）。

@@ -156,7 +156,7 @@
 | ADR-011 | **i18n：Fluent 内嵌资源**，BCP-47 标签，键名 `.` → `-` 归一 |
 | ADR-012 | **配置热重载：借输入轮询节拍做 metadata 轮询**，`ChangeKind` 分类热应用，坏配置不回退 |
 | ADR-013 | **拖动：屏幕物理坐标 + 4px 阈值**（判定做成纯函数，只靠单测验证） |
-| ADR-014 | **日志落盘：自研 `log::Log`**（双写 stderr + 文件，按大小轮转）；`env_logger` 会抢注，必须首行 init |
+| ADR-014 | **日志落盘：自研 `log::Log`**（按大小轮转）；`env_logger` 会抢注，必须首行 init。stderr 双写已取消，见 ADR-037 |
 | ADR-015 | **设置面板 = 第二个真窗口 + `softbuffer`**（分层窗口拿不到焦点/命中）；无"保存"按钮，改动即时落盘 |
 | ADR-016 | **文本用系统 GDI，不引字体库**（`fontdue` 解析 CJK 一个字面 175MB → 面板 RSS 879MB → 23MB） |
 | ADR-017 | **主题：TOML 增量覆盖**（`base` + `palette` 14 个令牌）；拼错字段报 `palette.<field>` |
