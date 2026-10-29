@@ -184,7 +184,6 @@ history-footer-empty = Nothing yet; copy something and it shows up here
 history-empty = Nothing yet
 
 # ── Bubbles (the ring's feature list) ─────────────────────
-settings-tab-bubbles = Bubbles
 settings-section-bubbles = Order & hotkeys
 settings-bubbles-note = Earlier entries unfold first; a disabled bubble leaves the ring, and the rest spread evenly. Each bubble can have its own hotkey — leave it empty for none.
 settings-bubbles-name = Name

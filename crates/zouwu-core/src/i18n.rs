@@ -198,6 +198,31 @@ mod tests {
         assert_eq!(zh.language(), "zh-CN");
     }
 
+    /// 同一个 key 在一个文件里写两遍时，Fluent 会**拒绝整份资源**
+    /// （日志里只有一行 `Attempt to override an existing message`），
+    /// 结果是那一页所有文案一起退回 key 本身 —— 曾经就这么漏过一次，
+    /// 所以直接拿内嵌的原文查重。
+    #[test]
+    fn neither_locale_declares_a_key_twice() {
+        for (lang, src) in [("zh-CN", ZH_CN), ("en-US", EN_US)] {
+            let mut seen = std::collections::HashSet::new();
+            for line in src.lines() {
+                let Some((key, _)) = line.split_once('=') else {
+                    continue;
+                };
+                let key = key.trim();
+                if key.is_empty() || key.starts_with('#') || key.starts_with('-') {
+                    continue;
+                }
+                if key.contains(' ') {
+                    // 多行值的续行（`    more text`）不是 key，跳过。
+                    continue;
+                }
+                assert!(seen.insert(key), "{lang}: key `{key}` 出现了两次");
+            }
+        }
+    }
+
     #[test]
     fn every_builtin_action_has_a_label() {
         for lang in LANGUAGES {

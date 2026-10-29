@@ -185,7 +185,6 @@ history-footer-empty = 还没有记录，复制点什么就会出现在这里
 history-empty = 还没有记录
 
 # ── 气泡球（环上的功能清单） ──────────────────────────────
-settings-tab-bubbles = 气泡球
 settings-section-bubbles = 顺序与热键
 settings-bubbles-note = 排在前面先展开；关掉的球不上环，环上按启用数量自动均分。每个球可以单独绑热键，留空就是没有。
 settings-bubbles-name = 名称
