@@ -4323,6 +4323,39 @@ mod tests {
         assert_eq!(m.editing.as_ref().unwrap().offset, 0, "往左滚到底就是 0");
     }
 
+    /// 真的走一遍系统剪贴板（所以默认 `#[ignore]`，且会把用户剪贴板原样写回）。
+    ///
+    /// 单元测试不碰剪贴板：并行跑时两个 `OpenClipboard()` 会互相抢，还可能是别的进程占着。
+    /// 但"我们写的 `set_text` 和 `get_text` 能不能对上"必须有人验，手工验一次就够 ——
+    /// 要跑就 `cargo test -p zouwu-ui --lib the_clipboard_bridge_round_trips -- --ignored`。
+    #[test]
+    #[ignore = "会读写系统剪贴板，需要交互式桌面"]
+    fn the_clipboard_bridge_round_trips() {
+        let saved = host_clipboard_get();
+        let text = "C:\\work\\tools\\run.exe --flag";
+        if !host_clipboard_set(text) {
+            // 剪贴板被别的程序长期占着（或远程会话没重定向剪贴板）时
+            // `OpenClipboard` 会一直 `ACCESS_DENIED`。别把“环境没剪贴板”改成红测试，
+            // 但也别假装通过 —— 用 eprintln 说清楚跳过。
+            eprintln!("clipboard unavailable; skipping the bridge check");
+            return;
+        }
+        assert_eq!(
+            host_clipboard_get().as_deref(),
+            Some(text),
+            "读回来的不一样"
+        );
+
+        // 再走一遍窗口层用的入口：Ctrl+V = `paste_clipboard()`。
+        let mut m = editing_label("");
+        assert!(paste_clipboard(&mut m), "空框里粘不进来");
+        assert_eq!(buffer_and_cursor(&m).0, text);
+
+        if let Some(saved) = saved {
+            host_clipboard_set(&saved);
+        }
+    }
+
     #[test]
     fn the_scrollbar_is_actually_painted() {
         // 几何对不代表画出来了（ADR-043 就抓过“命中对了但没画”）。这里直接渲染看像素：
