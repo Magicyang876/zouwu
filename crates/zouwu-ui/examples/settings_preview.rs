@@ -106,6 +106,39 @@ fn main() {
         1.0,
     );
 
+    // 鼠标拖选：名字整段被选中（选区底色 + 只有一个光标）。
+    let mut sel = Config::default();
+    let mut extra = zouwu_core::config::RingItem::custom("custom.1");
+    extra.label = "打开记事本".to_string();
+    extra.command = "notepad.exe".to_string();
+    sel.ring.items.push(extra);
+    let mut m4 = Model::new(
+        sel,
+        Vec::new(),
+        Vec::new(),
+        Paths {
+            config: String::new(),
+            log: String::new(),
+        },
+    );
+    m4.set_tab(Tab::Bubbles);
+    settings::begin_edit(&mut m4, settings::EditTarget::ItemLabel(2));
+    if let Some(editing) = m4.editing.as_mut() {
+        // 模拟“从行首拖到行尾”：锚点在 0、光标在末尾。
+        editing.anchor = 0;
+        editing.cursor = editing.buffer.len();
+    }
+    shoot("settings-bubbles-selected.png", 760.0, 600.0, &mut m4, 1.0);
+    // 同一状态在 125% 缩放下再拍一张：选区/光标靠真实文字度量算 x，
+    // 忘了乘 DPI 就会出现“在 100% 下对、在 125% 下偏半格”。
+    shoot(
+        "settings-bubbles-selected-dpi.png",
+        760.0,
+        600.0,
+        &mut m4,
+        1.25,
+    );
+
     // 一颗球都没有时的空态 + 漏出的描边不该出现。
     let mut empty = Config::default();
     empty.ring.items.clear();

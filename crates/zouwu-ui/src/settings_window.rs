@@ -48,6 +48,10 @@ pub struct SettingsWindow {
     frame_dark: bool,
     /// 输入法是否已开（避免每次都打一次 `set_ime_allowed`）。
     ime_on: bool,
+    /// 输入框里正按着左键拖选文本。
+    ///
+    /// 鼠标移出框外也要继续选（和系统输入框一样），所以不能只看“落在行里”。
+    drag_text: bool,
 }
 
 impl SettingsWindow {
@@ -99,6 +103,7 @@ impl SettingsWindow {
             frames: 0,
             frame_dark: false,
             ime_on: false,
+            drag_text: false,
         };
         this.rebuild_layout();
         this.request_redraw();
@@ -280,6 +285,21 @@ impl SettingsWindow {
                 let scale = self.window.scale_factor() as f32;
                 let scale = if scale > 0.01 { scale } else { 1.0 };
                 self.cursor = Point::new(position.x as f32 / scale, position.y as f32 / scale);
+                // 正在拖选：鼠标到哪，选区就到哪（不更新 hover，不然路过别的行会闪）。
+                if self.drag_text {
+                    let inner = self.text_inner_of_editing();
+                    if let Some(inner) = inner {
+                        settings::set_caret_from_x(
+                            &mut self.model,
+                            inner,
+                            self.cursor.x,
+                            true,
+                            scale,
+                        );
+                        self.request_redraw();
+                    }
+                    return Vec::new();
+                }
                 let hover = self
                     .layout
                     .as_ref()
@@ -339,6 +359,15 @@ impl SettingsWindow {
                 Vec::new()
             }
             WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
+                // 松手就不再拖选（选区会一直留着，直到下一次点击或按键）。
+                self.drag_text = false;
+                Vec::new()
+            }
+            WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
@@ -366,13 +395,74 @@ impl SettingsWindow {
         }
     }
 
+    /// 正在编辑的那个输入框的内框（模型里存的只是“哪个字段”，矩形要去布局里找）。
+    fn text_inner_of_editing(&self) -> Option<crate::widget::Rect> {
+        let target = self.model.editing.as_ref()?.target;
+        let layout = self.layout.as_ref()?;
+        layout.rows.iter().find_map(|(row, rl)| match &row.control {
+            settings::Control::Text { target: t, .. } if *t == target => {
+                Some(settings::text_inner(rl.hit))
+            }
+            _ => None,
+        })
+    }
+
+    /// 点在输入框上：把光标落到鼠标位置，并准备好拖选。
+    ///
+    /// “点同一个输入框”不能先 `commit_edit`：那会把编辑状态收掉、光标回到文末，
+    /// 于是“点中间改一个字”变成了“点了就把光标跳到最后”。
+    /// 从名字框直接点到命令框则是**提交名字 + 接着编辑命令**，不用点两次。
+    fn click_into_text(&mut self, row: usize, target: settings::EditTarget) -> Vec<Outcome> {
+        let Some(inner) = self
+            .layout
+            .as_ref()
+            .and_then(|l| l.rows.get(row))
+            .map(|(_, rl)| settings::text_inner(rl.hit))
+        else {
+            return Vec::new();
+        };
+        let scale = self.window.scale_factor() as f32;
+        let scale = if scale > 0.01 { scale } else { 1.0 };
+        let same = self
+            .model
+            .editing
+            .as_ref()
+            .is_some_and(|e| e.target == target);
+        let mut outcome = Vec::new();
+        if !same {
+            // 先把上一个框的字写回（用户点过来 = 上一个框结束了）。
+            if let Some(kinds) = settings::commit_edit(&mut self.model) {
+                self.set_ime(false);
+                outcome = self.after_change(kinds);
+            }
+            settings::begin_edit(&mut self.model, target);
+        }
+        settings::set_caret_from_x(&mut self.model, inner, self.cursor.x, false, scale);
+        self.model.focus = Some(row);
+        self.drag_text = true;
+        self.set_ime(true);
+        self.request_redraw();
+        outcome
+    }
+
     fn click(&mut self) -> Vec<Outcome> {
+        // 每次新的按下都算“重新开始”：上一次若在窗口外松手，收不到 Released，
+        // 残留的 drag_text 会让接下来的鼠标移动莫名续选。
+        self.drag_text = false;
         let Some(layout) = &self.layout else {
             return Vec::new();
         };
         let p = self.cursor;
         let hit = settings::hit(layout, p);
-        // 先收掉正在编辑的文本：点别处 = 这次输入结束。
+        // 先处理“点进输入框”：它不能走下面那个“先提交再处理”的岔。
+        if let Some(Hit::Press(i)) = hit {
+            if let Some((row, _)) = layout.rows.get(i) {
+                if let settings::Control::Text { target, .. } = &row.control {
+                    return self.click_into_text(i, *target);
+                }
+            }
+        }
+        // 点别处 = 这次输入结束。
         if let Some(kinds) = settings::commit_edit(&mut self.model) {
             self.set_ime(false);
             return self.after_change(kinds);
@@ -487,16 +577,34 @@ impl SettingsWindow {
 
         // ── 文本编辑模式：只认编辑用的那几个键 ──
         if self.model.editing.is_some() {
-            use settings::EditKey;
+            use settings::{EditKey, EditMotion};
+            // 方向键 / Home / End：Shift 拉选区，Ctrl+A 全选，其余字符自己拼。
+            let motion = match event.logical_key {
+                Key::Named(NamedKey::ArrowLeft) => Some(EditMotion::Left),
+                Key::Named(NamedKey::ArrowRight) => Some(EditMotion::Right),
+                Key::Named(NamedKey::Home) => Some(EditMotion::Home),
+                Key::Named(NamedKey::End) => Some(EditMotion::End),
+                _ => None,
+            };
+            if let Some(motion) = motion {
+                settings::edit_move(&mut self.model, motion, self.modifiers.shift_key());
+                self.request_redraw();
+                return Vec::new();
+            }
+            if self.modifiers.control_key() {
+                if let Key::Character(ch) = &event.logical_key {
+                    if ch.as_str().eq_ignore_ascii_case("a") {
+                        settings::select_all(&mut self.model);
+                        self.request_redraw();
+                        return Vec::new();
+                    }
+                }
+            }
             let edit_key = match event.logical_key {
                 Key::Named(NamedKey::Escape) => Some(EditKey::Cancel),
                 Key::Named(NamedKey::Enter) => Some(EditKey::Commit),
                 Key::Named(NamedKey::Backspace) => Some(EditKey::Backspace),
                 Key::Named(NamedKey::Delete) => Some(EditKey::Delete),
-                Key::Named(NamedKey::ArrowLeft) => Some(EditKey::Left),
-                Key::Named(NamedKey::ArrowRight) => Some(EditKey::Right),
-                Key::Named(NamedKey::Home) => Some(EditKey::Home),
-                Key::Named(NamedKey::End) => Some(EditKey::End),
                 _ => None,
             };
             if let Some(edit_key) = edit_key {
