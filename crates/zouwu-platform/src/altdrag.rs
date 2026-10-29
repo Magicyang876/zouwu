@@ -13,6 +13,18 @@
 //! 哪儿了"）。所以这里改成自己算：记下按下时的光标和窗口原点，之后每个
 //! `WM_MOUSEMOVE` 用 `SetWindowPos` 挪一次。
 //!
+//! ## 歪打正着的坑：绝不能吞掉 `WM_MOUSEMOVE`
+//!
+//! 第一版把拖动期间的移动事件吞掉了（想着“别让目标程序看到我在拖”），结果
+//! **光标自己也停了**：低层钩子返回非零时系统不提交这次移动，`pt` 一直停在
+//! 按下时那一点（真机 trace 里只剩 ±8px 抖动），于是 `pos - from ≈ 0`，窗口
+//! 一步都挪不动——表现就是“按住 Alt 拖，有反应但拖不动”。
+//!
+//! 现在的口径：**移动事件全部放行**（光标照常走，`pt` 才是真位移），改吞
+//! 按下/抬起——目标程序看不到那一下按下，自然不会自己去拖选或进入移动循环。
+//! 代价是 `Alt+单击` 也不再传给目标程序；`Alt+拖动` 开始时会主动
+//! `SetForegroundWindow`，把“拖一下顺便置前”补回来。
+//!
 //! ## 为什么钩子跑在独立线程
 //!
 //! `WH_MOUSE_LL` 的回调是**同步**的：回调不返回，鼠标就卡着。ADR-037 的教训
@@ -173,6 +185,7 @@ extern "system" {
     fn ShowWindow(hwnd: Hwnd, cmd: i32) -> Bool;
     fn GetSystemMetrics(index: i32) -> i32;
     fn GetDoubleClickTime() -> u32;
+    fn SetForegroundWindow(hwnd: Hwnd) -> Bool;
 }
 
 // ── 手势判定（纯逻辑，可测） ─────────────────────────────
@@ -270,6 +283,12 @@ impl Tracker {
         self.dragging
     }
 
+    /// 按下时那一刻的光标位置。拖动的基准点要用它，否则前 `SM_CXDRAG` 个像素
+    /// 会被白白吃掉，窗口从此比光标“慢半拍”。
+    pub fn press_pos(&self) -> Option<(i32, i32)> {
+        self.start
+    }
+
     /// 丢掉所有状态（Alt 松开、切换目标时用）。
     pub fn clear(&mut self) {
         self.start = None;
@@ -312,6 +331,9 @@ struct HookState {
     drag: Option<Drag>,
     /// 这一次抬起要吞掉（拖完的那一下不该再被目标程序当成点击）。
     swallow_up: bool,
+    /// 左键是不是还按着。用我们**自己收到的消息**记，不查 `GetAsyncKeyState`：
+    /// 后者的状态更新有先后顺序，注入事件下更是直接读到旧的（拖动会被当场掐断）。
+    lbtn: bool,
     last_wheel: Option<Instant>,
 }
 
@@ -365,19 +387,37 @@ fn target() -> Option<Hwnd> {
         }
         let hit = WindowFromPoint(pt);
         if hit.is_null() {
+            trace("  target: 光标下没有窗口");
             return None;
         }
         let root = GetAncestor(hit, GA_ROOT);
         if root.is_null() || IsWindowVisible(root) == 0 || IsIconic(root) != 0 {
+            trace(&format!(
+                "  target: 跳过 root={root:?} visible={} iconic={}",
+                IsWindowVisible(root),
+                IsIconic(root)
+            ));
             return None;
         }
         // 自己的窗口（挂件、面板、护眼遮罩）一概不碰：
         // 挂件自己的拖动走的是 GetCursorPos 轮询，抢过来只会互相打架。
         let mut pid = 0u32;
         GetWindowThreadProcessId(root, &mut pid);
-        if pid == GetCurrentProcessId() || is_shell(root) {
+        if pid == GetCurrentProcessId() {
+            trace(&format!("  target: 跳过自己的窗口 root={root:?}"));
             return None;
         }
+        if is_shell(root) {
+            trace(&format!(
+                "  target: 跳过桌面壳窗口 root={root:?} class={}",
+                class_name(root)
+            ));
+            return None;
+        }
+        trace(&format!(
+            "  target: root={root:?} pid={pid} class={}",
+            class_name(root)
+        ));
         Some(root)
     }
 }
@@ -411,7 +451,6 @@ fn resize_action(hwnd: Hwnd, what: Wheel) {
 /// 机器上是"用户同时在动鼠标"，看到的事件流根本不可信。
 struct Env<'a> {
     alt: bool,
-    lbtn: bool,
     find: &'a dyn Fn() -> Option<Hwnd>,
 }
 
@@ -420,7 +459,6 @@ fn handle(msg: u32, data: &Msllhookstruct, now: Instant) -> bool {
     let pos = (data.pt.x, data.pt.y);
     let env = Env {
         alt: key_down(VK_MENU),
-        lbtn: key_down(VK_LBUTTON),
         find: &target,
     };
     if std::env::var_os("ZOUWU_ALTDRAG_TRACE").is_some() {
@@ -430,9 +468,8 @@ fn handle(msg: u32, data: &Msllhookstruct, now: Instant) -> bool {
             None
         };
         trace(&format!(
-            "msg={msg:#06x} pos={pos:?} alt={} lbtn={} data={:#x} target={hit:?} injected={}",
+            "msg={msg:#06x} pos={pos:?} alt={} data={:#x} target={hit:?} injected={}",
             env.alt,
-            env.lbtn,
             data.mouse_data,
             data.flags & LLMHF_INJECTED != 0
         ));
@@ -446,6 +483,11 @@ fn handle_event(msg: u32, pos: (i32, i32), mouse_data: u32, now: Instant, env: &
 
     match msg {
         WM_LBUTTONDOWN => {
+            STATE.with(|cell| {
+                if let Ok(mut st) = cell.try_borrow_mut() {
+                    st.lbtn = true;
+                }
+            });
             if !alt {
                 return false;
             }
@@ -457,10 +499,14 @@ fn handle_event(msg: u32, pos: (i32, i32), mouse_data: u32, now: Instant, env: &
                 Ok(mut st) => {
                     st.pending = Some(hwnd as isize);
                     st.drag = None;
+                    // 这一下按下我们吞了，抬起也要一起吞，不然目标程序会收到
+                    // 一个没有按下的“抬起”。
+                    st.swallow_up = true;
                     st.tracker.down(now, pos, dbl)
                 }
                 Err(_) => Press::Click,
             });
+            trace(&format!("  down: alt={alt} hwnd={hwnd:?} press={press:?}"));
             match press {
                 Press::Double => {
                     toggle_maximize(hwnd);
@@ -475,9 +521,9 @@ fn handle_event(msg: u32, pos: (i32, i32), mouse_data: u32, now: Instant, env: &
                     true
                 }
                 Press::Click => {
-                    // 一下不吞：普通 Alt+单击在不少程序里有自己的含义
-                    // （取色、加选之类），我们只借用"按住时还拖了"这个动作。
-                    false
+                    // 按下必须吞掉：目标程序看不到按下，之后的移动（我们放行）
+                    // 就只是悬停；否则它会一边自己做框选/拖动，一边看我们挪窗口。
+                    true
                 }
             }
         }
@@ -488,14 +534,23 @@ fn handle_event(msg: u32, pos: (i32, i32), mouse_data: u32, now: Instant, env: &
                     return false;
                 };
                 if st.drag.is_some() {
-                    if !alt || !env.lbtn {
+                    if !alt {
+                        trace("  drag end: Alt 松开了");
+                        st.drag = None;
+                        st.tracker.clear();
+                        return false;
+                    }
+                    if !st.lbtn {
+                        trace("  drag end: 左键状态读到已松开");
                         // Alt 中途松开 / 按键丢了：就地结束，不然窗口会跟着光标乱飞。
                         st.drag = None;
                         st.tracker.clear();
                         return false;
                     }
                     moved_to = Some(pos);
-                    return true;
+                    // 放行（返回 false）：吞掉移动事件会让光标自己停下来，
+                    // 见模块文档“歪打正着的坑”。
+                    return false;
                 }
                 let Some(pending) = st.pending else {
                     return false;
@@ -507,6 +562,9 @@ fn handle_event(msg: u32, pos: (i32, i32), mouse_data: u32, now: Instant, env: &
                     )
                 };
                 if !st.tracker.moved(pos, threshold) {
+                    trace(&format!(
+                        "  move: 未过拖动阈值 pending={pending:?} pos={pos:?} thr={threshold:?}"
+                    ));
                     return false;
                 }
                 let hwnd = pending as Hwnd;
@@ -515,14 +573,23 @@ fn handle_event(msg: u32, pos: (i32, i32), mouse_data: u32, now: Instant, env: &
                     st.pending = None;
                     return false;
                 }
+                // 基准点用按下那一刻的位置：光标已经走掉的这几个像素（拖动
+                // 阈值）也算在位移里，窗口才是 1:1 跟手。
+                let from = st.tracker.press_pos().unwrap_or(pos);
                 st.drag = Some(Drag {
                     hwnd: pending,
-                    from: pos,
+                    from,
                     origin: (rect.left, rect.top),
                 });
+                // 按下被我们吞了，目标程序不会自己置前，这里补一下。
+                unsafe { SetForegroundWindow(hwnd) };
+                trace(&format!(
+                    "  drag start: hwnd={hwnd:?} from={from:?} origin=({}, {})",
+                    rect.left, rect.top
+                ));
                 st.swallow_up = true;
                 moved_to = Some(pos);
-                true
+                false
             });
             if let Some(pos) = moved_to {
                 STATE.with(|cell| {
@@ -540,6 +607,7 @@ fn handle_event(msg: u32, pos: (i32, i32), mouse_data: u32, now: Instant, env: &
                 let Ok(mut st) = cell.try_borrow_mut() else {
                     return (false, false);
                 };
+                st.lbtn = false;
                 let dragging = st.tracker.up();
                 st.drag = None;
                 st.pending = None;
@@ -588,6 +656,23 @@ fn move_window(drag: &Drag, pos: (i32, i32)) {
     unsafe {
         let x = drag.origin.0 + (pos.0 - drag.from.0);
         let y = drag.origin.1 + (pos.1 - drag.from.1);
+        if std::env::var_os("ZOUWU_ALTDRAG_TRACE").is_some() {
+            // 跟踪模式下**用同一套 flags**，否则测出来的行为跟线上不是一回事。
+            let ok = SetWindowPos(
+                drag.hwnd as Hwnd,
+                std::ptr::null_mut(),
+                x,
+                y,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+            );
+            trace(&format!(
+                "  move -> ({x}, {y}) ok={ok} err={:?}",
+                std::io::Error::last_os_error()
+            ));
+            return;
+        }
         SetWindowPos(
             drag.hwnd as Hwnd,
             std::ptr::null_mut(),
@@ -817,10 +902,10 @@ mod tests {
         (r.left, r.top)
     }
 
-    fn env_for(hwnd: Hwnd, alt: bool, lbtn: bool) -> Env<'static> {
+    fn env_for(hwnd: Hwnd, alt: bool) -> Env<'static> {
         // `find` 里要捕获 hwnd：用 Box::leak 换一个 'static 闭包，测试里够用。
         let find: &'static dyn Fn() -> Option<Hwnd> = Box::leak(Box::new(move || Some(hwnd)));
-        Env { alt, lbtn, find }
+        Env { alt, find }
     }
 
     #[test]
@@ -828,22 +913,26 @@ mod tests {
     fn alt_drag_moves_the_window_by_the_cursor_delta() {
         let hwnd = test_window(200, 200);
         let start = origin(hwnd);
-        let env = env_for(hwnd, true, true);
+        let env = env_for(hwnd, true);
         let t0 = Instant::now();
 
-        // 按下不吞（保留目标程序自己的 Alt+单击语义）
-        assert!(!handle_event(WM_LBUTTONDOWN, (600, 600), 0, t0, &env));
-        // 第一次移动只负责"超过拖动阈值、开始拖"，窗口还没动
-        assert!(handle_event(WM_MOUSEMOVE, (640, 610), 0, t0, &env));
-        assert_eq!(origin(hwnd), start, "刚开始拖的那一下不该跳位");
-        // 之后按光标位移挪窗口
-        handle_event(WM_MOUSEMOVE, (680, 620), 0, t0, &env);
+        // 按下要吞：目标程序看不到按下，就不会自己去做框选/拖动
+        assert!(handle_event(WM_LBUTTONDOWN, (600, 600), 0, t0, &env));
+        // 移动一律放行——吞掉的话光标自己就停了（真机上“拖不动”就是这个）
+        assert!(!handle_event(WM_MOUSEMOVE, (640, 610), 0, t0, &env));
+        // 过阈值那一下就 1:1 跟手：位移从按下点算，所以立刻是 +40/+10
         assert_eq!(
             origin(hwnd),
             (start.0 + 40, start.1 + 10),
             "窗口要跟着光标走同样的位移"
         );
-        // 拖完的抬起要吞，否则目标程序会看到一次完整点击
+        assert!(!handle_event(WM_MOUSEMOVE, (680, 620), 0, t0, &env));
+        assert_eq!(
+            origin(hwnd),
+            (start.0 + 80, start.1 + 20),
+            "窗口要贴着光标走，不能慢半拍"
+        );
+        // 拖完的抬起要吞，否则目标程序会看到一次“没有按下的抬起”
         assert!(handle_event(WM_LBUTTONUP, (680, 620), 0, t0, &env));
 
         unsafe { DestroyWindow(hwnd) };
@@ -851,16 +940,44 @@ mod tests {
 
     #[test]
     #[ignore = "需要交互式 Windows 桌面（要建真窗口）"]
+    fn long_drag_keeps_following_the_cursor() {
+        // 回归：真机上曾经“按住 Alt 拖，有反应但拖不动”——移动事件被吞了，
+        // 光标自己也停了，于是窗口一步都挪不了。这里连着走 30 步，
+        // 既盯“移动事件必须放行”，也盯“窗口一路 1:1 跟到底”。
+        let hwnd = test_window(150, 150);
+        let start = origin(hwnd);
+        let env = env_for(hwnd, true);
+        let t0 = Instant::now();
+
+        assert!(handle_event(WM_LBUTTONDOWN, (400, 400), 0, t0, &env));
+        for i in 1..=30i32 {
+            let pos = (400 + i * 10, 400 + i * 5);
+            assert!(
+                !handle_event(WM_MOUSEMOVE, pos, 0, t0, &env),
+                "第 {i} 步的移动事件被吞了（会把光标冻住）"
+            );
+            assert_eq!(
+                origin(hwnd),
+                (start.0 + i * 10, start.1 + i * 5),
+                "第 {i} 步窗口没跟住光标"
+            );
+        }
+        assert!(handle_event(WM_LBUTTONUP, (700, 550), 0, t0, &env));
+        unsafe { DestroyWindow(hwnd) };
+    }
+
+    #[test]
+    #[ignore = "需要交互式 Windows 桌面（要建真窗口）"]
     fn releasing_alt_midway_stops_moving_the_window() {
         let hwnd = test_window(300, 300);
-        let env = env_for(hwnd, true, true);
+        let env = env_for(hwnd, true);
         let t0 = Instant::now();
         handle_event(WM_LBUTTONDOWN, (700, 700), 0, t0, &env);
         handle_event(WM_MOUSEMOVE, (740, 700), 0, t0, &env);
         let dragged = origin(hwnd);
 
         // Alt 松开了：再动鼠标窗口不该跟着飞
-        let no_alt = env_for(hwnd, false, true);
+        let no_alt = env_for(hwnd, false);
         assert!(!handle_event(WM_MOUSEMOVE, (900, 900), 0, t0, &no_alt));
         assert_eq!(origin(hwnd), dragged, "Alt 松开后窗口要停在原地");
 
@@ -872,7 +989,7 @@ mod tests {
     #[ignore = "需要交互式 Windows 桌面（要建真窗口）"]
     fn wheel_up_maximizes_and_wheel_down_minimizes_the_target() {
         let hwnd = test_window(400, 300);
-        let env = env_for(hwnd, true, true);
+        let env = env_for(hwnd, true);
         let now = Instant::now();
         // mouse_data 高 16 位是 delta：向上 = +120
         assert!(handle_event(
@@ -900,7 +1017,7 @@ mod tests {
     #[ignore = "需要交互式 Windows 桌面（要建真窗口）"]
     fn wheel_within_the_debounce_window_is_ignored() {
         let hwnd = test_window(500, 300);
-        let env = env_for(hwnd, true, true);
+        let env = env_for(hwnd, true);
         let now = Instant::now();
         assert!(handle_event(
             WM_MOUSEWHEEL,
@@ -930,13 +1047,13 @@ mod tests {
     #[ignore = "需要交互式 Windows 桌面（要建真窗口）"]
     fn double_click_with_alt_toggles_maximize() {
         let hwnd = test_window(600, 300);
-        let env = env_for(hwnd, true, true);
+        let env = env_for(hwnd, true);
         let t0 = Instant::now();
         assert!(
-            !handle_event(WM_LBUTTONDOWN, (650, 350), 0, t0, &env),
-            "第一下是单击"
+            handle_event(WM_LBUTTONDOWN, (650, 350), 0, t0, &env),
+            "第一下也要吞（目标是窗口时按下归我们管）"
         );
-        assert!(!handle_event(WM_LBUTTONUP, (650, 350), 0, t0, &env));
+        assert!(handle_event(WM_LBUTTONUP, (650, 350), 0, t0, &env));
         // 第二下落在系统双击时间与矩形之内 -> 双击
         assert!(
             handle_event(
