@@ -105,7 +105,6 @@ const WM_MOUSEWHEEL: u32 = 0x020A;
 const WM_QUIT: u32 = 0x0012;
 
 const VK_MENU: i32 = 0x12;
-const VK_LBUTTON: i32 = 0x01;
 
 const GA_ROOT: u32 = 2;
 
