@@ -52,6 +52,12 @@ pub struct SettingsWindow {
     ///
     /// 鼠标移出框外也要继续选（和系统输入框一样），所以不能只看“落在行里”。
     drag_text: bool,
+    /// 正在拖输入框自己的水平滚动条。
+    drag_scroll: bool,
+    /// 上一次点在哪个输入框的什么位置（双击/三击判定用）。
+    last_click: Option<(std::time::Instant, f32, f32, settings::EditTarget)>,
+    /// 连击计数：1 单击、2 双击选词、3 三击全选。
+    click_count: u8,
 }
 
 impl SettingsWindow {
@@ -104,6 +110,9 @@ impl SettingsWindow {
             frame_dark: false,
             ime_on: false,
             drag_text: false,
+            drag_scroll: false,
+            last_click: None,
+            click_count: 0,
         };
         this.rebuild_layout();
         this.request_redraw();
@@ -190,6 +199,18 @@ impl SettingsWindow {
         let layout = settings::layout(&self.model, w, h);
         self.model.scroll = self.model.scroll.clamp(0.0, layout.max_scroll());
         self.layout = Some(layout);
+        // 布局一变，输入框宽度/DPI 都可能变（换标签页、拖窗口、换显示器）。
+        self.sync_edit_viewport();
+    }
+
+    /// 把“当前的 DPI 与输入框宽度”告诉模型（水平滚动与光标可见全靠它）。
+    fn sync_edit_viewport(&mut self) {
+        let Some(inner) = self.text_inner_of_editing() else {
+            return;
+        };
+        let scale = self.window.scale_factor() as f32;
+        let scale = if scale > 0.01 { scale } else { 1.0 };
+        settings::set_edit_viewport(&mut self.model, inner, scale);
     }
 
     /// 画一帧并提交。返回是否成功（失败只记日志，面板不该因一次绘制失败而消失）。
@@ -285,6 +306,14 @@ impl SettingsWindow {
                 let scale = self.window.scale_factor() as f32;
                 let scale = if scale > 0.01 { scale } else { 1.0 };
                 self.cursor = Point::new(position.x as f32 / scale, position.y as f32 / scale);
+                // 正在拖输入框的水平滚动条：鼠标到哪，可视起点就到哪。
+                if self.drag_scroll {
+                    if let Some(inner) = self.text_inner_of_editing() {
+                        settings::set_offset_from_x(&mut self.model, inner, self.cursor.x);
+                        self.request_redraw();
+                    }
+                    return Vec::new();
+                }
                 // 正在拖选：鼠标到哪，选区就到哪（不更新 hover，不然路过别的行会闪）。
                 if self.drag_text {
                     let inner = self.text_inner_of_editing();
@@ -355,6 +384,12 @@ impl SettingsWindow {
                     MouseScrollDelta::LineDelta(_, y) => *y,
                     MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / 40.0,
                 };
+                // 鼠标悬在“正在编辑且放不下”的输入框上：横着滚（那里竖直翻页没意义）。
+                if self.text_box_under_cursor().is_some() {
+                    settings::scroll_edit(&mut self.model, -lines * 48.0);
+                    self.request_redraw();
+                    return Vec::new();
+                }
                 self.scroll_by(-lines * 56.0);
                 Vec::new()
             }
@@ -363,8 +398,9 @@ impl SettingsWindow {
                 button: MouseButton::Left,
                 ..
             } => {
-                // 松手就不再拖选（选区会一直留着，直到下一次点击或按键）。
+                // 松手就不拖了（选区/滚动位置会一直留着，直到下一次点击或按键）。
                 self.drag_text = false;
+                self.drag_scroll = false;
                 Vec::new()
             }
             WindowEvent::MouseInput {
@@ -407,6 +443,59 @@ impl SettingsWindow {
         })
     }
 
+    /// 光标是否压在“正在编辑的那个输入框”的水平滚动条 thumb 上（是则返回内框）。
+    fn text_scrollbar_hit(&self) -> Option<crate::widget::Rect> {
+        let editing = self.model.editing.as_ref()?;
+        let target = editing.target;
+        let layout = self.layout.as_ref()?;
+        let inner = layout
+            .rows
+            .iter()
+            .find_map(|(row, rl)| match &row.control {
+                settings::Control::Text { target: t, .. } if *t == target => {
+                    Some(settings::text_inner(rl.hit))
+                }
+                _ => None,
+            })?;
+        settings::text_scrollbar_at(editing, inner, self.cursor).then_some(inner)
+    }
+
+    /// 鼠标是不是悬在“正在编辑且内容放不下”的输入框上（滚轮横滚用）。
+    fn text_box_under_cursor(&self) -> Option<crate::widget::Rect> {
+        let editing = self.model.editing.as_ref()?;
+        if !settings::text_overflow(editing) {
+            return None;
+        }
+        let target = editing.target;
+        let layout = self.layout.as_ref()?;
+        layout.rows.iter().find_map(|(row, rl)| match &row.control {
+            settings::Control::Text { target: t, .. } if *t == target => rl
+                .rect
+                .contains(self.cursor)
+                .then(|| settings::text_inner(rl.hit)),
+            _ => None,
+        })
+    }
+
+    /// 连击计数：同一个输入框、400ms 内、位移不超过 4px 才算“又点了一下”。
+    fn next_click_count(&mut self, target: settings::EditTarget) -> u8 {
+        let now = std::time::Instant::now();
+        let (x, y) = (self.cursor.x, self.cursor.y);
+        let again = self.last_click.is_some_and(|(at, px, py, prev)| {
+            prev == target
+                && now.duration_since(at) < std::time::Duration::from_millis(400)
+                && (px - x).abs() <= 4.0
+                && (py - y).abs() <= 4.0
+        });
+        self.click_count = if again {
+            (self.click_count + 1).min(3)
+        } else {
+            1
+        };
+        self.last_click = Some((now, x, y, target));
+        self.click_count
+    }
+
     /// 点在输入框上：把光标落到鼠标位置，并准备好拖选。
     ///
     /// “点同一个输入框”不能先 `commit_edit`：那会把编辑状态收掉、光标回到文末，
@@ -437,9 +526,16 @@ impl SettingsWindow {
             }
             settings::begin_edit(&mut self.model, target);
         }
-        settings::set_caret_from_x(&mut self.model, inner, self.cursor.x, false, scale);
+        // 连击：1 单击定位光标、2 双击选词、3 三击全选（与系统输入框一致）。
+        let count = self.next_click_count(target);
+        match count {
+            1 => settings::set_caret_from_x(&mut self.model, inner, self.cursor.x, false, scale),
+            2 => settings::select_word(&mut self.model, inner, self.cursor.x, scale),
+            _ => settings::select_all(&mut self.model),
+        }
         self.model.focus = Some(row);
-        self.drag_text = true;
+        // 双击/三击之后不跟着拖选：那两次按下的微小位移是手抖，不是拖。
+        self.drag_text = count == 1;
         self.set_ime(true);
         self.request_redraw();
         outcome
@@ -449,6 +545,15 @@ impl SettingsWindow {
         // 每次新的按下都算“重新开始”：上一次若在窗口外松手，收不到 Released，
         // 残留的 drag_text 会让接下来的鼠标移动莫名续选。
         self.drag_text = false;
+        self.drag_scroll = false;
+        // 输入框自己的水平滚动条：按住 thumb 拖。
+        // 这一步必须先于“点进输入框”，否则压在滚动条上只会把光标挪到那一行末尾。
+        if let Some(inner) = self.text_scrollbar_hit() {
+            self.drag_scroll = true;
+            settings::set_offset_from_x(&mut self.model, inner, self.cursor.x);
+            self.request_redraw();
+            return Vec::new();
+        }
         let Some(layout) = &self.layout else {
             return Vec::new();
         };
@@ -593,10 +698,30 @@ impl SettingsWindow {
             }
             if self.modifiers.control_key() {
                 if let Key::Character(ch) = &event.logical_key {
-                    if ch.as_str().eq_ignore_ascii_case("a") {
-                        settings::select_all(&mut self.model);
-                        self.request_redraw();
-                        return Vec::new();
+                    match ch.to_lowercase().as_str() {
+                        "a" => {
+                            settings::select_all(&mut self.model);
+                            self.request_redraw();
+                            return Vec::new();
+                        }
+                        "c" => {
+                            // 没选区就整段拷（单行框“全选再拷”太笨）。
+                            settings::copy_selection(&self.model);
+                            return Vec::new();
+                        }
+                        "x" => {
+                            // 没选区就什么都不干：整段剪切 = 清空，太危险。
+                            if settings::cut_selection(&mut self.model) {
+                                self.request_redraw();
+                            }
+                            return Vec::new();
+                        }
+                        "v" => {
+                            settings::paste_clipboard(&mut self.model);
+                            self.request_redraw();
+                            return Vec::new();
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -617,7 +742,7 @@ impl SettingsWindow {
                 };
             }
             // 普通字符：走 `text`（已按当前键盘布局/修饰键折算好）。
-            // Ctrl/Alt 组合留给快捷键：这里不做粘贴实现，直接忽略。
+            // Ctrl/Alt 组合（含 Ctrl+C/X/V）已在上面处理完，这里不重复插字符。
             if let Some(text) = event.text.as_deref() {
                 if !text.is_empty() && !self.modifiers.control_key() && !self.modifiers.alt_key() {
                     settings::edit_text(&mut self.model, text);

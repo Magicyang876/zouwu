@@ -563,12 +563,24 @@ pub enum EditTarget {
 /// `anchor` 是"选区的另一头"：它和 `cursor` 不相等时就是一段选区。
 /// 单击时两者相等（没选区）；按住拖拽时 `anchor` 不动、`cursor` 跟着鼠标跑；
 /// Shift + 方向键也是只动 `cursor`。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Editing {
     pub target: EditTarget,
     pub buffer: String,
     pub cursor: usize,
     pub anchor: usize,
+    /// 水平滚动的可视起点（字节下标，落在字符边界上）。
+    ///
+    /// 单行框放不下时靠它向左滚，而不是靠“画的时候截掉前几个字”：
+    /// 光标位置、选区、滚动条 thumb 全要跟它对齐，各算各的必然错位。
+    pub offset: usize,
+    /// 内框宽度（逻辑像素）。布局就绪后由 `set_edit_viewport` 填。
+    ///
+    /// 默认 `INFINITY`：没量过宽度时 `ensure_caret_visible` 什么都不做，
+    /// 于是“只改模型、不画界面”的单元测试不需要伪造视口。
+    pub width: f32,
+    /// 量文字用的 DPI 缩放（`width` 与它在同一次调用里设）。
+    pub scale: f32,
 }
 
 /// 编辑框能识别的按键（winit 类型留在窗口层，这一层只认这个枚举）。
@@ -2255,6 +2267,9 @@ pub fn begin_edit(model: &mut Model, target: EditTarget) {
         cursor,
         anchor: cursor,
         buffer,
+        offset: 0,
+        width: f32::INFINITY,
+        scale: 1.0,
     });
     // 同一个球只能干一件事：一边录键一边打字最后谁也不知道按了啥。
     model.capturing = None;
@@ -2284,24 +2299,49 @@ fn measure_text(text: &str, scale: f32) -> f32 {
     crate::text::TextEngine::with(|engine| engine.measure(text, px, false)) / scale
 }
 
-/// 让光标可见：返回（可视起点的字节下标、光标相对内框左沿的 x）。
+/// 量一段字节区间（`from..to`）的宽度。
 ///
-/// 单行输入框水平放不下时，从光标往前吃字直到再往前一个字就溢出；
-/// 这样光标永远在框内，而超出部分自然被内框裁掉。
-fn edit_geom(buffer: &str, cursor: usize, width: f32, scale: f32) -> (usize, f32) {
-    let cursor = clamp_boundary(buffer, cursor);
-    let avail = width.max(TEXT_PX);
+/// 空区间要返回 **0.0**（不是 `measure_text("")` 那种“没量过就按 0 算”），
+/// 光标正好落在可视起点时 x 必须是 0，否则光标会被画偏一个字。
+fn width_between(text: &str, from: usize, to: usize, scale: f32) -> f32 {
+    let from = clamp_boundary(text, from);
+    let to = clamp_boundary(text, to).max(from);
+    measure_text(&text[from..to], scale)
+}
+
+/// 整段文本的宽度（用来判断要不要出现滚动条）。
+fn text_width(text: &str, scale: f32) -> f32 {
+    width_between(text, 0, text.len(), scale)
+}
+
+/// 把光标拉回可视区：跑到左边就跟过去，跑到右边就往前吃字。
+///
+/// 只在“宽度量过了”之后才动 `offset`：没视口时改它只会让测试里的
+/// 光标位置莫名其妙缩到 0。
+fn ensure_caret_visible(editing: &mut Editing) {
+    if !editing.width.is_finite() || editing.width <= 0.0 {
+        return;
+    }
+    let (buffer, scale, avail) = (editing.buffer.clone(), editing.scale, editing.width);
+    let cursor = clamp_boundary(&buffer, editing.cursor);
+    let start = clamp_boundary(&buffer, editing.offset).min(cursor);
+    if cursor < start {
+        editing.offset = cursor;
+        return;
+    }
+    if width_between(&buffer, start, cursor, scale) <= avail {
+        // 光标本来就在框里，但可能因为删字而滚得太靠右了：往前收一收看能否贴回左端。
+        editing.offset = start;
+        return;
+    }
     let mut start = cursor;
-    let mut caret = 0.0;
-    while let Some(prev) = prev_boundary(buffer, start) {
-        let w = measure_text(&buffer[prev..cursor], scale);
-        if w > avail {
+    while let Some(prev) = prev_boundary(&buffer, start) {
+        if width_between(&buffer, prev, cursor, scale) > avail {
             break;
         }
         start = prev;
-        caret = w;
     }
-    (start, caret)
+    editing.offset = start;
 }
 
 /// 当前选区（字节区间，左闭右开）。没选区返回 `None`。
@@ -2331,10 +2371,14 @@ pub fn set_caret_from_x(model: &mut Model, inner: Rect, x: f32, extend: bool, sc
     let Some(editing) = model.editing.as_mut() else {
         return;
     };
-    let (start, _) = edit_geom(&editing.buffer, editing.cursor, inner.w, scale);
-    let local = (x - inner.x).max(0.0);
+    // 点进来时顺手把视口量下来：光标换算要用“当前这次”的宽度与 DPI，
+    // 用上一次的会让 125% 下每点一次都可能偏半个字。
+    editing.width = inner.w.max(1.0);
+    editing.scale = scale;
+    let start = clamp_boundary(&editing.buffer, editing.offset);
+    let local = (x - inner.x).max(0.0) + width_between(&editing.buffer, 0, start, scale);
     // 严格照字符边界走：多字节字符（中文、emoji）不能被切一半。
-    let mut index = start;
+    let mut index = 0;
     let mut acc = 0.0;
     while let Some(next) = next_boundary(&editing.buffer, index) {
         let w = measure_text(&editing.buffer[index..next], scale);
@@ -2348,6 +2392,7 @@ pub fn set_caret_from_x(model: &mut Model, inner: Rect, x: f32, extend: bool, sc
         editing.anchor = index;
     }
     editing.cursor = index;
+    ensure_caret_visible(editing);
 }
 
 /// 全选（Ctrl+A）。
@@ -2356,6 +2401,296 @@ pub fn select_all(model: &mut Model) {
         editing.anchor = 0;
         editing.cursor = editing.buffer.len();
     }
+    sync_edit_viewport(model);
+}
+
+/// 告诉模型“输入框有多宽、现在什么 DPI”。布局每算一次就调一次。
+pub fn set_edit_viewport(model: &mut Model, inner: Rect, scale: f32) {
+    if let Some(editing) = model.editing.as_mut() {
+        editing.width = inner.w.max(1.0);
+        editing.scale = scale;
+        ensure_caret_visible(editing);
+    }
+}
+
+/// 让当前编辑框的视口跟布局（布局层自己不知道鼠标，只能由窗口层转告）。
+///
+/// `layout()` 不往 `Model` 里写（它只读）：所以这里单独按目标字段去 `build_rows`
+/// 里找一遍行矩形。找不到（比如已经切到别的标签页）就什么都不改。
+pub fn sync_edit_viewport(model: &mut Model) {
+    // 没量过宽度就等下一次点击/布局：单测里不该凭空造一个视口。
+    let Some(width) = model.editing.as_ref().map(|e| e.width) else {
+        return;
+    };
+    if !width.is_finite() {
+        return;
+    }
+    if let Some(editing) = model.editing.as_mut() {
+        ensure_caret_visible(editing);
+    }
+}
+
+/// 输入框里的内容是否宽到放不下（放不下才画滚动条）。
+pub fn text_overflow(editing: &Editing) -> bool {
+    editing.width.is_finite() && text_width(&editing.buffer, editing.scale) > editing.width + 0.5
+}
+
+/// 单行框自己的水平滚动条（压在内框下沿，只有 5px 高，不抢正文的点击区）。
+pub fn text_scroll_track(inner: Rect) -> Rect {
+    Rect::new(inner.x, inner.bottom() - 5.0, inner.w, 5.0)
+}
+
+/// 水平滚动条的 thumb 矩形（与绘制用同一个公式）。
+///
+/// `pub` 是因为绘制在 `draw_row` 里（那里手边只有 `Painter` 和调色板），
+/// 而命中判定在窗口层；两边必须拿同一个矩形，所以只算一次。
+pub fn text_thumb(editing: &Editing, inner: Rect) -> Option<Rect> {
+    if !text_overflow(editing) {
+        return None;
+    }
+    let total = text_width(&editing.buffer, editing.scale);
+    if total <= 0.0 {
+        return None;
+    }
+    let ratio = (editing.width / total).clamp(0.0, 1.0);
+    // 注意不能写 `.clamp(24.0, inner.w)`：内框比 24px 还窄时
+    // `clamp` 会因为 min > max 直接 panic（窄窗口就是这种情形）。
+    let thumb_w = (inner.w * ratio).clamp(inner.w.min(24.0), inner.w.max(0.0));
+    let start = clamp_boundary(&editing.buffer, editing.offset);
+    let scrolled = width_between(&editing.buffer, 0, start, editing.scale);
+    let max_scroll = (total - editing.width).max(1.0);
+    let x = inner.x + (inner.w - thumb_w) * (scrolled / max_scroll).clamp(0.0, 1.0);
+    Some(Rect::new(x, inner.bottom() - 5.0, thumb_w, 5.0))
+}
+
+/// 拖动水平滚动条：把 viewport 的**左沿**放到鼠标那里（拖动的是那段 thumb）。
+pub fn set_offset_from_x(model: &mut Model, inner: Rect, x: f32) {
+    let Some(editing) = model.editing.as_mut() else {
+        return;
+    };
+    if !text_overflow(editing) {
+        return;
+    }
+    let total = text_width(&editing.buffer, editing.scale);
+    let max_scroll = (total - editing.width).max(1.0);
+    let ratio = ((x - inner.x) / inner.w.max(1.0)).clamp(0.0, 1.0);
+    let want = (ratio * max_scroll).clamp(0.0, max_scroll);
+    // 找一个“宽度刚好等于 want”的字符边界：只能滚到字缝上，滚到字中间会让字被切一半。
+    let mut index = 0;
+    let mut acc = 0.0;
+    while let Some(next) = next_boundary(&editing.buffer, index) {
+        let w = measure_text(&editing.buffer[index..next], editing.scale);
+        if acc + w > want {
+            break;
+        }
+        acc += w;
+        index = next;
+    }
+    editing.offset = index;
+    // 不碰光标与选区：拖滚动条只是“看看别处”，不是“把光标挪过去”，
+    // 直接改 cursor 会把用户刚选好的选区当场抹掉。
+    // 光标真在可视区外时由绘制层把它限到框边。
+}
+
+/// 鼠标滚轮在输入框上时横着滚。
+pub fn scroll_edit(model: &mut Model, dx: f32) {
+    let Some(editing) = model.editing.as_mut() else {
+        return;
+    };
+    if !text_overflow(editing) || dx.abs() < 0.01 {
+        return;
+    }
+    let start = clamp_boundary(&editing.buffer, editing.offset);
+    let mut index = start;
+    if dx > 0.0 {
+        let mut left = dx;
+        while left > 0.0 {
+            let Some(next) = next_boundary(&editing.buffer, index) else {
+                break;
+            };
+            left -= measure_text(&editing.buffer[index..next], editing.scale);
+            index = next;
+        }
+    } else {
+        let mut left = -dx;
+        while left > 0.0 {
+            let Some(prev) = prev_boundary(&editing.buffer, index) else {
+                break;
+            };
+            left -= measure_text(&editing.buffer[prev..index], editing.scale);
+            index = prev;
+        }
+    }
+    editing.offset = index;
+}
+
+/// 拖动滚动条 / 点滚动条时，这个点是不是落在 thumb 上（窗口层判命中用）。
+pub fn text_scrollbar_at(editing: &Editing, inner: Rect, p: Point) -> bool {
+    text_thumb(editing, inner)
+        .is_some_and(|thumb| Rect::new(thumb.x, inner.bottom() - 7.0, thumb.w, 9.0).contains(p))
+}
+
+/// 双击选词。中文按“连续同类别”分（汉字一串、字母数字一串），
+/// 路径/命令这类用分割符划开：双击 `C:\work\a.txt` 应该选中整条路径，
+/// 而不是只选中 `work`（护眼宝那种“双击选一截”在这里没用）。
+pub fn select_word(model: &mut Model, inner: Rect, x: f32, scale: f32) {
+    let Some(editing) = model.editing.as_mut() else {
+        return;
+    };
+    editing.width = inner.w.max(1.0);
+    editing.scale = scale;
+    let start = clamp_boundary(&editing.buffer, editing.offset);
+    let local = (x - inner.x).max(0.0) + width_between(&editing.buffer, 0, start, scale);
+    let mut index = 0;
+    let mut acc = 0.0;
+    while let Some(next) = next_boundary(&editing.buffer, index) {
+        let w = measure_text(&editing.buffer[index..next], scale);
+        if acc + w * 0.5 > local {
+            break;
+        }
+        acc += w;
+        index = next;
+    }
+    let word = |editing: &Editing, i: usize| -> Option<char> { editing.buffer[i..].chars().next() };
+    // 点到字缝右边（index 已在下一个字上）：往左看一个字。
+    let mut lo = index;
+    if lo == editing.buffer.len() {
+        lo = prev_boundary(&editing.buffer, lo).unwrap_or(0);
+    }
+    let Some(ch) = word(editing, lo) else {
+        return;
+    };
+    if ch.is_whitespace() {
+        // 点空白：选中这段空白（跟系统输入框一样，双击空白选空白）。
+        let mut a = lo;
+        while let Some(prev) = prev_boundary(&editing.buffer, a) {
+            if !word(editing, prev).is_some_and(|c| c.is_whitespace()) {
+                break;
+            }
+            a = prev;
+        }
+        let mut b = next_boundary(&editing.buffer, lo).unwrap_or(lo);
+        while word(editing, b).is_some_and(|c| c.is_whitespace()) {
+            b = next_boundary(&editing.buffer, b).unwrap_or(b);
+        }
+        editing.anchor = a;
+        editing.cursor = b;
+        ensure_caret_visible(editing);
+        return;
+    }
+    // 路径/命令分隔符也开新词（但分隔符本身不算词）。
+    let is_break = |c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '/' | '\\'
+                    | ':'
+                    | ';'
+                    | ','
+                    | '|'
+                    | '('
+                    | ')'
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+                    | '"'
+                    | '\''
+                    | '='
+                    | '<'
+                    | '>'
+                    | '&'
+            )
+    };
+    let lo = if is_break(ch) {
+        lo
+    } else {
+        let mut a = lo;
+        while let Some(prev) = prev_boundary(&editing.buffer, a) {
+            if word(editing, prev).is_none_or(is_break) {
+                break;
+            }
+            a = prev;
+        }
+        a
+    };
+    let mut hi = next_boundary(&editing.buffer, lo).unwrap_or(lo);
+    if !is_break(ch) {
+        while word(editing, hi).is_some_and(|c| !is_break(c)) {
+            hi = next_boundary(&editing.buffer, hi).unwrap_or(hi);
+        }
+    }
+    editing.anchor = lo;
+    editing.cursor = hi;
+    ensure_caret_visible(editing);
+}
+
+/// 复制选区（没选区就复制整段）。返回是否真拷到了。
+pub fn copy_selection(model: &Model) -> bool {
+    let Some(editing) = model.editing.as_ref() else {
+        return false;
+    };
+    let text = match selection(editing) {
+        Some((a, b)) => &editing.buffer[a..b],
+        None => editing.buffer.as_str(),
+    };
+    if text.is_empty() {
+        return false;
+    }
+    host_clipboard_set(text)
+}
+
+/// 剪切选区（没选区就什么都不干：整段剪切等于“清空”，太危险）。
+pub fn cut_selection(model: &mut Model) -> bool {
+    let Some(editing) = model.editing.as_mut() else {
+        return false;
+    };
+    let Some((a, b)) = selection(editing) else {
+        return false;
+    };
+    if !host_clipboard_set(&editing.buffer[a..b]) {
+        return false;
+    }
+    delete_selection(editing);
+    ensure_caret_visible(editing);
+    true
+}
+
+/// 粘贴。多个换行会被折成空格（单行框）：直接插 `\n` 进去会让 frame_text
+/// 画出两行，而内框只裁上下，字符会溢出到面板别的地方。
+pub fn paste(model: &mut Model, raw: &str) -> bool {
+    let mut cleaned = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '\r' => {}
+            '\n' | '\t' => cleaned.push(' '),
+            c if c.is_control() => {}
+            c => cleaned.push(c),
+        }
+    }
+    if cleaned.is_empty() {
+        return false;
+    }
+    edit_text(model, &cleaned);
+    true
+}
+
+/// 从系统剪贴板粘贴。
+pub fn paste_clipboard(model: &mut Model) -> bool {
+    let Some(text) = host_clipboard_get() else {
+        return false;
+    };
+    paste(model, &text)
+}
+
+/// 写入系统剪贴板。
+fn host_clipboard_set(text: &str) -> bool {
+    zouwu_platform::clipboard::set_text(text)
+}
+
+/// 读系统剪贴板。
+fn host_clipboard_get() -> Option<String> {
+    zouwu_platform::clipboard::get_text()
 }
 
 /// 删掉选区；返回是否真的删了。
@@ -2414,6 +2749,7 @@ pub fn edit_text(model: &mut Model, text: &str) {
     editing.buffer.insert_str(cursor, text);
     editing.cursor = cursor + text.len();
     editing.anchor = editing.cursor;
+    ensure_caret_visible(editing);
 }
 
 /// 光标移动（方向键 / Home / End）。`extend` 即按住 Shift 拉选区。
@@ -2432,6 +2768,7 @@ pub fn edit_move(model: &mut Model, motion: EditMotion, extend: bool) {
             EditMotion::Home => 0,
             EditMotion::End => editing.buffer.len(),
         };
+        ensure_caret_visible(editing);
         return;
     }
     // 没按 Shift 时方向键先“收起”选区（← 去左端、→ 去右端），与系统输入框一致。
@@ -2454,6 +2791,7 @@ pub fn edit_move(model: &mut Model, motion: EditMotion, extend: bool) {
     };
     editing.cursor = target;
     editing.anchor = target;
+    ensure_caret_visible(editing);
 }
 
 /// 编辑框的按键处理。`Commit` / `Cancel` 返回 `Some`，其余返回 `None`。
@@ -2474,25 +2812,24 @@ pub fn edit_key(model: &mut Model, key: EditKey) -> Option<Vec<ChangeKind>> {
     let cursor = editing.cursor;
     match key {
         EditKey::Backspace => {
-            if delete_selection(editing) {
-                return None;
-            }
-            if let Some(prev) = prev_boundary(&editing.buffer, cursor) {
-                editing.buffer.replace_range(prev..cursor, "");
-                editing.cursor = prev;
-                editing.anchor = prev;
+            if !delete_selection(editing) {
+                if let Some(prev) = prev_boundary(&editing.buffer, cursor) {
+                    editing.buffer.replace_range(prev..cursor, "");
+                    editing.cursor = prev;
+                    editing.anchor = prev;
+                }
             }
         }
         EditKey::Delete => {
-            if delete_selection(editing) {
-                return None;
-            }
-            if let Some(next) = next_boundary(&editing.buffer, cursor) {
-                editing.buffer.replace_range(cursor..next, "");
+            if !delete_selection(editing) {
+                if let Some(next) = next_boundary(&editing.buffer, cursor) {
+                    editing.buffer.replace_range(cursor..next, "");
+                }
             }
         }
         EditKey::Commit | EditKey::Cancel => unreachable!(),
     }
+    ensure_caret_visible(editing);
     None
 }
 
@@ -2983,14 +3320,14 @@ fn draw_row(
                 p.text_in(&shown, inner, TEXT_PX, pal.dim, Weight::Regular);
             } else if let Some(state) = state {
                 let scale = p.scale();
-                let (start, caret) = edit_geom(&state.buffer, state.cursor, inner.w, scale);
+                let start = clamp_boundary(&state.buffer, state.offset);
                 // 选区先用底色铺一层，再在上面画字（先字后底色会把字闷掉）。
                 if let Some((a, b)) = selection(state) {
                     let (a, b) = (a.max(start), b.max(start));
-                    let x0 = inner.x + measure_text(&state.buffer[start..a], scale);
-                    let x1 = inner.x + measure_text(&state.buffer[start..b], scale);
-                    let x0 = x0.max(inner.x + 1.0);
-                    let x1 = x1.min(inner.right() - 1.0);
+                    let x0 = (inner.x + width_between(&state.buffer, start, a, scale))
+                        .max(inner.x + 1.0);
+                    let x1 = (inner.x + width_between(&state.buffer, start, b, scale))
+                        .min(inner.right() - 1.0);
                     if x1 > x0 {
                         let bar = Rect::new(x0, r.y + 5.0, x1 - x0, r.h - 10.0);
                         p.fill(bar, 3.0, pal.accent.with_alpha(0.32));
@@ -2998,7 +3335,13 @@ fn draw_row(
                 }
                 let shown = p.truncate(&state.buffer[start..], TEXT_PX, inner.w);
                 p.text_in(&shown, inner, TEXT_PX, pal.text, Weight::Regular);
-                let x = (inner.x + caret + 1.0).min(r.right() - 8.0);
+                // 水平滚动条压在内框下沿：只有在“在编辑 + 真的放不下”时才画。
+                if let Some(thumb) = text_thumb(state, inner) {
+                    p.fill(text_scroll_track(inner), 2.5, pal.line.with_alpha(0.28));
+                    p.fill(thumb, 2.5, pal.accent.with_alpha(0.75));
+                }
+                let caret_x = inner.x + width_between(&state.buffer, start, state.cursor, scale);
+                let x = caret_x.clamp(inner.x, inner.right() - 2.0);
                 p.line(x, r.y + 8.0, x, r.bottom() - 8.0, pal.accent, 1.6);
             } else {
                 // 不编辑时看头部（命令开头更重要）。
@@ -3819,16 +4162,208 @@ mod tests {
 
     #[test]
     fn a_long_line_scrolls_so_the_caret_stays_visible() {
-        // 单行输入框放不下时，从光标往前裁：光标始终在框内。
-        let buffer: String = "abcdefghij".repeat(12);
-        let (start, caret) = edit_geom(&buffer, buffer.len(), 80.0, 1.0);
-        assert!(start > 0, "长行应该已经左移（start={start}）");
-        assert!(caret <= 80.0, "光标跑出框外了（caret={caret}）");
-        assert!(buffer.is_char_boundary(start));
+        // 单行输入框放不下时 `offset` 往右跟，光标始终在框内（ADR-044）。
+        let long: String = "abcdefghij".repeat(12);
+        let mut m = editing_label(&long);
+        let inner = text_inner_of(&mut m, EditTarget::ItemLabel(2));
+        let narrow = Rect::new(inner.x, inner.y, 80.0, inner.h);
+        set_edit_viewport(&mut m, narrow, 1.0);
+        edit_move(&mut m, EditMotion::End, false);
+        let e = m.editing.as_ref().expect("still editing");
+        assert!(e.offset > 0, "长行应该已经左移（offset={}）", e.offset);
+        assert!(e.buffer.is_char_boundary(e.offset));
+        assert!(
+            width_between(&e.buffer, e.offset, e.cursor, 1.0) <= 80.0 + 0.01,
+            "光标跑出框外了"
+        );
 
         // 短行不滚（否则开头两个字会莫名消失）。
-        let (start, caret) = edit_geom("abc", 3, 400.0, 1.0);
-        assert_eq!((start, caret), (0, width_of("abc")));
+        let mut m = editing_label("abc");
+        let inner = text_inner_of(&mut m, EditTarget::ItemLabel(2));
+        set_edit_viewport(&mut m, Rect::new(inner.x, inner.y, 400.0, inner.h), 1.0);
+        edit_move(&mut m, EditMotion::Home, false);
+        assert_eq!(m.editing.as_ref().unwrap().offset, 0);
+        edit_move(&mut m, EditMotion::End, false);
+        assert_eq!(m.editing.as_ref().unwrap().offset, 0);
+    }
+
+    // ── 输入框：双击选词、剪贴板、水平滚动条（ADR-044） ──
+
+    #[test]
+    fn double_clicking_selects_one_path_segment() {
+        let text = "C:\\work\\tools\\run.exe";
+        let mut m = editing_label(text);
+        let inner = text_inner_of(&mut m, EditTarget::ItemLabel(2));
+
+        // 双击 “tools” 中间：只选这一段，不是整条路径。
+        select_word(&mut m, inner, inner.x + caret_x_of(text, 10), 1.0);
+        let picked = selection(m.editing.as_ref().unwrap()).expect("selection");
+        assert_eq!(&text[picked.0..picked.1], "tools");
+
+        // 双击分隔符本身：只选它一个字符（再双击下一个词才不会“跨过去”）。
+        select_word(&mut m, inner, inner.x + caret_x_of(text, 7), 1.0);
+        let picked = selection(m.editing.as_ref().unwrap()).expect("selection");
+        assert_eq!(&text[picked.0..picked.1], "\\");
+
+        // 中文连续一串算一个词。
+        let mut m = editing_label("打开记事本");
+        let inner = text_inner_of(&mut m, EditTarget::ItemLabel(2));
+        select_word(&mut m, inner, inner.x + caret_x_of("打开记事本", 6), 1.0);
+        assert_eq!(selection(m.editing.as_ref().unwrap()), Some((0, 15)));
+    }
+
+    #[test]
+    fn selecting_everything_then_typing_replaces_the_buffer() {
+        let mut m = editing_label("abc");
+        select_all(&mut m);
+        assert_eq!(selection(m.editing.as_ref().unwrap()), Some((0, 3)));
+        edit_text(&mut m, "xyz");
+        assert_eq!(buffer_and_cursor(&m), ("xyz", 3));
+    }
+
+    #[test]
+    fn paste_flattens_multiline_and_drops_control_chars() {
+        let text = "C:\\work\\a.txt";
+        let mut m = editing_label(text);
+        let inner = text_inner_of(&mut m, EditTarget::ItemLabel(2));
+        // 选中 “work” 再粘贴 = 替换选区。
+        select_word(&mut m, inner, inner.x + caret_x_of(text, 5), 1.0);
+        assert_eq!(selection(m.editing.as_ref().unwrap()), Some((3, 7)));
+        assert!(paste(&mut m, "bin\r\nx\ty\u{7}"));
+        assert_eq!(buffer_and_cursor(&m).0, "C:\\bin x y\\a.txt");
+
+        // 全是控制字符（没有换行） = 什么也没粘进来。
+        assert!(!paste(&mut m, "\r\u{7}\u{1b}"));
+        // 只有换行/制表符 = 两个空格：单行框里空格是合法输入，不能当“空”丢掉。
+        assert!(paste(&mut m, "\n\t"));
+        assert_eq!(buffer_and_cursor(&m).0, "C:\\bin x y  \\a.txt");
+    }
+
+    #[test]
+    fn cut_and_copy_do_nothing_without_something_to_act_on() {
+        // 没在编辑：不碰剪贴板（也不 panic）。
+        let m = model();
+        assert!(!copy_selection(&m));
+        // 在编辑但没选区：剪切什么都不干（整段剪切等于清空，太危险）。
+        let mut m = editing_label("abc");
+        assert!(!cut_selection(&mut m));
+        assert_eq!(buffer_and_cursor(&m), ("abc", 3));
+    }
+
+    #[test]
+    fn scrollbar_appears_only_when_the_text_overflows() {
+        let mut m = editing_label("abc");
+        let inner = text_inner_of(&mut m, EditTarget::ItemLabel(2));
+        // 量下宽度（点一下就记下内框宽）。
+        set_caret_from_x(&mut m, inner, inner.x + 1.0, false, 1.0);
+        {
+            let e = m.editing.as_ref().unwrap();
+            assert!(!text_overflow(e));
+            assert!(text_thumb(e, inner).is_none(), "放得下就不该有滚动条");
+        }
+
+        // 压窄视口 → 出现滚动条，thumb 不会跑出内框。
+        let long: String = "abcdefghij".repeat(12);
+        let mut m = editing_label(&long);
+        let inner = text_inner_of(&mut m, EditTarget::ItemLabel(2));
+        let narrow = Rect::new(inner.x, inner.y, 120.0, inner.h);
+        set_edit_viewport(&mut m, narrow, 1.0);
+        let e = m.editing.as_ref().unwrap();
+        assert!(text_overflow(e));
+        let thumb = text_thumb(e, narrow).expect("overflow -> thumb");
+        assert!(thumb.w > 0.0 && thumb.w <= narrow.w + 0.01);
+        assert!(thumb.x >= narrow.x - 0.01 && thumb.right() <= narrow.right() + 0.01);
+        // 刚好点在 thumb 上才算命中滚动条，压在正文上不算。
+        let on = Point::new(thumb.x + thumb.w * 0.5, thumb.bottom() - 1.0);
+        assert!(text_scrollbar_at(e, narrow, on));
+        assert!(!text_scrollbar_at(
+            e,
+            narrow,
+            Point::new(narrow.x + 1.0, narrow.y + 2.0)
+        ));
+    }
+
+    #[test]
+    fn dragging_the_scrollbar_moves_the_viewport() {
+        let long: String = "abcdefghij".repeat(12);
+        let mut m = editing_label(&long);
+        let inner = text_inner_of(&mut m, EditTarget::ItemLabel(2));
+        let narrow = Rect::new(inner.x, inner.y, 120.0, inner.h);
+        set_edit_viewport(&mut m, narrow, 1.0);
+        edit_move(&mut m, EditMotion::Home, false);
+        assert_eq!(m.editing.as_ref().unwrap().offset, 0);
+
+        // 拖到中间：offset 往右、且停在字符边界上。
+        set_offset_from_x(&mut m, narrow, narrow.x + narrow.w * 0.5);
+        let e = m.editing.as_ref().unwrap();
+        assert!(e.offset > 0, "拖到中间应该往右滚");
+        assert!(e.buffer.is_char_boundary(e.offset));
+
+        // 拖滚动条不能挪光标（否则用户刚选好的选区会被当场抹掉）。
+        assert_eq!(e.cursor, 0, "拖滚动条不该把光标带走");
+
+        // 拖回最左：回到开头。
+        set_offset_from_x(&mut m, narrow, narrow.x - 50.0);
+        assert_eq!(m.editing.as_ref().unwrap().offset, 0);
+    }
+
+    #[test]
+    fn wheel_scrolls_the_edit_horizontally() {
+        let long: String = "abcdefghij".repeat(12);
+        let mut m = editing_label(&long);
+        let inner = text_inner_of(&mut m, EditTarget::ItemLabel(2));
+        let narrow = Rect::new(inner.x, inner.y, 120.0, inner.h);
+        set_edit_viewport(&mut m, narrow, 1.0);
+        edit_move(&mut m, EditMotion::Home, false);
+        assert_eq!(m.editing.as_ref().unwrap().offset, 0);
+
+        scroll_edit(&mut m, 48.0);
+        assert!(m.editing.as_ref().unwrap().offset > 0, "滚轮应该往右带");
+        scroll_edit(&mut m, -10_000.0);
+        assert_eq!(m.editing.as_ref().unwrap().offset, 0, "往左滚到底就是 0");
+    }
+
+    #[test]
+    fn the_scrollbar_is_actually_painted() {
+        // 几何对不代表画出来了（ADR-043 就抓过“命中对了但没画”）。这里直接渲染看像素：
+        // 同样位置，长文本比短文本多出来的东西就该是那条滚动条。
+        let band_diff = |short: &Model, long: &Model, inner: Rect| -> usize {
+            let mut a = tiny_skia::Pixmap::new(760, 600).expect("pixmap");
+            let mut b = tiny_skia::Pixmap::new(760, 600).expect("pixmap");
+            draw(&mut a, &layout(short, 760.0, 600.0), short);
+            draw(&mut b, &layout(long, 760.0, 600.0), long);
+            let mut diff = 0;
+            let y0 = (inner.bottom() as u32).saturating_sub(5);
+            let y1 = (inner.bottom() as u32).saturating_sub(1);
+            let x0 = inner.x as u32 + 3;
+            let x1 = (inner.x + inner.w) as u32 - 3;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let (Some(pa), Some(pb)) = (a.pixel(x, y), b.pixel(x, y)) else {
+                        continue;
+                    };
+                    if (pa.red(), pa.green(), pa.blue()) != (pb.red(), pb.green(), pb.blue()) {
+                        diff += 1;
+                    }
+                }
+            }
+            diff
+        };
+
+        let setup = |text: &str| -> (Model, Rect) {
+            let mut m = editing_label(text);
+            let inner = text_inner_of(&mut m, EditTarget::ItemLabel(2));
+            set_edit_viewport(&mut m, inner, 1.0);
+            set_offset_from_x(&mut m, inner, inner.x + inner.w * 0.5);
+            (m, inner)
+        };
+        let (short, inner) = setup("abc");
+        let (long, _) = setup(&"abcdefghij".repeat(30));
+        let painted = band_diff(&short, &long, inner);
+        assert!(
+            painted > 40,
+            "内框下沿没看到滚动条（差异像素 painted={painted}）"
+        );
     }
 
     #[test]

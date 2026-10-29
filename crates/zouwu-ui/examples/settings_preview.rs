@@ -37,6 +37,28 @@ fn shoot(name: &str, w: f32, h: f32, model: &mut Model, scale: f32) {
     println!("{}", path.display());
 }
 
+/// 把“当前 DPI + 输入框宽度”告诉模型（真程序里由 `rebuild_layout` 做）。
+/// 返回内框矩形，方便接着模拟“拖滚动条”。
+fn edit_viewport(
+    m: &mut Model,
+    w: f32,
+    h: f32,
+    target: settings::EditTarget,
+) -> Option<zouwu_ui::widget::Rect> {
+    let layout = settings::layout(m, w, h);
+    let inner = layout
+        .rows
+        .iter()
+        .find_map(|(row, rl)| match &row.control {
+            settings::Control::Text { target: t, .. } if *t == target => {
+                Some(settings::text_inner(rl.hit))
+            }
+            _ => None,
+        })?;
+    settings::set_edit_viewport(m, inner, 1.0);
+    Some(inner)
+}
+
 fn main() {
     let mut config = Config::default();
     config.appearance.theme = "lined-paper".to_string();
@@ -138,6 +160,32 @@ fn main() {
         &mut m4,
         1.25,
     );
+
+    // 长命令编辑中 + 已经横滚到中间：水平滚动条（轨道 + thumb）要看得见，
+    // 而且可见文字必须从“滚到的那一个字”开始（不是从头截）。
+    let mut long = Config::default();
+    let mut long_item = zouwu_core::config::RingItem::custom("custom.1");
+    long_item.label = "打开工具".to_string();
+    long_item.command =
+        "C:\\Program Files\\Some Vendor\\Some Tool\\bin\\tool.exe --flag value".to_string();
+    long.ring.items.push(long_item);
+    let mut m5 = Model::new(
+        long,
+        Vec::new(),
+        Vec::new(),
+        Paths {
+            config: String::new(),
+            log: String::new(),
+        },
+    );
+    m5.set_tab(Tab::Bubbles);
+    settings::begin_edit(&mut m5, settings::EditTarget::ItemCommand(2));
+    if let Some(inner) = edit_viewport(&mut m5, 760.0, 600.0, settings::EditTarget::ItemCommand(2))
+    {
+        // 拖到 45% 处：文字与 thumb 都得跟着走。
+        settings::set_offset_from_x(&mut m5, inner, inner.x + inner.w * 0.45);
+    }
+    shoot("settings-bubbles-scrolled.png", 760.0, 600.0, &mut m5, 1.0);
 
     // 一颗球都没有时的空态 + 漏出的描边不该出现。
     let mut empty = Config::default();
