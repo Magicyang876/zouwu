@@ -15,7 +15,7 @@
 use std::time::Instant;
 
 use tiny_skia::{Color, Pixmap};
-use zouwu_core::action::{default_ring, ActionItem};
+use zouwu_core::action::ActionItem;
 use zouwu_core::geom::{Point, Rect};
 use zouwu_core::ring::{solve_rotation, RingConfig};
 use zouwu_core::theme::Theme;
@@ -27,7 +27,7 @@ fn bubble_paints(
     center: Point,
     view: Rect,
     openness: f32,
-) -> Vec<BubblePaint> {
+) -> Vec<BubblePaint<'static>> {
     let rotation = solve_rotation(ring, center, view, items.len());
     ring.layout(items.len(), center, rotation)
         .into_iter()
@@ -38,6 +38,7 @@ fn bubble_paints(
             scale: openness,
             alpha: openness.clamp(0.0, 1.0),
             glyph: item.glyph,
+            icon: None,
             selected: false,
         })
         .collect()
@@ -57,7 +58,10 @@ fn main() {
     let mut pixmap = Pixmap::new(px, px).expect("pixmap");
     pixmap.fill(Color::TRANSPARENT);
 
-    let items = default_ring();
+    let items = zouwu_core::action::resolve(
+        &zouwu_core::config::RingCfg::default().items,
+        &zouwu_core::i18n::I18n::new("zh-CN"),
+    );
     let ring = RingConfig::default();
     let center = Point::new(logical * 0.5, logical * 0.5);
     let view = Rect::new(0.0, 0.0, logical, logical);

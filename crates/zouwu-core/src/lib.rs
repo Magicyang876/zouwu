@@ -16,7 +16,7 @@ pub mod ring;
 pub mod skin;
 pub mod theme;
 
-pub use action::{default_ring, ActionItem, Glyph};
+pub use action::{ActionItem, Glyph};
 pub use anim::Spring;
 pub use config::{Appearance, Config};
 pub use drag::{Drag, DragOutcome, DRAG_THRESHOLD_SQ};

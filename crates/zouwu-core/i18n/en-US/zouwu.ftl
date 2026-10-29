@@ -38,6 +38,7 @@ settings-auto-saved = Changes apply instantly — nothing to save
 settings-tab-general = General
 settings-tab-interaction = Interaction
 settings-tab-appearance = Appearance
+settings-tab-bubbles = Bubbles
 settings-tab-about = About
 
 settings-language = Language
@@ -181,3 +182,31 @@ history-title = Clipboard history
 history-footer = ↑↓ select · Enter copy and close · Delete remove · Esc close
 history-footer-empty = Nothing yet; copy something and it shows up here
 history-empty = Nothing yet
+
+# ── Bubbles (the ring's feature list) ─────────────────────
+settings-tab-bubbles = Bubbles
+settings-section-bubbles = Order & hotkeys
+settings-bubbles-note = Earlier entries unfold first; a disabled bubble leaves the ring, and the rest spread evenly. Each bubble can have its own hotkey — leave it empty for none.
+settings-bubbles-name = Name
+settings-bubbles-name-hint = Shown in settings; the ring only shows the icon
+settings-bubbles-command = Command
+settings-bubbles-command-hint = One command line, e.g. notepad.exe or code C:\work
+settings-bubbles-icon = Icon
+settings-bubbles-icon-default = Default icon
+settings-bubbles-icon-pick = Change icon…
+settings-bubbles-icon-failed = Cannot import icon
+settings-bubbles-remove = Remove this bubble
+settings-bubbles-remove-hint = Cannot be undone
+settings-section-bubbles-add = Add
+settings-bubbles-add-command = Add a command bubble
+settings-bubbles-add-command-hint = Adds an empty bubble you can name and point at a command
+settings-bubbles-add-program = Add from a program…
+settings-bubbles-empty = No bubbles
+settings-bubbles-empty-text = empty
+settings-bubbles-full = Limit reached ({ $max } max)
+settings-bubbles-hotkey-taken = That hotkey already belongs to "{ $name }"
+settings-hotkey-none = No hotkey
+
+# ── Custom bubble: launch failure report ──
+report-launch-failed = This bubble did not start
+report-launch-footer = Fix the command or icon in Settings › Bubbles

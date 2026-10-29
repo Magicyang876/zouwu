@@ -223,13 +223,15 @@ fn shoot(name: &str, skin: &Skin, openness: f32, blink: f32, breath: f32) {
     println!("{name}: {} visible px -> {}", visible, path.display());
 }
 
-fn demo_bubbles(openness: f32) -> Vec<zouwu_ui::paint::BubblePaint> {
-    use zouwu_core::action::default_ring;
+fn demo_bubbles(openness: f32) -> Vec<zouwu_ui::paint::BubblePaint<'static>> {
     use zouwu_core::geom::{Point, Rect};
     use zouwu_core::ring::{solve_rotation, RingConfig};
     use zouwu_ui::paint::BubblePaint;
 
-    let items = default_ring();
+    let items = zouwu_core::action::resolve(
+        &zouwu_core::config::RingCfg::default().items,
+        &zouwu_core::i18n::I18n::new("zh-CN"),
+    );
     let ring = RingConfig::default();
     let center = Point::new(170.0, 170.0);
     let view = Rect::new(0.0, 0.0, 340.0, 340.0);
@@ -243,6 +245,7 @@ fn demo_bubbles(openness: f32) -> Vec<zouwu_ui::paint::BubblePaint> {
             scale: openness,
             alpha: openness.clamp(0.0, 1.0),
             glyph: item.glyph,
+            icon: None,
             selected: false,
         })
         .collect()
@@ -303,7 +306,7 @@ cost per frame (340² canvas, release, best of {ROUNDS}×{FRAMES}):"
 
 fn scene_for<'a>(
     theme: &'a Theme,
-    bubbles: &'a [zouwu_ui::paint::BubblePaint],
+    bubbles: &'a [zouwu_ui::paint::BubblePaint<'a>],
     skin: Option<&'a Skin>,
     size: u32,
 ) -> Scene<'a> {

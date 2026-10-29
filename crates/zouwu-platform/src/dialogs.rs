@@ -9,6 +9,23 @@
 
 use std::path::PathBuf;
 
+/// 选一个程序文件（`.exe` 或任何快捷方式），用来新增一颗“打开它”的球。
+pub fn pick_program() -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .set_title("zouwu — choose a program")
+        .add_filter("programs", &["exe", "com", "bat", "cmd", "lnk", "ps1"])
+        .add_filter("all files", &["*"])
+        .pick_file()
+}
+
+/// 选一张 PNG 当气泡球的图标。
+pub fn pick_icon_image() -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .set_title("zouwu — choose a bubble icon")
+        .add_filter("png image", &["png"])
+        .pick_file()
+}
+
 /// 选一个 `.zwskin` 皮肤包。
 pub fn pick_skin_package() -> Option<PathBuf> {
     rfd::FileDialog::new()

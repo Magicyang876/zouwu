@@ -17,13 +17,15 @@ use crate::skin::Skin;
 /// 代码绘制小兽的呼吸幅度（±3%）。位图皮肤用它自己的 `geometry.breath_amount`。
 pub const DEFAULT_BREATH_AMOUNT: f32 = 0.03;
 
-pub struct BubblePaint {
+pub struct BubblePaint<'a> {
     pub center: Point,
     pub radius: f32,
     /// 弹簧值：0 = 收起，1 = 完全展开（可能略大于 1，即过冲）
     pub scale: f32,
     pub alpha: f32,
     pub glyph: Glyph,
+    /// 自定义图标（PNG 位图）；有它就不画字形。
+    pub icon: Option<&'a Pixmap>,
     pub selected: bool,
 }
 
@@ -43,7 +45,7 @@ pub struct Scene<'a> {
     /// 呼吸相位：0 = 常态，1 = 吸气顶点。**幅度**由皮肤决定，见 [`Scene::body_radius`]。
     pub breath: f32,
     pub theme: &'a Theme,
-    pub bubbles: &'a [BubblePaint],
+    pub bubbles: &'a [BubblePaint<'a>],
     /// 位图皮肤；`None` 或 `procedural` → 走代码绘制。
     pub skin: Option<&'a Skin>,
 }
@@ -116,6 +118,29 @@ impl Ctx<'_> {
             self.pixmap
                 .fill_path(&path, &paint, FillRule::Winding, ts, None);
         }
+    }
+
+    /// 把一张位图画进图标区：等比缩放后居中，占 `size` 见方。
+    ///
+    /// 图不一定小，这里是**整个程序唯一会把用户 PNG 贴到屏上的地方**：
+    /// 缩放里那个 `self.s` 是 DPI 缩放，漏乘就会在高 DPI 下缩成一小块。
+    fn draw_icon(&mut self, icon: &Pixmap, center: Point, size: f32, alpha: f32) {
+        let (pw, ph) = (icon.width() as f32, icon.height() as f32);
+        let target = self.px(size);
+        if pw <= 0.0 || ph <= 0.0 || target <= 0.0 {
+            return;
+        }
+        let k = (target / pw).min(target / ph);
+        let (cx, cy) = self.point(center);
+        let ts = Transform::from_scale(k, k).post_translate(cx - pw * k * 0.5, cy - ph * k * 0.5);
+        let paint = PixmapPaint {
+            opacity: alpha.clamp(0.0, 1.0),
+            blend_mode: tiny_skia::BlendMode::SourceOver,
+            quality: tiny_skia::FilterQuality::Bilinear,
+        };
+        self.pixmap
+            .as_mut()
+            .draw_pixmap(0, 0, icon.as_ref(), &paint, ts, None);
     }
 
     fn stroke_circle(&mut self, center: Point, radius: f32, width: f32, color: Color) {
@@ -656,7 +681,10 @@ fn draw_bubbles(ctx: &mut Ctx<'_>, scene: &Scene<'_>, theme: &Theme) {
         } else {
             theme.glyph
         };
-        draw_glyph(ctx, b.glyph, b.center, r, col(g, a));
+        match b.icon {
+            Some(icon) => ctx.draw_icon(icon, b.center, r * 0.92, a),
+            None => draw_glyph(ctx, b.glyph, b.center, r, col(g, a)),
+        };
     }
 }
 

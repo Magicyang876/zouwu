@@ -2,10 +2,11 @@
 //!
 //! IO 由 `zouwu-platform` 负责，保证核心层可在任意环境（含测试）下使用。
 
+use crate::action::{CLIPBOARD_ID, QRCODE_ID};
 use crate::ring::{RingConfig, DEG};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -127,6 +128,77 @@ pub struct RingCfg {
     pub float_period_s: f32,
     /// 展开时每颗气泡的错峰间隔（毫秒）
     pub expand_stagger_ms: u64,
+    /// 环上有哪些球、按什么次序、各自的热键（ADR-042）。
+    ///
+    /// **列表顺序 = 环上的顺序**（从基准角开始顺时针），面板里的上移/下移
+    /// 改的就是这里的行序，所以配置文件读起来和看到的顺序一致。
+    ///
+    pub items: Vec<RingItem>,
+}
+
+/// 环上的一颗球。
+///
+/// `id` 是稳定标识：内置功能的 id 以 `builtin.` 开头（见
+/// [`crate::action::BUILTINS`]），用户新增的球用 `custom.N`。
+/// 只有**启用了**的球才会出现在环上——"配置了几个就几个球"。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RingItem {
+    pub id: String,
+    /// 是否出现在环上（false = 配置里留着，环上不画）
+    pub enabled: bool,
+    /// 这颗球自己的全局热键；空串 = 不给热键，只能鼠标点。
+    pub hotkey: String,
+    /// 自定义球的显示名（内置球留空，走 i18n）
+    pub label: String,
+    /// 自定义球要运行的东西：可执行文件路径，或一条交给 `cmd /C` 的命令。
+    /// 内置球留空。
+    pub command: String,
+    /// 自定义球的图标（PNG/ICO 路径）；空 = 用内置的闪电简笔图标。
+    pub icon: String,
+}
+
+impl Default for RingItem {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            // 缺省就是生效：手写一条 `[[ring.items]]` 只写 id 时，意图显然是"加上它"。
+            enabled: true,
+            hotkey: String::new(),
+            label: String::new(),
+            command: String::new(),
+            icon: String::new(),
+        }
+    }
+}
+
+impl RingItem {
+    pub fn builtin(id: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            enabled: true,
+            hotkey: crate::action::default_hotkey(id).to_string(),
+            ..Self::default()
+        }
+    }
+
+    /// 新增一颗自定义球时用的空条目（id 由调用方给）。
+    pub fn custom(id: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            ..Self::default()
+        }
+    }
+
+    /// 自定义球的显示名：用户填了就用，没填就拿 id 顶上（面板里至少能看到一行）。
+    /// 两边都 trim 过——`resolve()` 拿到的可能是没经过 `normalized()` 的原始条目。
+    pub fn display_name(&self) -> &str {
+        let label = self.label.trim();
+        if !label.is_empty() {
+            return label;
+        }
+        self.id.trim()
+    }
 }
 
 impl Default for RingCfg {
@@ -140,8 +212,20 @@ impl Default for RingCfg {
             float_amplitude: 2.0,
             float_period_s: 3.0,
             expand_stagger_ms: 24,
+            items: default_ring_items(),
         }
     }
+}
+
+/// 出厂清单：**只放真的接了线的功能**（ADR-042）。
+///
+/// 早先的版本把截图/翻译/取色/启动器/番茄钟/更多也摆在环上，点下去只会写一行
+/// "action not implemented yet" 的日志——那是骗人的。没实现的功能不进环，也不进面板。
+pub fn default_ring_items() -> Vec<RingItem> {
+    vec![
+        RingItem::builtin(QRCODE_ID),
+        RingItem::builtin(CLIPBOARD_ID),
+    ]
 }
 
 impl RingCfg {
@@ -153,6 +237,34 @@ impl RingCfg {
             max_per_ring: self.max_per_ring,
             ring_gap: self.ring_gap,
         }
+    }
+
+    /// 收一遍条目清单：丢掉空 id、按 id 去重（先出现的赢）、最多 16 个。
+    ///
+    /// 条目是用户手改 TOML 的入口，也是热键槽位与面板行的来源：重复 id 会让两颗球
+    /// 共用一个动作，超过 16 个既放不进环也占满热键槽位，所以在唯一的入口处收九。
+    pub const MAX_ITEMS: usize = 16;
+
+    pub fn normalized(&self) -> Vec<RingItem> {
+        let mut out: Vec<RingItem> = Vec::new();
+        for item in &self.items {
+            let id = item.id.trim();
+            if id.is_empty() || out.iter().any(|kept| kept.id == id) {
+                continue;
+            }
+            out.push(RingItem {
+                id: id.to_string(),
+                hotkey: item.hotkey.trim().to_string(),
+                label: item.label.trim().to_string(),
+                command: item.command.trim().to_string(),
+                icon: item.icon.trim().to_string(),
+                enabled: item.enabled,
+            });
+            if out.len() == Self::MAX_ITEMS {
+                break;
+            }
+        }
+        out
     }
 }
 
@@ -203,10 +315,12 @@ pub struct General {
     pub hotkey: String,
     /// 扫屏幕二维码的热键；空串 = 不注册。
     ///
-    /// 单独一条而不是复用呼出热键：二维码是"想到才按"的动作，
-    /// 不该逼用户先把小兽叫出来、再点气泡。
+    /// **已弃用**（ADR-042）：热键变成“跟着球走”，住在 `ring.items[].hotkey`。
+    /// 这两个字段只读不写，唯一用途是把老配置里的热键搬到新位置。
+    #[serde(default, skip_serializing)]
     pub qr_hotkey: String,
-    /// 打开剪贴板历史的热键；空串 = 不注册。
+    /// 打开剪贴板历史的热键；空串 = 不注册。**已弃用**，同 `qr_hotkey`。
+    #[serde(default, skip_serializing)]
     pub clipboard_hotkey: String,
     /// 开机自启（Windows 注册表 Run 键）。
     pub start_on_boot: bool,
@@ -372,10 +486,34 @@ impl Config {
     /// 配置迁移入口：v1 没有 `[general]`，v2 没有 `[appearance]`，
     /// 两者都靠 `#[serde(default)]` 补全，这里只把版本号推进到最新。
     pub fn migrated(mut self) -> Self {
-        if self.schema_version < SCHEMA_VERSION {
+        let legacy = self.schema_version < SCHEMA_VERSION;
+        if legacy {
             self.schema_version = SCHEMA_VERSION;
         }
         self.eye_care = self.eye_care.clamped();
+
+        // v8（ADR-042）：环上的球从“写死的 8 颗”改成配置清单。
+        //
+        // 老配置里没有 `[[ring.items]]`，反序列化时被容器级 `#[serde(default)]`
+        // 补成**出厂清单本身**，所以“文件里有没有这项”要靠版本号判断：
+        // v8 以前一律当作没有清单，并把 `[general]` 里那两个热键搬进对应的球
+        // （用户的热键不能凭空消失）。显式写过清单的老配置不碰——手写的优先。
+        if legacy && self.ring.items == default_ring_items() {
+            let legacy_qr = self.general.qr_hotkey.trim().to_string();
+            let legacy_clip = self.general.clipboard_hotkey.trim().to_string();
+            for item in &mut self.ring.items {
+                match item.id.as_str() {
+                    QRCODE_ID => item.hotkey = legacy_qr.clone(),
+                    CLIPBOARD_ID => item.hotkey = legacy_clip.clone(),
+                    _ => {}
+                }
+            }
+        }
+        // 收起后两个字段一律回归默认值：它们不参与 diff，也不写回磁盘，
+        // 留着旧值只会让“迁移过了”这件事在内存里看不出来。
+        self.general.qr_hotkey = General::default().qr_hotkey;
+        self.general.clipboard_hotkey = General::default().clipboard_hotkey;
+        self.ring.items = self.ring.normalized();
         self
     }
 
@@ -504,6 +642,110 @@ mod tests {
         let back = Config::from_toml(&text).expect("parse");
         assert_eq!(back.interaction.hover_delay_ms, 150);
         assert_eq!(back.ring.radius, 112.0);
+    }
+
+    #[test]
+    fn ring_items_roundtrip_as_a_list_in_config_order() {
+        let mut cfg = Config::default();
+        cfg.ring.items.push(RingItem {
+            id: "custom.1".to_string(),
+            enabled: false,
+            hotkey: "Ctrl+Alt+T".to_string(),
+            label: "终端".to_string(),
+            command: "C:\\Windows\\System32\\cmd.exe".to_string(),
+            icon: String::new(),
+        });
+        let text = cfg.to_toml();
+        assert!(
+            text.contains("[[ring.items]]"),
+            "条目得写成表数组：\n{text}"
+        );
+        let back = Config::from_toml(&text).expect("parse");
+        assert_eq!(back.ring.items, cfg.ring.items);
+        // 顺序就是文件顺序（面板上下移改的就是它）
+        assert_eq!(back.ring.items[2].id, "custom.1");
+        assert!(!back.ring.items[2].enabled, "关掉的球要留在配置里");
+        // 弃用字段不再写盘
+        assert!(
+            !text.contains("qr_hotkey"),
+            "旧热键字段不该再落盘：\n{text}"
+        );
+    }
+
+    #[test]
+    fn legacy_hotkeys_move_into_ring_items() {
+        // v7 老配置：环是写死的，热键簿在 [general] 里
+        let text = "schema_version = 7\n\n[general]\nlanguage = \"zh-CN\"\nqr_hotkey = \"Ctrl+Alt+1\"\nclipboard_hotkey = \"\"\n";
+        let cfg = Config::from_toml(text).expect("parse").migrated();
+        assert_eq!(cfg.schema_version, SCHEMA_VERSION);
+        assert_eq!(cfg.ring.items.len(), 2, "缺清单时补出厂清单");
+        assert_eq!(cfg.ring.items[0].id, QRCODE_ID);
+        assert_eq!(cfg.ring.items[0].hotkey, "Ctrl+Alt+1", "用户的热键不能掉");
+        assert_eq!(cfg.ring.items[1].id, CLIPBOARD_ID);
+        assert_eq!(cfg.ring.items[1].hotkey, "", "老配置里清空的热键要保持空");
+        assert_eq!(cfg.general.qr_hotkey, General::default().qr_hotkey);
+    }
+
+    #[test]
+    fn explicit_items_win_over_legacy_fields() {
+        let text = "schema_version = 7\n\n[general]\nqr_hotkey = \"Ctrl+Alt+1\"\n\n[[ring.items]]\nid = \"builtin.clipboard\"\nhotkey = \"Win+V\"\n";
+        let cfg = Config::from_toml(text).expect("parse").migrated();
+        assert_eq!(cfg.ring.items.len(), 1, "显式清单不被出厂清单覆盖");
+        assert_eq!(cfg.ring.items[0].id, CLIPBOARD_ID);
+        assert_eq!(
+            cfg.ring.items[0].hotkey, "Win+V",
+            "显式条目里的热键原样保留"
+        );
+    }
+
+    #[test]
+    fn item_defaults_fill_in_missing_keys() {
+        let cfg = Config::from_toml("[[ring.items]]\nid = \"builtin.qrcode\"\n").expect("parse");
+        let item = &cfg.ring.items[0];
+        assert!(item.enabled, "只写 id 就是“加上它”");
+        assert_eq!(item.hotkey, "", "没写热键就是不给热键");
+        assert!(item.command.is_empty());
+    }
+
+    #[test]
+    fn normalized_drops_blank_and_duplicate_ids() {
+        let cfg = RingCfg {
+            items: vec![
+                RingItem {
+                    id: "  ".to_string(),
+                    ..RingItem::default()
+                },
+                RingItem {
+                    id: " builtin.qrcode ".to_string(),
+                    hotkey: "  Ctrl+Alt+Q ".to_string(),
+                    ..RingItem::default()
+                },
+                RingItem {
+                    id: "builtin.qrcode".to_string(),
+                    hotkey: "Ctrl+Alt+9".to_string(),
+                    ..RingItem::default()
+                },
+            ],
+            ..RingCfg::default()
+        };
+        let items = cfg.normalized();
+        assert_eq!(items.len(), 1, "空 id 丢掉，重复 id 只留先出现的");
+        assert_eq!(items[0].id, "builtin.qrcode");
+        assert_eq!(items[0].hotkey, "Ctrl+Alt+Q", "两边空白要 trim");
+    }
+
+    #[test]
+    fn ring_item_count_is_capped() {
+        let cfg = RingCfg {
+            items: (0..40)
+                .map(|i| RingItem {
+                    id: format!("custom.{i}"),
+                    ..RingItem::default()
+                })
+                .collect(),
+            ..RingCfg::default()
+        };
+        assert_eq!(cfg.normalized().len(), RingCfg::MAX_ITEMS);
     }
 
     #[test]

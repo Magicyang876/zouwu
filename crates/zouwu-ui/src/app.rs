@@ -21,7 +21,7 @@ use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 #[cfg(target_os = "windows")]
 use winit::platform::windows::WindowAttributesExtWindows;
 
-use zouwu_core::action::{default_ring, ActionItem};
+use zouwu_core::action::ActionItem;
 use zouwu_core::anim::Spring;
 use zouwu_core::config::{ChangeKind, Config, WindowState};
 use zouwu_core::drag::{Drag, DragOutcome};
@@ -93,7 +93,7 @@ pub fn run() -> Result<(), String> {
     // 主题/皮肤都是"用户可能写错"的输入：加载失败一律退回内置，不让程序打不开。
     let themes = zouwu_platform::assets::load_themes();
     let theme = zouwu_platform::assets::theme_by_id(&themes, &config.appearance.theme);
-    let mut app = App::new(config, theme, themes, default_ring(), instance);
+    let mut app = App::new(config, theme, themes, instance);
     event_loop
         .run_app(&mut app)
         .map_err(|e| format!("run_app: {e}"))?;
@@ -164,6 +164,8 @@ struct App {
     /// 当前皮肤（`procedural` 时没有图层，走代码绘制）
     skin: Skin,
     items: Vec<ActionItem>,
+    /// 自定义球的图标，下标与 [`App::items`] 对齐；内置球恒为 `None`。
+    icons: Vec<Option<Pixmap>>,
 
     window: Option<Arc<Window>>,
     presenter: Option<Box<dyn Presenter>>,
@@ -292,6 +294,30 @@ struct App {
     cycle_next: Option<std::time::Instant>,
 }
 
+/// 把自定义球的图标都解成位图，下标与 `items` 对齐。
+///
+/// 解码失败就退回 `None`（画字形）：用户选了一张坏 PNG，
+/// 不该连球一起消失。读文件放启动时做一次，绘制帧不碰磁盘。
+fn load_icons(items: &[ActionItem]) -> Vec<Option<Pixmap>> {
+    items
+        .iter()
+        .map(|item| {
+            let name = item.icon.as_deref()?;
+            let path = zouwu_platform::assets::resolve_icon(name)?;
+            match std::fs::read(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| Pixmap::decode_png(&bytes).map_err(|e| e.to_string()))
+            {
+                Ok(pixmap) => Some(pixmap),
+                Err(err) => {
+                    log::warn!("icon `{name}` unusable ({err}); falling back to glyph");
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
 /// 读并解码当前皮肤。任何一步失败都退回 `procedural`：
 ///
 /// 皮肤是用户的资源，坏了该少一层皮，不该让常驻程序起不来。
@@ -322,21 +348,18 @@ impl App {
         Some(&self.skin)
     }
 
-    fn new(
-        config: Config,
-        theme: Theme,
-        themes: Vec<Theme>,
-        items: Vec<ActionItem>,
-        instance: InstanceSignal,
-    ) -> Self {
+    fn new(config: Config, theme: Theme, themes: Vec<Theme>, instance: InstanceSignal) -> Self {
         let ring = config.ring.to_ring_config();
         let skin = load_skin(&config.appearance.skin);
         // 历史容量来自配置；从磁盘读出来的条目要按它裁一遍，
         // 否则用户把上限从 100 改成 10 之后，旧条目会一直赖着。
         let mut history = zouwu_platform::load_history();
         history.set_limit(config.clipboard.limit);
-        let n = items.len();
         let i18n = I18n::new(&config.general.language);
+        // 环上显示哪几颗、什么顺序，完全看配置（ADR-042）。
+        let items = zouwu_core::action::resolve(&config.ring.items, &i18n);
+        let icons = load_icons(&items);
+        let n = items.len();
         let visible = config.general.show_on_start;
         Self {
             i18n,
@@ -356,6 +379,7 @@ impl App {
             themes,
             skin,
             items,
+            icons,
             window: None,
             presenter: None,
             pixmap: None,
@@ -498,18 +522,18 @@ impl App {
             if let Some(tray) = &self.tray {
                 tray.apply_language(&self.i18n, &self.config.general.language, self.visible);
             }
+            // 内置球的名字来自 i18n：换语言要重新解一遍，否则环上还是旧语言。
+            self.resolve_items();
+            if self.window.is_some() {
+                self.relayout();
+            }
         }
 
-        if changed.contains(&ChangeKind::Hotkey) {
-            // 热键注册表本身存在 `self.hotkeys` 里，而 `apply_hotkey` 要读 `self.config`：
-            // 先把它取出来，免得同一个 `self` 同时被可变借用与不可变借用。
-            if let Some(mut registrar) = self.hotkeys.take() {
-                let result = self.apply_hotkey(&mut registrar);
-                self.hotkeys = Some(registrar);
-                if let Err(err) = result {
-                    log::warn!("{err}");
-                }
-            }
+        if changed.iter().any(|kind| touches_hotkeys(*kind)) {
+            // 球的增删、改序、开关、每颗球自己的热键，全部归在 `ChangeKind::Ring`：
+            // 它们同样会改变“哪些槽位应该被注册”。只盯 `Hotkey` 的话，面板里改了
+            // 球的键只会存盘、不生效（看起来像“设置不保存”）。
+            self.reapply_hotkeys();
         }
 
         if changed.contains(&ChangeKind::Autostart) {
@@ -543,6 +567,9 @@ impl App {
 
         if changed.contains(&ChangeKind::Ring) {
             self.ring = self.config.ring.to_ring_config();
+            // 球的数量/顺序/图标都可能变了：重新解一遍清单，
+            // 图也重读（用户可能刚刚选了一张新图）。
+            self.resolve_items();
             if self.window.is_some() {
                 self.relayout();
             }
@@ -791,7 +818,45 @@ impl App {
         match id {
             QRCODE_ACTION => self.scan_qr(event_loop),
             CLIPBOARD_ACTION => self.open_history(event_loop),
-            other => log::info!("action not implemented yet: {other}"),
+            _ => self.run_custom(event_loop, id),
+        }
+    }
+
+    /// 自定义球：把命令拉起来。
+    ///
+    /// 拉不起来时弹结果窗而不是只写日志：球是自己配的，点了没反应
+    /// 会让人以为是程序坏了；错在哪里（路径没了、命令拼错）必须看得见。
+    fn run_custom(&mut self, event_loop: &ActiveEventLoop, id: &str) {
+        let Some(item) = self.items.iter().find(|item| item.id == id) else {
+            // 球已从配置里删了，但托盘/热键还指着它：安静走掉即可。
+            log::info!("action `{id}` is no longer on the ring");
+            return;
+        };
+        let Some(command) = item
+            .command
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        else {
+            log::warn!("action `{id}` has no command; nothing to run");
+            return;
+        };
+        let name = item.label.clone();
+        match zouwu_platform::launch::run(command) {
+            Ok(()) => log::info!("action `{id}` launched: {command}"),
+            Err(err) => {
+                log::warn!("action `{id}` failed: {err}");
+                let report = Report {
+                    headline: self.i18n.t("report.launch.failed"),
+                    detail: Some(name.clone()),
+                    entries: vec![Entry {
+                        text: err,
+                        screen: command.to_string(),
+                    }],
+                    footer: self.i18n.t("report.launch.footer"),
+                };
+                self.open_report(event_loop, report);
+            }
         }
     }
 
@@ -972,15 +1037,40 @@ impl App {
         );
     }
 
+    /// 按当前配置重新注册全部热键（呼出 + 每一颗球）。
+    ///
+    /// 热键注册表存在 `self.hotkeys` 里，而 `apply_hotkey` 要读 `self.config`：
+    /// 先把它取出来，免得同一个 `self` 同时被可变借用与不可变借用。
+    fn reapply_hotkeys(&mut self) {
+        if let Some(mut registrar) = self.hotkeys.take() {
+            let result = self.apply_hotkey(&mut registrar);
+            self.hotkeys = Some(registrar);
+            if let Err(err) = result {
+                log::warn!("{err}");
+            }
+        }
+    }
+
     /// 按配置注册热键；解析失败时回退到默认值并记日志。
+    ///
+    /// 两个档次：呼出差错必须自愈（否则用户打不开小兽），
+    /// 球的差错只警告那一颗（一个写错的热键不该把别的球一起废掉）。
     fn apply_hotkey(&self, registrar: &mut HotkeyRegistrar) -> Result<(), String> {
         apply_hotkey_setting(Slot::Summon, &self.config.general.hotkey, registrar)?;
-        apply_hotkey_setting(Slot::ScanQr, &self.config.general.qr_hotkey, registrar)?;
-        apply_hotkey_setting(
-            Slot::Clipboard,
-            &self.config.general.clipboard_hotkey,
-            registrar,
-        )
+        // 先放掉已经不存在的那几颗球（删球/减球）占着的键位。
+        registrar.retain_ring_items(self.config.ring.items.len());
+        for (index, item) in self.config.ring.items.iter().enumerate() {
+            // 关掉的球连热键一起让出来：否则用户关了一个功能，
+            // 那个键位还被一个看不见的开关占着，查都没处查。
+            if !item.enabled {
+                registrar.clear(Slot::RingItem(index));
+                continue;
+            }
+            if let Err(err) = apply_hotkey_setting(Slot::RingItem(index), &item.hotkey, registrar) {
+                log::warn!("ring item `{}` hotkey skipped: {err}", item.id);
+            }
+        }
+        Ok(())
     }
 
     /// 显示 / 隐藏小兽（隐藏 = 缩进托盘，不退出进程）。
@@ -1267,8 +1357,15 @@ impl App {
             log::info!("hotkey: {slot:?} pressed");
             match slot {
                 Slot::Summon => self.toggle_visible(now),
-                Slot::ScanQr => self.pending_action = Some(QRCODE_ACTION.to_string()),
-                Slot::Clipboard => self.pending_action = Some(CLIPBOARD_ACTION.to_string()),
+                Slot::RingItem(index) => {
+                    // 按配置顺序取第 index 条：关掉的球不占位置，所以这里取的是
+                    // **配置里的第几条**，与屏幕上第几颗由 `resolve` 保序对应。
+                    if let Some(item) = self.config.ring.items.get(index) {
+                        if item.enabled {
+                            self.pending_action = Some(item.id.clone());
+                        }
+                    }
+                }
             }
         }
 
@@ -1293,6 +1390,30 @@ impl App {
     fn center(&self) -> Point {
         let (w, h) = self.logical_size();
         Point::new(w * 0.5, h * 0.5)
+    }
+
+    /// 重新按配置解出环上的球（数量/顺序/名字/图标）。
+    ///
+    /// 三个入口：启动、改 `[ring]` 配置（含改开关/排序/图标）、换语言。
+    /// 动画弹簧要跟着数量对齐：多出来的球从 0 开始弹，少掉的直接丢掉，
+    /// 否则 `anims[i]` 会和 `items[i]` 错位，出现"新球一开始就是开的"。
+    fn resolve_items(&mut self) {
+        self.items = zouwu_core::action::resolve(&self.config.ring.items, &self.i18n);
+        self.icons = load_icons(&self.items);
+        let n = self.items.len();
+        if self.anims.len() < n {
+            self.anims.resize_with(n, || Spring::soft(0.0));
+        } else {
+            self.anims.truncate(n);
+        }
+        self.bubbles.truncate(n);
+        if self.hovered_bubble.is_some_and(|i| i >= n) {
+            self.hovered_bubble = None;
+        }
+        log::info!(
+            "ring items: {n} ({} configured)",
+            self.config.ring.items.len()
+        );
     }
 
     /// 重新计算气泡位置（含避让屏幕边缘的整体旋转）
@@ -2086,7 +2207,7 @@ impl App {
             MouseButton::Left => {
                 if let Some(idx) = self.hover_test(pos) {
                     if let Some(item) = self.items.get(idx) {
-                        log::info!("bubble activated: {} ({})", item.id, item.label_key);
+                        log::info!("bubble activated: {} ({})", item.id, item.label);
                         self.pending_action = Some(item.id.to_string());
                     }
                 } else if on_buddy {
@@ -2159,6 +2280,7 @@ impl App {
                 scale: scale_v,
                 alpha,
                 glyph: self.items[i].glyph,
+                icon: self.icons.get(i).and_then(|icon| icon.as_ref()),
                 selected: self.hovered_bubble == Some(i),
             });
         }
@@ -2193,6 +2315,15 @@ impl App {
     }
 }
 
+/// 这类变更会让“哪些槽位该注册”发生变化。
+///
+/// `Ring` 也算：增删球、换次序、关掉一颗、改某颗球自己的热键，**全部**落在这个
+/// 变更上（`RingCfg` 整段比较）。只盯 `Hotkey` 的话，面板里改球的键只会存盘、
+/// 运行期永远不生效。
+fn touches_hotkeys(kind: ChangeKind) -> bool {
+    matches!(kind, ChangeKind::Hotkey | ChangeKind::Ring)
+}
+
 /// 注册 `raw`（形如 `"Alt+Space"`）描述的全局热键。
 ///
 /// 单独抽出来是因为它同时被“启动”和“热重载”两条路径使用。
@@ -2216,8 +2347,8 @@ fn apply_hotkey_setting(
             match slot {
                 // 呼出热键是"救命"通道，写错了必须回退到默认，否则用户打不开小兽。
                 Slot::Summon => Hotkey::default_summon(),
-                // 二维码 / 剪贴板是锦上添花：配置写错就干脆不注册，别占一个用户没要的键。
-                Slot::ScanQr | Slot::Clipboard => {
+                // 球的热键是锦上添花：配置写错就干脆不注册，别占一个用户没要的键。
+                Slot::RingItem(_) => {
                     registrar.clear(slot);
                     return Err(format!("hotkey `{raw}` invalid ({err}); not registered"));
                 }
@@ -2622,6 +2753,135 @@ fn screen_label(i18n: &I18n, monitors: &[Rect], x: i32, y: i32) -> String {
     }
 }
 
+/// 环上的球完全由配置决定（ADR-042）。
+///
+/// 这里最容易出的错不是"少了球"，而是 `items` / `anims` / `icons` / `bubbles`
+/// 四份数组长度不同步 —— 少一颗球就 index panic，多一颗球就画到屏幕外。
+#[cfg(test)]
+mod ring_tests {
+    use super::*;
+    use zouwu_core::action::{CLIPBOARD_ID, QRCODE_ID};
+    use zouwu_core::config::RingItem;
+
+    fn app_with(items: Vec<RingItem>) -> App {
+        let mut config = Config::default();
+        config.clipboard.enabled = false;
+        config.ring.items = items;
+        let theme = Theme::builtin("zouwu-warm").unwrap();
+        let instance = InstanceSignal::acquire(&format!(
+            "ring-test-{}-{:?}",
+            std::process::id(),
+            std::time::Instant::now()
+        ))
+        .unwrap()
+        .unwrap();
+        App::new(config, theme.clone(), vec![theme], instance)
+    }
+
+    #[test]
+    fn disabled_items_never_reach_the_ring() {
+        let mut off = RingItem::builtin(CLIPBOARD_ID);
+        off.enabled = false;
+        let app = app_with(vec![RingItem::builtin(QRCODE_ID), off]);
+        assert_eq!(app.items.len(), 1, "关掉的球不该上环");
+        assert_eq!(app.items[0].id, QRCODE_ID);
+        assert_eq!(app.anims.len(), app.items.len());
+        assert_eq!(app.icons.len(), app.items.len());
+    }
+
+    #[test]
+    fn custom_items_keep_their_order_and_command() {
+        let mut custom = RingItem::custom("custom.1");
+        custom.label = "记事本".into();
+        custom.command = "notepad.exe".into();
+        custom.icon = "missing.png".into();
+        let app = app_with(vec![
+            custom,
+            RingItem::builtin(CLIPBOARD_ID),
+            RingItem::builtin(QRCODE_ID),
+        ]);
+        // 顺序 = 配置顺序（不是内置顺序）：用户排了就得照排。
+        let ids: Vec<&str> = app.items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["custom.1", CLIPBOARD_ID, QRCODE_ID]);
+        assert_eq!(app.items[0].label, "记事本");
+        assert_eq!(app.items[0].command.as_deref(), Some("notepad.exe"));
+        // 图标文件不存在：只是这颗球退回字形，不能连球一起没。
+        assert_eq!(app.icons.len(), 3);
+        assert!(app.icons.iter().all(|icon| icon.is_none()));
+    }
+
+    #[test]
+    fn changing_the_list_keeps_every_array_in_step() {
+        let mut off = RingItem::builtin(CLIPBOARD_ID);
+        off.enabled = false;
+        let mut app = app_with(vec![RingItem::builtin(QRCODE_ID), off]);
+        assert_eq!(app.items.len(), 1);
+
+        // 打开第二颗：多出来那颗必须有一份 0 起步的弹簧，
+        // 否则它会"一出生就是展开的"，看着像上帧的残留。
+        app.config.ring.items[1].enabled = true;
+        app.resolve_items();
+        assert_eq!(app.items.len(), 2);
+        assert_eq!(app.anims.len(), 2);
+        assert_eq!(app.icons.len(), 2);
+
+        // 全部关掉：环上什么都不剩，也不能 panic。
+        for item in &mut app.config.ring.items {
+            item.enabled = false;
+        }
+        app.resolve_items();
+        assert!(app.items.is_empty());
+        assert!(app.anims.is_empty());
+        app.relayout();
+        assert!(app.bubbles.is_empty());
+    }
+
+    /// 面板里改一颗球的热键，`diff` 出来的是 `Ring` 而不是 `Hotkey`。
+    /// 若“重注册热键”只认 `Hotkey`，改完只会存盘、运行期永远不生效
+    /// （用户看到的是“设置没保存”）。这条测试把那个口径钉死。
+    #[test]
+    fn every_ring_edit_that_moves_hotkeys_triggers_a_reregistration() {
+        let base = Config::default();
+        assert!(touches_hotkeys(ChangeKind::Hotkey), "呼出热键");
+
+        let mut retuned = base.clone();
+        retuned.ring.items[1].hotkey = "Ctrl+Alt+7".into();
+        let changed = base.diff(&retuned);
+        assert_eq!(changed, vec![ChangeKind::Ring]);
+        assert!(
+            changed.iter().any(|kind| touches_hotkeys(*kind)),
+            "改了球的键"
+        );
+
+        let mut disabled = base.clone();
+        disabled.ring.items[0].enabled = false;
+        let changed = base.diff(&disabled);
+        assert!(
+            changed.iter().any(|kind| touches_hotkeys(*kind)),
+            "关掉一颗球"
+        );
+
+        let mut removed = base.clone();
+        removed.ring.items.pop();
+        let changed = base.diff(&removed);
+        assert!(
+            changed.iter().any(|kind| touches_hotkeys(*kind)),
+            "删掉一颗球"
+        );
+
+        let mut reordered = base.clone();
+        reordered.ring.items.reverse();
+        let changed = base.diff(&reordered);
+        assert!(changed.iter().any(|kind| touches_hotkeys(*kind)), "换次序");
+
+        // 跟热键无关的变更不该顺手把整圈键重新注册（每次注册都有系统开销，
+        // 而且“重新注册失败”会让一个本来好用的键暂时失效）。
+        let mut quiet = base.clone();
+        quiet.interaction.hover_delay_ms += 10;
+        assert!(!base.diff(&quiet).iter().any(|kind| touches_hotkeys(*kind)));
+    }
+}
+
 #[cfg(all(test, target_os = "windows"))]
 mod settings_pointer_tests {
     use super::*;
@@ -2706,8 +2966,7 @@ mod settings_pointer_tests {
                 let mut config = Config::default();
                 config.clipboard.enabled = false;
                 let theme = Theme::builtin("zouwu-warm").unwrap();
-                let mut app =
-                    App::new(config, theme.clone(), vec![theme], default_ring(), instance);
+                let mut app = App::new(config, theme.clone(), vec![theme], instance);
                 let window = event_loop
                     .create_window(
                         Window::default_attributes()

@@ -187,7 +187,7 @@ fn log_missing(id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::action::default_ring;
+    use crate::action::BUILTINS;
 
     #[test]
     fn zh_and_en_differ() {
@@ -199,10 +199,10 @@ mod tests {
     }
 
     #[test]
-    fn every_default_action_has_a_label() {
+    fn every_builtin_action_has_a_label() {
         for lang in LANGUAGES {
             let i18n = I18n::new(lang);
-            for item in default_ring() {
+            for item in BUILTINS {
                 let label = i18n.label(item.label_key);
                 assert_ne!(
                     label, item.label_key,

@@ -38,6 +38,7 @@ settings-auto-saved = 改动即时生效，无需保存
 settings-tab-general = 常规
 settings-tab-interaction = 交互
 settings-tab-appearance = 外观
+settings-tab-bubbles = 气泡球
 settings-tab-about = 关于
 
 settings-language = 界面语言
@@ -182,3 +183,31 @@ history-title = 剪贴板历史
 history-footer = ↑↓ 选择 · Enter 复制并关闭 · Delete 删除 · Esc 关闭
 history-footer-empty = 还没有记录，复制点什么就会出现在这里
 history-empty = 还没有记录
+
+# ── 气泡球（环上的功能清单） ──────────────────────────────
+settings-tab-bubbles = 气泡球
+settings-section-bubbles = 顺序与热键
+settings-bubbles-note = 排在前面先展开；关掉的球不上环，环上按启用数量自动均分。每个球可以单独绑热键，留空就是没有。
+settings-bubbles-name = 名称
+settings-bubbles-name-hint = 显示在设置里；环上只有图标
+settings-bubbles-command = 命令
+settings-bubbles-command-hint = 一行命令行，例如 notepad.exe 或 code C:\work
+settings-bubbles-icon = 图标
+settings-bubbles-icon-default = 默认图标
+settings-bubbles-icon-pick = 更换图标…
+settings-bubbles-icon-failed = 图标导入失败
+settings-bubbles-remove = 移除这颗球
+settings-bubbles-remove-hint = 移除后不可撤销
+settings-section-bubbles-add = 新增
+settings-bubbles-add-command = 新增一颗命令球
+settings-bubbles-add-command-hint = 先加一颗空的，再给它填名称和命令
+settings-bubbles-add-program = 从程序新增…
+settings-bubbles-empty = 一颗球都没有
+settings-bubbles-empty-text = 未填写
+settings-bubbles-full = 已经到上限了（最多 { $max } 颗）
+settings-bubbles-hotkey-taken = 这个热键已经给了「{ $name }」
+settings-hotkey-none = 无热键
+
+# ── 自定义球：命令拉不起来时的结果窗 ──
+report-launch-failed = 这个球没跑起来
+report-launch-footer = 可以在设置 › 气泡球 里改命令或换图标

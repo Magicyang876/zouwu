@@ -46,6 +46,8 @@ pub struct SettingsWindow {
     frames: u64,
     /// 第一帧已经补刷过暗色标题栏。
     frame_dark: bool,
+    /// 输入法是否已开（避免每次都打一次 `set_ime_allowed`）。
+    ime_on: bool,
 }
 
 impl SettingsWindow {
@@ -96,6 +98,7 @@ impl SettingsWindow {
             modifiers: ModifiersState::empty(),
             frames: 0,
             frame_dark: false,
+            ime_on: false,
         };
         this.rebuild_layout();
         this.request_redraw();
@@ -146,9 +149,26 @@ impl SettingsWindow {
         self.window.request_redraw();
     }
 
+    /// 开/关输入法。
+    ///
+    /// 平时一律关着：面板上没有编辑框时，输入法弹出候选窗只会遮掉设置项。
+    /// 只有真的在填名字/命令时才打开，否则中文名字根本敲不进去。
+    fn set_ime(&self, on: bool) {
+        if self.ime_on == on {
+            return;
+        }
+        self.window.set_ime_allowed(on);
+        let pos = self.window.inner_size();
+        let _ = pos;
+    }
+
     /// 面板也需要"Esc 关掉"之外的关闭入口：宿主（托盘再次点"设置"）用它。
     pub fn close(&mut self) {
         crate::frame::life("settings", "hidden", &self.window);
+        // 关面板时揃定顺手收掉输入法和未提交的编辑：
+        // 留着输入法开着，下次开面板会有候选窗无端弹出来。
+        settings::commit_edit(&mut self.model);
+        self.set_ime(false);
         self.window.set_visible(false);
     }
 
@@ -233,8 +253,21 @@ impl SettingsWindow {
             }
             WindowEvent::Focused(false) => {
                 // 切走时放弃热键捕获，否则回来会以为还在等键。
-                if self.model.capturing {
-                    self.model.capturing = false;
+                if self.model.capturing.is_some() {
+                    self.model.capturing = None;
+                    self.request_redraw();
+                }
+                // 编辑框则**写回**再失焦：用户点了别的窗口不等于放弃刚打的字。
+                if let Some(kinds) = settings::commit_edit(&mut self.model) {
+                    self.set_ime(false);
+                    return self.after_change(kinds);
+                }
+                Vec::new()
+            }
+            WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
+                // 中文/日文输入法上屏：只有编辑框在用时才收。
+                if self.model.editing.is_some() {
+                    settings::edit_text(&mut self.model, &text);
                     self.request_redraw();
                 }
                 Vec::new()
@@ -253,6 +286,7 @@ impl SettingsWindow {
                     .and_then(|l| settings::hit(l, self.cursor))
                     .and_then(|hit| match hit {
                         Hit::Row(i) | Hit::Step(i, _) | Hit::Press(i) => Some(i),
+                        Hit::RingMove(i, _) | Hit::RingHotkey(i) => Some(i),
                         _ => None,
                     });
                 // 缩略图墙的悬停单独记：它记的是"第几套皮肤"，不是"第几行"。
@@ -337,7 +371,13 @@ impl SettingsWindow {
             return Vec::new();
         };
         let p = self.cursor;
-        let Some(hit) = settings::hit(layout, p) else {
+        let hit = settings::hit(layout, p);
+        // 先收掉正在编辑的文本：点别处 = 这次输入结束。
+        if let Some(kinds) = settings::commit_edit(&mut self.model) {
+            self.set_ime(false);
+            return self.after_change(kinds);
+        }
+        let Some(hit) = hit else {
             self.model.focus = None;
             self.request_redraw();
             return Vec::new();
@@ -370,7 +410,19 @@ impl SettingsWindow {
             Hit::Press(i) => {
                 self.model.focus = Some(i);
                 let kinds = settings::activate(&mut self.model, layout, i);
+                self.set_ime(self.model.editing.is_some());
                 self.after_change(kinds)
+            }
+            Hit::RingMove(i, dir) => {
+                self.model.focus = Some(i);
+                let kinds = settings::ring_move(&mut self.model, i, dir);
+                self.after_change(kinds)
+            }
+            Hit::RingHotkey(i) => {
+                self.model.focus = Some(i);
+                settings::begin_capture(&mut self.model, settings::CaptureTarget::Item(i));
+                self.request_redraw();
+                Vec::new()
             }
             Hit::GalleryDot(dot) => {
                 let kinds = settings::select_skin(&mut self.model, dot);
@@ -394,19 +446,18 @@ impl SettingsWindow {
 
     fn key(&mut self, event: &winit::event::KeyEvent) -> Vec<Outcome> {
         // ── 热键捕获模式：所有按键都归它 ──
-        if self.model.capturing {
+        if self.model.capturing.is_some() {
             match event.logical_key {
                 Key::Named(NamedKey::Escape) => {
-                    self.model.capturing = false;
+                    self.model.capturing = None;
                     self.request_redraw();
                     return Vec::new();
                 }
                 Key::Named(NamedKey::Backspace) => {
                     // 清除热键 = 关掉这个开关（而不是留下一个"按了就报错"的串）。
-                    self.model.capturing = false;
-                    self.model.config.general.hotkey.clear();
+                    let outcome = settings::clear_hotkey(&mut self.model).unwrap_or_default();
                     self.request_redraw();
-                    return vec![Outcome::Changed(vec![ChangeKind::Hotkey])];
+                    return self.after_change(outcome);
                 }
                 _ => {}
             }
@@ -430,10 +481,42 @@ impl SettingsWindow {
                 settings::capture_hotkey(&mut self.model, Some(hotkey)).unwrap_or_default();
             if let Some(notice) = &self.model.notice {
                 log::warn!("hotkey capture rejected: {notice}");
-            } else if !self.model.config.general.hotkey.is_empty() {
-                log::info!("hotkey captured: {}", self.model.config.general.hotkey);
             }
             return self.after_change(outcome);
+        }
+
+        // ── 文本编辑模式：只认编辑用的那几个键 ──
+        if self.model.editing.is_some() {
+            use settings::EditKey;
+            let edit_key = match event.logical_key {
+                Key::Named(NamedKey::Escape) => Some(EditKey::Cancel),
+                Key::Named(NamedKey::Enter) => Some(EditKey::Commit),
+                Key::Named(NamedKey::Backspace) => Some(EditKey::Backspace),
+                Key::Named(NamedKey::Delete) => Some(EditKey::Delete),
+                Key::Named(NamedKey::ArrowLeft) => Some(EditKey::Left),
+                Key::Named(NamedKey::ArrowRight) => Some(EditKey::Right),
+                Key::Named(NamedKey::Home) => Some(EditKey::Home),
+                Key::Named(NamedKey::End) => Some(EditKey::End),
+                _ => None,
+            };
+            if let Some(edit_key) = edit_key {
+                let outcome = settings::edit_key(&mut self.model, edit_key);
+                self.set_ime(self.model.editing.is_some());
+                self.request_redraw();
+                return match outcome {
+                    Some(kinds) => self.after_change(kinds),
+                    None => Vec::new(),
+                };
+            }
+            // 普通字符：走 `text`（已按当前键盘布局/修饰键折算好）。
+            // Ctrl/Alt 组合留给快捷键：这里不做粘贴实现，直接忽略。
+            if let Some(text) = event.text.as_deref() {
+                if !text.is_empty() && !self.modifiers.control_key() && !self.modifiers.alt_key() {
+                    settings::edit_text(&mut self.model, text);
+                    self.request_redraw();
+                }
+            }
+            return Vec::new();
         }
 
         match event.logical_key {

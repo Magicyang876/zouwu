@@ -87,6 +87,58 @@ pub fn skins_dir() -> PathBuf {
     crate::config_dir().join("skins")
 }
 
+/// `%APPDATA%\zouwu\icons` —— 气泡球的图标（用户自己挑的 PNG）。
+pub fn icons_dir() -> PathBuf {
+    crate::config_dir().join("icons")
+}
+
+/// 把用户选的 PNG 拷进 `icons/`，返回存进配置的文件名。
+///
+/// **为什么拷而不是存原路径**：用户多半是从下载目录/压缩包临时目录里选的，
+/// 那地方过几天就没了；存原路径的话，球会忽然变回默认字形，还找不到原因。
+pub fn import_icon(src: &std::path::Path) -> Result<String, String> {
+    let bytes = fs::read(src).map_err(|e| format!("{}: {e}", src.display()))?;
+    if bytes.len() as u64 > MAX_IMAGE_BYTES {
+        return Err(format!(
+            "{} is {} bytes, over the {MAX_IMAGE_BYTES} byte limit",
+            src.display(),
+            bytes.len()
+        ));
+    }
+    // 文件名取「原名 + 内容长度」，同名但内容不同的两张图不会互相覆盖，
+    // 又不需要给用户看一串哈希。
+    let stem = src
+        .file_stem()
+        .map(|s| {
+            s.to_string_lossy()
+                .replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_")
+        })
+        .unwrap_or_else(|| "icon".to_string());
+    let name = format!("{stem}-{}.png", bytes.len());
+    let dir = icons_dir();
+    fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let path = dir.join(&name);
+    fs::write(&path, &bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(name)
+}
+
+/// 配置里的图标名 → 磁盘路径。
+///
+/// 绝对路径也认（用户手改 config.toml 时可能直接写全路径）；
+/// 否则就当 `icons/` 下的文件名。
+pub fn resolve_icon(name: &str) -> Option<PathBuf> {
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let direct = PathBuf::from(name);
+    if direct.is_absolute() {
+        return direct.is_file().then_some(direct);
+    }
+    let path = icons_dir().join(name);
+    path.is_file().then_some(path)
+}
+
 /// `%APPDATA%\zouwu\exports` —— 导出皮肤包的默认目录。
 ///
 /// 不用系统下载目录：那里什么都有，多一个 `.zwskin` 谁也不会注意；

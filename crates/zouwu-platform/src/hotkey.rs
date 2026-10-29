@@ -20,10 +20,11 @@ use zouwu_core::hotkey::{Hotkey, Key};
 pub enum Slot {
     /// 呼出 / 收起小兽。
     Summon,
-    /// 扫屏幕上的二维码。
-    ScanQr,
-    /// 打开剪贴板历史。
-    Clipboard,
+    /// 环上第 `index` 颗球（按**配置顺序**，不是屏幕位置）。
+    ///
+    /// 用下标而不是固定槽位：球的清单是用户配的（ADR-042），
+    /// 槽位得跟着清单走——每一颗球都可以有自己的一条热键。
+    RingItem(usize),
 }
 
 /// 热键注册器：按槽位各保留一条。
@@ -77,6 +78,24 @@ impl HotkeyRegistrar {
 
     pub fn is_registered(&self, slot: Slot) -> bool {
         self.slots.iter().any(|(s, _)| *s == slot)
+    }
+
+    /// 放掉下标 `>= len` 的球槽位（删球/减球之后要调）。
+    ///
+    /// 不调的话，被删掉那颗球的热键仍然被本进程占着：别的程序抢不到，
+    /// 用户按下去我们也只会查到一个不存在的球（静默无反应）——最难查的那种。
+    pub fn retain_ring_items(&mut self, len: usize) {
+        let stale: Vec<Slot> = self
+            .slots
+            .iter()
+            .filter_map(|(slot, _)| match slot {
+                Slot::RingItem(index) if *index >= len => Some(*slot),
+                _ => None,
+            })
+            .collect();
+        for slot in stale {
+            self.clear(slot);
+        }
     }
 
     /// 非阻塞地取走一次"按下"事件。

@@ -48,6 +48,8 @@ pub mod eyecare;
 #[cfg(not(target_os = "windows"))]
 #[path = "eyecare_stub.rs"]
 pub mod eyecare;
+/// 跑一条用户写的命令 / 打开一个程序（自定义气泡球的执行端）。
+pub mod launch;
 pub mod reload;
 #[cfg(target_os = "windows")]
 pub mod screen;

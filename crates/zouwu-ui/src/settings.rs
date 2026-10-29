@@ -12,7 +12,8 @@
 //! 3. **区间外不画也不命中**。滚动带用 `Painter::set_clip` 裁掉，命中用
 //!    `content.contains()` 先挡一道。
 
-use zouwu_core::config::{ChangeKind, Config, LogCfg};
+use zouwu_core::action::builtin;
+use zouwu_core::config::{ChangeKind, Config, LogCfg, RingCfg, RingItem};
 use zouwu_core::geom::Point;
 use zouwu_core::hotkey::{Hotkey, HotkeyError};
 use zouwu_core::i18n::{I18n, AUTO, LANGUAGES};
@@ -63,6 +64,11 @@ const SECTION_RULE_INSET: f32 = 8.0;
 const TEXT_ROW_H: f32 = 34.0;
 const CONTROL_W: f32 = 210.0;
 const BUTTON_W: f32 = 170.0;
+
+// 气泡球行里复合子控件的宽度（从右往左：开关 / 热键框 / ↓ / ↑）。
+const RING_TOGGLE_W: f32 = 46.0;
+const RING_HOTKEY_W: f32 = 150.0;
+const RING_ARROW_W: f32 = 26.0;
 /// 缩略图格子的间距。
 const GALLERY_GAP: f32 = 12.0;
 /// 一个缩略图格子（含底下的名字）的高度。
@@ -81,6 +87,8 @@ const GALLERY_MAX_ROWS: usize = 2;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     General,
+    /// 环上有什么球、什么次序、各自的热键（ADR-042）。
+    Bubbles,
     Interaction,
     Appearance,
     Skins,
@@ -88,8 +96,9 @@ pub enum Tab {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 5] = [
+    pub const ALL: [Tab; 6] = [
         Tab::General,
+        Tab::Bubbles,
         Tab::Interaction,
         Tab::Appearance,
         Tab::Skins,
@@ -99,6 +108,7 @@ impl Tab {
     pub fn key(self) -> &'static str {
         match self {
             Tab::General => "settings.tab.general",
+            Tab::Bubbles => "settings.tab.bubbles",
             Tab::Interaction => "settings.tab.interaction",
             Tab::Appearance => "settings.tab.appearance",
             Tab::Skins => "settings.tab.skins",
@@ -403,6 +413,27 @@ pub enum Control {
         selected: Option<usize>,
         hover: Option<usize>,
     },
+    /// 环上的一颗球：一行里塞下「上移 / 下移 / 热键 / 开关」（ADR-042）。
+    ///
+    /// 用复合控件而不是四行，是因为"顺序"只有和邻居摆在一起才读得出来：
+    /// 拆成四行之后，一颗球的四行和下一颗球的四行混在一条列表里，
+    /// 谁也数不清现在到底什么在上什么在下。
+    RingItem {
+        /// `config.ring.items` 的下标
+        index: usize,
+        name: String,
+        enabled: bool,
+        hotkey: String,
+        capturing: bool,
+    },
+    /// 可编辑的单行文本（自定义球的名字、要运行的程序或命令）。
+    Text {
+        text: String,
+        editing: bool,
+        placeholder: String,
+        /// 这个框改的是哪个球的哪个字段（点进来 / 写回去都靠它）。
+        target: EditTarget,
+    },
     Section {
         text: String,
     },
@@ -442,8 +473,15 @@ pub enum Action {
     OpenFontsDir,
     /// 清空剪贴板历史（只删记录文件，不碰系统剪贴板）。
     ClearHistory,
+    /// 在环的末尾加一颗空的自定义球（名字/命令随后在面板里填）。
+    AddItem,
+    /// 选一个程序文件，加一颗“打开它”的球（名字默认取文件名）。
+    AddProgram,
+    /// 给第 `usize` 颗自定义球选图标（PNG）。
+    PickIcon(usize),
+    /// 从环上移除第 `usize` 颗球（不可撤销，所以要问一次）。
+    RemoveItem(usize),
 }
-
 #[derive(Clone, Debug)]
 pub struct Row {
     pub field: Option<Field>,
@@ -466,8 +504,11 @@ impl Row {
         self.field.is_some()
             || matches!(
                 self.control,
-                Control::Button { .. } | Control::Checkbox { .. }
+                Control::Button { .. } | Control::Checkbox { .. } | Control::Text { .. }
             )
+            // 气泡球行整行都是「改了就算数」的行：焦点落到这里就能用
+            // 空格切开关、↑↓ 换顺序（见 settings_window 的按键路由）。
+            || matches!(self.control, Control::RingItem { .. })
     }
 
     fn height(&self) -> f32 {
@@ -498,6 +539,48 @@ impl Row {
     }
 }
 
+// ── 文本编辑状态 ──────────────────────────────────────
+
+/// 正在捕获的热键属于谁。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptureTarget {
+    /// 呼出小兽（`general.hotkey`）
+    Summon,
+    /// 环上第 `usize` 颗球（`ring.items[i].hotkey`）
+    Item(usize),
+}
+
+/// 一个可编辑文本的身份。用"哪个球的哪个字段"而不是行号：
+/// 行号会随其它行的开关/顺序变化，存下来的行号两秒后就不对了。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditTarget {
+    ItemLabel(usize),
+    ItemCommand(usize),
+}
+
+/// 编辑框的状态：缓冲区 + 光标（字节下标，落在字符边界上）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Editing {
+    pub target: EditTarget,
+    pub buffer: String,
+    pub cursor: usize,
+}
+
+/// 编辑框能识别的按键（winit 类型留在窗口层，这一层只认这个枚举）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditKey {
+    Backspace,
+    Delete,
+    Left,
+    Right,
+    Home,
+    End,
+    /// 回车/失焦：写回配置
+    Commit,
+    /// Esc：丢掉这次改动
+    Cancel,
+}
+
 // ── 模型 ──────────────────────────────────────────────────
 
 pub struct Model {
@@ -518,7 +601,13 @@ pub struct Model {
     pub hover: Option<usize>,
     pub keyboard_used: bool,
     pub scroll: f32,
-    pub capturing: bool,
+    /// 正在捕获哪一条热键（`None` = 没在捕获）。
+    ///
+    /// 从 `bool` 改成带目标的枚举，是因为现在每颗球都有自己的热键：
+    /// 只知道"在捕获"而不知道"在给谁捕获"，就只能写回呼出热键那一个字段。
+    pub capturing: Option<CaptureTarget>,
+    /// 正在编辑的文本框（`None` = 没有在编辑任何文本）。
+    pub editing: Option<Editing>,
     pub notice: Option<String>,
     pub i18n: I18n,
     /// 形象页的缩略图缓存，下标与 `skins` 对齐。`None` = 这套皮肤打不开。
@@ -563,7 +652,8 @@ impl Model {
             hover: None,
             keyboard_used: false,
             scroll: 0.0,
-            capturing: false,
+            capturing: None,
+            editing: None,
             notice: None,
             i18n,
             thumbs: Vec::new(),
@@ -634,10 +724,13 @@ impl Model {
 
     pub fn set_tab(&mut self, tab: Tab) {
         if self.tab != tab {
+            // 换页 = 离开当前页面：正在输的文本先落地，不然用户刚打的字凭空没了。
+            commit_edit(self);
             self.tab = tab;
             self.scroll = 0.0;
             self.focus = None;
-            self.capturing = false;
+            self.capturing = None;
+            self.editing = None;
             self.hover = None;
             self.hover_skin = None;
         }
@@ -705,7 +798,7 @@ pub fn build_rows(model: &Model) -> Vec<Row> {
                 hint: Some(i18n.t("settings.hotkey.hint")),
                 control: Control::Hotkey {
                     text: hotkey_text(model),
-                    capturing: model.capturing,
+                    capturing: model.capturing == Some(CaptureTarget::Summon),
                 },
             });
             rows.push(toggle_row(model, Field::StartOnBoot));
@@ -764,6 +857,90 @@ pub fn build_rows(model: &Model) -> Vec<Row> {
                     action: Action::ClearHistory,
                 },
             });
+        }
+        Tab::Bubbles => {
+            rows.push(Row::section(i18n.t("settings.section.bubbles")));
+            rows.push(Row {
+                field: None,
+                label: String::new(),
+                hint: None,
+                control: Control::Note {
+                    text: i18n.t("settings.bubbles.note"),
+                },
+            });
+            let items = &model.config.ring.items;
+            if items.is_empty() {
+                rows.push(Row {
+                    field: None,
+                    label: i18n.t("settings.bubbles.empty"),
+                    hint: None,
+                    control: Control::Value {
+                        text: String::new(),
+                    },
+                });
+            }
+            for (index, item) in items.iter().enumerate() {
+                let custom = builtin(&item.id).is_none();
+                rows.push(ring_item_row(model, index));
+                if !custom {
+                    continue;
+                }
+                // 自定义球才需要名字 / 命令 / 图标：内置球的名字来自 i18n，
+                // 图标是写死的字形，给它们开输入框只会诱使用户改坏。
+                rows.push(ring_text_row(
+                    model,
+                    EditTarget::ItemLabel(index),
+                    "settings.bubbles.name",
+                    "settings.bubbles.name.hint",
+                ));
+                rows.push(ring_text_row(
+                    model,
+                    EditTarget::ItemCommand(index),
+                    "settings.bubbles.command",
+                    "settings.bubbles.command.hint",
+                ));
+                rows.push(Row {
+                    field: None,
+                    label: i18n.t("settings.bubbles.icon"),
+                    hint: None,
+                    control: Control::Button {
+                        text: if item.icon.trim().is_empty() {
+                            i18n.t("settings.bubbles.icon.default")
+                        } else {
+                            i18n.t("settings.bubbles.icon.pick")
+                        },
+                        action: Action::PickIcon(index),
+                    },
+                });
+                rows.push(Row {
+                    field: None,
+                    label: String::new(),
+                    hint: Some(i18n.t("settings.bubbles.remove.hint")),
+                    control: Control::Button {
+                        text: i18n.t("settings.bubbles.remove"),
+                        action: Action::RemoveItem(index),
+                    },
+                });
+            }
+            rows.push(Row::section(i18n.t("settings.section.bubbles.add")));
+            for (text_key, action, hint) in [
+                (
+                    "settings.bubbles.add.command",
+                    Action::AddItem,
+                    Some(i18n.t("settings.bubbles.add.command.hint")),
+                ),
+                ("settings.bubbles.add.program", Action::AddProgram, None),
+            ] {
+                rows.push(Row {
+                    field: None,
+                    label: String::new(),
+                    hint,
+                    control: Control::Button {
+                        text: i18n.t(text_key),
+                        action,
+                    },
+                });
+            }
         }
         Tab::Interaction => {
             rows.push(Row::section(i18n.t("settings.section.behavior")));
@@ -1001,6 +1178,81 @@ pub fn build_rows(model: &Model) -> Vec<Row> {
     rows
 }
 
+/// 气泡球行：名字 + 开关 + 热键框 + ↑↓。
+fn ring_item_row(model: &Model, index: usize) -> Row {
+    let i18n = &model.i18n;
+    let Some(item) = model.config.ring.items.get(index) else {
+        // 行是从 `items` 现算的，索引不可能越界；真越界时给一条空行，
+        // 也不要 panic 把整个面板打死。
+        return Row {
+            field: None,
+            label: String::new(),
+            hint: None,
+            control: Control::Value {
+                text: String::new(),
+            },
+        };
+    };
+    let name = match builtin(&item.id) {
+        Some(b) => i18n.t(b.label_key),
+        None => item.display_name().to_string(),
+    };
+    Row {
+        field: None,
+        label: name,
+        // 不加 hint：次序怎么改已经写在页首那条说明里，四行重复一遍只会把
+        // 每行撑高 18px、把「移除」按钮挤到滚动条外面。
+        hint: None,
+        control: Control::RingItem {
+            index,
+            name: item.id.clone(),
+            enabled: item.enabled,
+            hotkey: if model.capturing == Some(CaptureTarget::Item(index)) {
+                i18n.t("settings.hotkey.capturing")
+            } else if item.hotkey.trim().is_empty() {
+                i18n.t("settings.hotkey.none")
+            } else {
+                item.hotkey.clone()
+            },
+            capturing: model.capturing == Some(CaptureTarget::Item(index)),
+        },
+    }
+}
+
+/// 一行可编辑文本（名字 / 命令）。编辑中的缓冲从 `model.editing` 取，
+/// 所以正在打字时看到的就是缓冲内容，而不是落盘后的旧值。
+fn ring_text_row(model: &Model, target: EditTarget, label_key: &str, hint_key: &str) -> Row {
+    let i18n = &model.i18n;
+    let editing = model.editing.as_ref().filter(|e| e.target == target);
+    let stored = match target {
+        EditTarget::ItemLabel(i) => model
+            .config
+            .ring
+            .items
+            .get(i)
+            .map(|it| it.label.clone())
+            .unwrap_or_default(),
+        EditTarget::ItemCommand(i) => model
+            .config
+            .ring
+            .items
+            .get(i)
+            .map(|it| it.command.clone())
+            .unwrap_or_default(),
+    };
+    Row {
+        field: None,
+        label: i18n.t(label_key),
+        hint: Some(i18n.t(hint_key)),
+        control: Control::Text {
+            text: editing.map(|e| e.buffer.clone()).unwrap_or(stored),
+            editing: editing.is_some(),
+            placeholder: i18n.t("settings.bubbles.empty.text"),
+            target,
+        },
+    }
+}
+
 fn toggle_row(model: &Model, field: Field) -> Row {
     Row {
         field: Some(field),
@@ -1057,7 +1309,7 @@ fn format_value(i18n: &I18n, value: i64, unit: Unit) -> String {
 }
 
 fn hotkey_text(model: &Model) -> String {
-    if model.capturing {
+    if model.capturing == Some(CaptureTarget::Summon) {
         return model.i18n.t("settings.hotkey.capturing");
     }
     if model.config.general.hotkey.trim().is_empty() {
@@ -1129,8 +1381,13 @@ pub struct RowLayout {
     /// 递减/递增按钮（步进、选择）。
     pub dec: Rect,
     pub inc: Rect,
-    /// 按下就触发的区域（开关、热键框、按钮）。
+    /// 按下就触发的区域（开关、热键框、按钮）。对复合控件是**开关**。
     pub hit: Rect,
+    /// 复合控件（`Control::RingItem`）的子区域：上移 / 下移 / 热键框。
+    /// 非复合控件是退化矩形（宽高为 0），`contains()` 永远为假。
+    pub up: Rect,
+    pub down: Rect,
+    pub hotkey: Rect,
 }
 
 pub struct Layout {
@@ -1190,19 +1447,34 @@ fn snap_scroll(heights: &[f32], raw: f32, max_scroll: f32) -> f32 {
     best.clamp(0.0, max_scroll)
 }
 
+/// 控件区的默认位置：贴右边、高度 30、居中于行内。
+fn default_control(rect: Rect) -> Rect {
+    Rect::new(
+        rect.right() - CONTROL_W,
+        rect.y + (rect.h - 30.0) * 0.5,
+        CONTROL_W,
+        30.0,
+    )
+}
+
 pub fn layout(model: &Model, w: f32, h: f32) -> Layout {
     let content = Rect::new(0.0, HEADER_H, w, (h - HEADER_H - FOOTER_H).max(0.0));
 
-    // 标签页：等宽铺开，右对齐到内容宽度。
-    let tab_w = 108.0;
+    // 标签页：等宽铺开，左对齐到内容左边。
+    //
+    // 宽度按可用宽度均分并夹住上限：标签个数会变（ADR-042 加了「气泡球」），
+    // 写死的 108px × 6 在最小窗口（560）里会直接溢出、被窗口裁掉一截。
     let tab_h = 30.0;
+    let count = Tab::ALL.len() as f32;
+    let gap = 8.0;
+    let tab_w = ((w - MARGIN * 2.0 - gap * (count - 1.0)) / count).clamp(64.0, 108.0);
     // 垂直居中在 header 带里，而不是贴底：header 现在只有标签页一层的厚度。
     let tabs_y = (HEADER_H - tab_h) * 0.5;
-    let mut tabs = Vec::with_capacity(4);
+    let mut tabs = Vec::with_capacity(Tab::ALL.len());
     for (i, tab) in Tab::ALL.iter().enumerate() {
         tabs.push((
             *tab,
-            Rect::new(MARGIN + i as f32 * (tab_w + 8.0), tabs_y, tab_w, tab_h),
+            Rect::new(MARGIN + i as f32 * (tab_w + gap), tabs_y, tab_w, tab_h),
         ));
     }
 
@@ -1239,32 +1511,65 @@ pub fn layout(model: &Model, w: f32, h: f32) -> Layout {
     let mut y = content.y + MARGIN - scroll;
     for (row, rh) in rows.into_iter().zip(heights.iter().copied()) {
         let rect = Rect::new(MARGIN, y, w - MARGIN * 2.0, rh);
-        let control = Rect::new(
-            rect.right() - CONTROL_W,
-            y + (rh - 30.0) * 0.5,
-            CONTROL_W,
-            30.0,
-        );
-        let dec = Rect::new(control.x, control.y, 30.0, control.h);
-        let inc = Rect::new(control.right() - 30.0, control.y, 30.0, control.h);
-        let hit = match row.control {
+        // 退化矩形：不是复合控件的行用不到这几个子区域，但 `RowLayout`
+        // 要保持结构统一，以免每个消费方都要 `Option` 一层。
+        let none = Rect::new(rect.right(), y, 0.0, 0.0);
+        let control = default_control(rect);
+        let (control, up, down, hotkey, hit) = match row.control {
             Control::Toggle { .. } => {
-                Rect::new(control.right() - 46.0, y + (rh - 26.0) * 0.5, 46.0, 26.0)
+                let hit = Rect::new(control.right() - 46.0, y + (rh - 26.0) * 0.5, 46.0, 26.0);
+                (control, none, none, none, hit)
             }
-            Control::Hotkey { .. } => Rect::new(control.x, y + (rh - 30.0) * 0.5, CONTROL_W, 30.0),
-            Control::Button { .. } => Rect::new(
-                rect.right() - BUTTON_W,
-                y + (rh - 30.0) * 0.5,
-                BUTTON_W,
-                30.0,
-            ),
+            Control::Hotkey { .. } => {
+                let hit = Rect::new(control.x, y + (rh - 30.0) * 0.5, CONTROL_W, 30.0);
+                (control, none, none, none, hit)
+            }
+            Control::Button { .. } => {
+                let hit = Rect::new(
+                    rect.right() - BUTTON_W,
+                    y + (rh - 30.0) * 0.5,
+                    BUTTON_W,
+                    30.0,
+                );
+                (control, none, none, none, hit)
+            }
             Control::Checkbox { .. } => {
-                Rect::new(rect.right() - 24.0, y + (rh - 24.0) * 0.5, 24.0, 24.0)
+                let hit = Rect::new(rect.right() - 24.0, y + (rh - 24.0) * 0.5, 24.0, 24.0);
+                (control, none, none, none, hit)
             }
             // 缩略图墙占满整行宽度：格子要尽量大，缩略图才有辨识度。
-            Control::Gallery { .. } => Rect::new(rect.x, y + 6.0, rect.w, rh - 12.0),
-            _ => control,
+            Control::Gallery { .. } => {
+                let hit = Rect::new(rect.x, y + 6.0, rect.w, rh - 12.0);
+                (hit, none, none, none, hit)
+            }
+            // 复合控件：从右往左排「开关 / 热键框 / 下移 / 上移」，
+            // 剩下的宽度全给名字。
+            Control::RingItem { .. } => {
+                let cy = y + rh * 0.5;
+                let toggle =
+                    Rect::new(rect.right() - RING_TOGGLE_W, cy - 13.0, RING_TOGGLE_W, 26.0);
+                let hotkey = Rect::new(
+                    toggle.x - 8.0 - RING_HOTKEY_W,
+                    cy - 15.0,
+                    RING_HOTKEY_W,
+                    30.0,
+                );
+                let down = Rect::new(hotkey.x - 8.0 - RING_ARROW_W, cy - 13.0, RING_ARROW_W, 26.0);
+                let up = Rect::new(down.x - 4.0 - RING_ARROW_W, cy - 13.0, RING_ARROW_W, 26.0);
+                // `control` 指整个复合区的左缘：`draw_row` 用它算名字区宽度。
+                let control = Rect::new(up.x, cy - 15.0, rect.right() - up.x, 30.0);
+                (control, up, down, hotkey, toggle)
+            }
+            // 文本框：给一半宽度，够看清一条命令行，又留得下左边的名字。
+            Control::Text { .. } => {
+                let tw = (rect.w * 0.52).clamp(160.0, 360.0);
+                let box_rect = Rect::new(rect.right() - tw, y + (rh - 30.0) * 0.5, tw, 30.0);
+                (box_rect, none, none, none, box_rect)
+            }
+            _ => (control, none, none, none, control),
         };
+        let dec = Rect::new(control.x, control.y, 30.0, control.h);
+        let inc = Rect::new(control.right() - 30.0, control.y, 30.0, control.h);
         out_rows.push((
             row,
             RowLayout {
@@ -1273,6 +1578,9 @@ pub fn layout(model: &Model, w: f32, h: f32) -> Layout {
                 dec,
                 inc,
                 hit,
+                up,
+                down,
+                hotkey,
             },
         ));
         y += rh;
@@ -1355,6 +1663,10 @@ pub enum Hit {
     Step(usize, i32),
     /// 开关 / 热键框 / 按钮
     Press(usize),
+    /// 气泡球行里的 ↑↓：`(行号, -1 上移 / +1 下移)`
+    RingMove(usize, i32),
+    /// 气泡球行里的热键框（点了就开始录键）
+    RingHotkey(usize),
     /// 缩略图墙里的第 `usize` 张（`Model::skins` 下标）
     GalleryDot(usize),
     Scrollbar,
@@ -1386,6 +1698,27 @@ pub fn hit(layout: &Layout, p: Point) -> Option<Hit> {
                     Hit::Row(i)
                 });
             }
+            Control::RingItem { index, .. } => {
+                // 注意：`i` 是**行**下标，`index` 是**配置里的第几颗球**。
+                // 这两者因为页首的 section/note 行并不相等，
+                // 上下移和绑热键必须用 `index`，否则点第一颗球的 ↑ 会挪动第三颗。
+                if rl.up.contains(p) {
+                    return Some(Hit::RingMove(index, -1));
+                }
+                if rl.down.contains(p) {
+                    return Some(Hit::RingMove(index, 1));
+                }
+                if rl.hotkey.contains(p) {
+                    return Some(Hit::RingHotkey(index));
+                }
+                return Some(if rl.hit.contains(p) {
+                    Hit::Press(i)
+                } else {
+                    Hit::Row(i)
+                });
+            }
+            // 文本框：只有框里才开编辑，点行别处不动（免得手滑丢焦点）。
+            Control::Text { .. } => return Some(Hit::Press(i)),
             Control::Step { .. } | Control::Choice { .. } => {
                 if rl.dec.contains(p) {
                     return Some(Hit::Step(i, -1));
@@ -1420,6 +1753,8 @@ pub fn activate(model: &mut Model, layout: &Layout, index: usize) -> Vec<ChangeK
     let control = row.control.clone();
     // 按钮行没有 field：先处理掉，否则 `let Some(field)` 会把它挡在外面。
     if let Control::Button { action, .. } = control {
+        // 点按钮=离开正在编辑的框：先把缓冲写回去，不然用户填了一半就没了。
+        let committed = commit_edit(model);
         match action {
             Action::OpenConfig => {
                 zouwu_platform::open_config_dir();
@@ -1459,10 +1794,102 @@ pub fn activate(model: &mut Model, layout: &Layout, index: usize) -> Vec<ChangeK
                 // 就把滚动拉回去，避免出现"底下多出一大片空白"。
                 model.scroll = 0.0;
             }
+            Action::AddItem => {
+                if model.config.ring.items.len() >= RingCfg::MAX_ITEMS {
+                    let max = RingCfg::MAX_ITEMS.to_string();
+                    let notice = model.i18n.t_args("settings.bubbles.full", &[("max", &max)]);
+                    model.notice = Some(notice);
+                    return Vec::new();
+                }
+                let id = unique_custom_id(&model.config.ring.items);
+                let index = model.config.ring.items.len();
+                model.config.ring.items.push(RingItem::custom(&id));
+                // 新球的名字/命令还是空的：直接把光标停到“名称”上，
+                // 用户下一步必然是填它。
+                begin_edit(model, EditTarget::ItemLabel(index));
+                return vec![ChangeKind::Ring];
+            }
+            Action::AddProgram => {
+                let Some(path) = zouwu_platform::dialogs::pick_program() else {
+                    return committed.unwrap_or_default();
+                };
+                if model.config.ring.items.len() >= RingCfg::MAX_ITEMS {
+                    let max = RingCfg::MAX_ITEMS.to_string();
+                    let notice = model.i18n.t_args("settings.bubbles.full", &[("max", &max)]);
+                    model.notice = Some(notice);
+                    return committed.unwrap_or_default();
+                }
+                let id = unique_custom_id(&model.config.ring.items);
+                let mut item = RingItem::custom(&id);
+                // 名字默认取文件名（不带扩展名）：用户看到“WeChat”比看到
+                // “custom.3”更知道自己加了个什么东西。
+                item.label = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                item.command = path.display().to_string();
+                model.config.ring.items.push(item);
+                let mut kinds = committed.unwrap_or_default();
+                kinds.push(ChangeKind::Ring);
+                return kinds;
+            }
+            Action::PickIcon(index) => {
+                let Some(path) = zouwu_platform::dialogs::pick_icon_image() else {
+                    return committed.unwrap_or_default();
+                };
+                match zouwu_platform::assets::import_icon(&path) {
+                    Ok(name) => {
+                        if let Some(item) = model.config.ring.items.get_mut(index) {
+                            item.icon = name;
+                        }
+                        let mut kinds = committed.unwrap_or_default();
+                        kinds.push(ChangeKind::Ring);
+                        return kinds;
+                    }
+                    Err(err) => {
+                        zouwu_platform::dialogs::warn(
+                            &model.i18n.t("settings.bubbles.icon.failed"),
+                            &err,
+                        );
+                    }
+                }
+            }
+            Action::RemoveItem(index) => {
+                let Some(item) = model.config.ring.items.get(index) else {
+                    return committed.unwrap_or_default();
+                };
+                let name = item.display_name().to_string();
+                // 删一行是不可撤销的，而且环上的顺序是用户亲手排的，所以问一次。
+                if !zouwu_platform::dialogs::confirm(
+                    &model.i18n.t("settings.bubbles.remove"),
+                    &name,
+                ) {
+                    return committed.unwrap_or_default();
+                }
+                let mut kinds = committed.unwrap_or_default();
+                kinds.extend(remove_item(model, index));
+                return kinds;
+            }
         }
-        return Vec::new();
+        return committed.unwrap_or_default();
     }
     let Some(field) = row.field else {
+        // 没有 field 的复合控件：气泡球行和文本框。
+        match control {
+            Control::RingItem { index, enabled, .. } => {
+                let committed = commit_edit(model);
+                if let Some(item) = model.config.ring.items.get_mut(index) {
+                    item.enabled = !enabled;
+                }
+                let mut kinds = committed.unwrap_or_default();
+                kinds.push(ChangeKind::Ring);
+                return kinds;
+            }
+            Control::Text { target, .. } => {
+                begin_edit(model, target);
+            }
+            _ => {}
+        }
         return Vec::new();
     };
     match control {
@@ -1471,7 +1898,11 @@ pub fn activate(model: &mut Model, layout: &Layout, index: usize) -> Vec<ChangeK
             changed(model, field)
         }
         Control::Hotkey { .. } => {
-            model.capturing = !model.capturing;
+            // 互斥：正在录某个球的键时又去点总开关，应该切换成总开关。
+            model.capturing = match model.capturing {
+                Some(CaptureTarget::Summon) => None,
+                _ => Some(CaptureTarget::Summon),
+            };
             Vec::new()
         }
         Control::Choice { .. } => step(model, field, 1),
@@ -1737,12 +2168,206 @@ fn changed(model: &mut Model, field: Field) -> Vec<ChangeKind> {
     kinds
 }
 
+// ── 气泡球的顺序 / 热键 / 文本编辑 ────────
+
+/// 新球的 id：`custom.1`、`custom.2`…（已存在就往下数）。
+///
+/// 不从“当前最大编号+1”算而是“第一个没被占用的”：用户删掉 custom.2 后
+/// 再新增，应该重新拿到 custom.2，而不是跳号越跑越大。
+fn unique_custom_id(items: &[RingItem]) -> String {
+    for n in 1..=RingCfg::MAX_ITEMS * 2 {
+        let id = format!("custom.{n}");
+        if !items.iter().any(|it| it.id == id) {
+            return id;
+        }
+    }
+    // 实在排不下：用毫秒时间戳兜底，保证 id 唯一比好看重要。
+    format!(
+        "custom.{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    )
+}
+
+/// 把第 `index` 颗球上移（`dir = -1`）或下移（`+1`）。
+///
+/// **同时改配置与磁盘的持久位置**：`ring.items` 的顺序就是环上的展开顺序，
+/// 不另存一份排序表——两份顺序早晚会对不上。
+pub fn ring_move(model: &mut Model, index: usize, dir: i32) -> Vec<ChangeKind> {
+    let len = model.config.ring.items.len();
+    if index >= len || len < 2 {
+        return Vec::new();
+    }
+    let target = index as i32 + dir;
+    if target < 0 || target as usize >= len {
+        return Vec::new();
+    }
+    let target = target as usize;
+    model.config.ring.items.swap(index, target);
+    // 正在编辑/录键的那颗球跟着换位置（身份不变，行号变了）。
+    model.editing = None;
+    model.capturing = None;
+    vec![ChangeKind::Ring]
+}
+
+/// 开始录一个热键（总开关或某颗球）。
+/// 从配置里删掉第 `index` 颗球。
+///
+/// 确认对话框留在调用方（`activate`）：那一步是系统模态窗，
+/// 放进来这些规则就没法在测试里跑。
+pub fn remove_item(model: &mut Model, index: usize) -> Vec<ChangeKind> {
+    if index >= model.config.ring.items.len() {
+        return Vec::new();
+    }
+    model.config.ring.items.remove(index);
+    // 行号全变了：正在编辑/录键的目标必须先收掉，否则改的是别人。
+    model.editing = None;
+    model.capturing = None;
+    vec![ChangeKind::Ring]
+}
+
+pub fn begin_capture(model: &mut Model, target: CaptureTarget) {
+    commit_edit(model);
+    model.capturing = Some(target);
+}
+
+/// 开始编辑某个文本框，光标停在末尾、缓冲取当前值。
+pub fn begin_edit(model: &mut Model, target: EditTarget) {
+    let buffer = edit_value(model, target);
+    model.editing = Some(Editing {
+        target,
+        cursor: buffer.len(),
+        buffer,
+    });
+    // 同一个球只能干一件事：一边录键一边打字最后谁也不知道按了啥。
+    model.capturing = None;
+}
+
+fn edit_value(model: &Model, target: EditTarget) -> String {
+    match target {
+        EditTarget::ItemLabel(i) => model.config.ring.items.get(i).map(|it| it.label.clone()),
+        EditTarget::ItemCommand(i) => model.config.ring.items.get(i).map(|it| it.command.clone()),
+    }
+    .unwrap_or_default()
+}
+
+fn set_edit_value(model: &mut Model, target: EditTarget, value: String) {
+    match target {
+        EditTarget::ItemLabel(i) => {
+            if let Some(item) = model.config.ring.items.get_mut(i) {
+                item.label = value;
+            }
+        }
+        EditTarget::ItemCommand(i) => {
+            if let Some(item) = model.config.ring.items.get_mut(i) {
+                item.command = value;
+            }
+        }
+    }
+}
+
+/// 写回正在编辑的文本。返回 `Some(kinds)` 表示真的变了（宿主需要落盘）。
+pub fn commit_edit(model: &mut Model) -> Option<Vec<ChangeKind>> {
+    let editing = model.editing.take()?;
+    let old = edit_value(model, editing.target);
+    if old == editing.buffer {
+        return None;
+    }
+    set_edit_value(model, editing.target, editing.buffer);
+    Some(vec![ChangeKind::Ring])
+}
+
+/// 把一段文本插到光标处（输入法上屏、逐字符输入都走这里）。
+pub fn edit_text(model: &mut Model, text: &str) {
+    let Some(editing) = model.editing.as_mut() else {
+        return;
+    };
+    let cursor = clamp_boundary(&editing.buffer, editing.cursor);
+    editing.buffer.insert_str(cursor, text);
+    editing.cursor = cursor + text.len();
+}
+
+/// 编辑框的按键处理。`Commit` / `Cancel` 返回 `Some`，其余返回 `None`。
+pub fn edit_key(model: &mut Model, key: EditKey) -> Option<Vec<ChangeKind>> {
+    match key {
+        EditKey::Commit => return commit_edit(model),
+        EditKey::Cancel => {
+            model.editing = None;
+            return None;
+        }
+        _ => {}
+    }
+    let Some(editing) = model.editing.as_mut() else {
+        return None;
+    };
+    let cursor = clamp_boundary(&editing.buffer, editing.cursor);
+    editing.cursor = cursor;
+    match key {
+        EditKey::Backspace => {
+            if let Some(prev) = prev_boundary(&editing.buffer, cursor) {
+                editing.buffer.replace_range(prev..cursor, "");
+                editing.cursor = prev;
+            }
+        }
+        EditKey::Delete => {
+            if let Some(next) = next_boundary(&editing.buffer, cursor) {
+                editing.buffer.replace_range(cursor..next, "");
+            }
+        }
+        EditKey::Left => editing.cursor = prev_boundary(&editing.buffer, cursor).unwrap_or(0),
+        EditKey::Right => {
+            editing.cursor = next_boundary(&editing.buffer, cursor).unwrap_or(editing.buffer.len());
+        }
+        EditKey::Home => editing.cursor = 0,
+        EditKey::End => editing.cursor = editing.buffer.len(),
+        EditKey::Commit | EditKey::Cancel => unreachable!(),
+    }
+    None
+}
+
+/// 把下标夹到最近的字符边界上（防止多字节字符被切半个）。
+fn clamp_boundary(text: &str, index: usize) -> usize {
+    let mut i = index.min(text.len());
+    while i > 0 && !text.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+fn prev_boundary(text: &str, index: usize) -> Option<usize> {
+    if index == 0 {
+        return None;
+    }
+    let mut i = index - 1;
+    while i > 0 && !text.is_char_boundary(i) {
+        i -= 1;
+    }
+    Some(i)
+}
+
+fn next_boundary(text: &str, index: usize) -> Option<usize> {
+    if index >= text.len() {
+        return None;
+    }
+    let mut i = index + 1;
+    while i < text.len() && !text.is_char_boundary(i) {
+        i += 1;
+    }
+    Some(i)
+}
+
 fn reset(model: &mut Model) {
     let defaults = Config::default();
     // 语言、热键、自启、日志属于"运行方式"，重置外观不该把用户的语言也改回英文。
     model.config.appearance = defaults.appearance;
     model.config.interaction = defaults.interaction;
+    // 环的几何回默认，但**气泡球清单保留**：
+    // 「重置外观」不该把用户一颗一颗加好、排好序、配好热键的球全删了。
+    let kept = std::mem::take(&mut model.config.ring.items);
     model.config.ring = defaults.ring;
+    model.config.ring.items = kept;
     model.config.buddy = defaults.buddy;
     model.config.window = defaults.window;
     // 护眼是“屏幕观感”：重置外观时一并回到默认（关掉、强度 40）。
@@ -1755,17 +2380,72 @@ fn reset(model: &mut Model) {
 // ── 热键捕获 ──────────────────────────────────────────────
 
 /// 返回 `Some(Ok(()))` 表示热键已更新，`Some(Err(msg))` 表示这组键不能用。
+/// 录到一个组合键：按 `CaptureTarget` 写回对应位置。
+///
+/// 调用方（窗口层）只负责“用户按了什么”，知道“写给谁”的是这里 ——
+/// 两面各管一半，比把下标/字段名散在窗口层可靠。
 pub fn capture_hotkey(model: &mut Model, hotkey: Option<Hotkey>) -> Option<Vec<ChangeKind>> {
-    if !model.capturing {
-        return None;
-    }
+    let target = model.capturing?;
     let hotkey = hotkey?;
-    model.capturing = false;
-    // 直接存捕获到的组合。不再回写字符串再解析一遍——那只是给"字符串格式"
-    // 制造第二次出错的机会。
-    model.config.general.hotkey = hotkey.to_string();
-    model.notice = None;
-    Some(vec![ChangeKind::Hotkey])
+    model.capturing = None;
+    match target {
+        CaptureTarget::Summon => {
+            // 直接存捕获到的组合。不再回写字符串再解析一遍——那只是给"字符串格式"
+            // 制造第二次出错的机会。
+            model.config.general.hotkey = hotkey.to_string();
+            model.notice = None;
+            Some(vec![ChangeKind::Hotkey])
+        }
+        CaptureTarget::Item(index) => {
+            let text = hotkey.to_string();
+            let id = model.config.ring.items.get(index)?.id.clone();
+            // 撞车当场拒：两个球绑同一个键，按下之后只能有一个响应，
+            // 而用户完全无从得知是哪个引胜。
+            if !text.trim().is_empty() {
+                if let Some(other) = model
+                    .config
+                    .ring
+                    .items
+                    .iter()
+                    .position(|it| it.id != id && it.hotkey.trim() == text.trim())
+                {
+                    let name = model
+                        .config
+                        .ring
+                        .items
+                        .get(other)
+                        .map(|it| it.display_name().to_string())
+                        .unwrap_or_default();
+                    let notice = model
+                        .i18n
+                        .t_args("settings.bubbles.hotkey.taken", &[("name", &name)]);
+                    model.notice = Some(notice);
+                    return None;
+                }
+            }
+            if let Some(item) = model.config.ring.items.get_mut(index) {
+                item.hotkey = text;
+            }
+            model.notice = None;
+            Some(vec![ChangeKind::Ring])
+        }
+    }
+}
+
+/// 清掉正在录的那个热键（用户在录键框里按了回退/删）。
+pub fn clear_hotkey(model: &mut Model) -> Option<Vec<ChangeKind>> {
+    let target = model.capturing.take()?;
+    match target {
+        CaptureTarget::Summon => {
+            model.config.general.hotkey.clear();
+            Some(vec![ChangeKind::Hotkey])
+        }
+        CaptureTarget::Item(index) => {
+            let item = model.config.ring.items.get_mut(index)?;
+            item.hotkey.clear();
+            Some(vec![ChangeKind::Ring])
+        }
+    }
 }
 
 /// 捕获失败时给用户一句人话（`Hotkey` 的 Display 已经是这个口径）。
@@ -2056,6 +2736,93 @@ fn draw_row(
             p.stroke(r, 8.0, 1.0, pal.accent.with_alpha(0.6));
             let shown = p.truncate(text, 13.0, r.w - 16.0);
             p.text_center(&shown, r, 13.0, pal.text, Weight::Bold);
+        }
+        Control::RingItem {
+            enabled,
+            hotkey,
+            capturing,
+            ..
+        } => {
+            // 关掉的球不上环：整行控件一起变淡，而不是只把开关拨到暗色 ——
+            // 否则用户会以为"开关关了但热键还在生效"。
+            let dim = !*enabled;
+            for (rect, up) in [(rl.up, true), (rl.down, false)] {
+                let bg = pal.raised.with_alpha(if dim { 0.4 } else { 1.0 });
+                p.fill(rect, 6.0, bg);
+                p.stroke(rect, 6.0, 1.0, pal.line.with_alpha(0.5));
+                let cx = rect.x + rect.w * 0.5;
+                let cy = rect.y + rect.h * 0.5;
+                let d = 4.0;
+                let color = if dim { pal.dim } else { pal.text };
+                // 箭头用两段线拼：不依赖字体里有没有 ▲▼（缺字时会是豆腐块）。
+                if up {
+                    p.line(cx - d, cy + d * 0.6, cx, cy - d * 0.6, color, 1.8);
+                    p.line(cx, cy - d * 0.6, cx + d, cy + d * 0.6, color, 1.8);
+                } else {
+                    p.line(cx - d, cy - d * 0.6, cx, cy + d * 0.6, color, 1.8);
+                    p.line(cx, cy + d * 0.6, cx + d, cy - d * 0.6, color, 1.8);
+                }
+            }
+            let r = rl.hotkey;
+            let (fill, edge, fg) = if *capturing {
+                (pal.accent.with_alpha(0.22), pal.accent, pal.text)
+            } else {
+                (
+                    pal.raised,
+                    pal.line.with_alpha(0.5),
+                    if dim { pal.dim } else { pal.text },
+                )
+            };
+            p.fill(r, 8.0, fill);
+            p.stroke(r, 8.0, 1.0, edge);
+            let shown = p.truncate(hotkey, 12.0, r.w - 14.0);
+            p.text_center(&shown, r, 12.0, fg, Weight::Bold);
+            let t = rl.hit;
+            p.fill(t, t.h * 0.5, if dim { pal.line } else { pal.accent });
+            let knob = (t.h - 6.0) * 0.5;
+            let cx = if dim {
+                t.x + 3.0 + knob
+            } else {
+                t.right() - 3.0 - knob
+            };
+            p.circle(Point::new(cx, t.y + t.h * 0.5), knob, pal.text);
+        }
+        Control::Text {
+            text,
+            editing,
+            placeholder,
+            ..
+        } => {
+            let r = rl.hit;
+            p.fill(r, 8.0, pal.raised);
+            p.stroke(
+                r,
+                8.0,
+                1.0,
+                if *editing {
+                    pal.accent
+                } else {
+                    pal.line.with_alpha(0.5)
+                },
+            );
+            let inner = Rect::new(r.x + 10.0, r.y, (r.w - 20.0).max(10.0), r.h);
+            if text.trim().is_empty() && !*editing {
+                let shown = p.truncate(placeholder, 12.0, inner.w);
+                p.text_in(&shown, inner, 12.0, pal.dim, Weight::Regular);
+            } else {
+                // 编辑中看尾部（光标在末尾），不编辑时看头部（命令开头更重要）。
+                let shown = if *editing {
+                    p.truncate_left(text, 12.0, inner.w - 6.0)
+                } else {
+                    p.truncate(text, 12.0, inner.w)
+                };
+                p.text_in(&shown, inner, 12.0, pal.text, Weight::Regular);
+                if *editing {
+                    let w = p.measure(&shown, 12.0, Weight::Regular);
+                    let x = (inner.x + w + 1.0).min(r.right() - 8.0);
+                    p.line(x, r.y + 8.0, x, r.bottom() - 8.0, pal.accent, 1.6);
+                }
+            }
         }
         Control::Gallery {
             count,
@@ -2451,7 +3218,7 @@ mod tests {
     #[test]
     fn capture_hotkey_stores_normalised_combo() {
         let mut m = model();
-        m.capturing = true;
+        m.capturing = Some(CaptureTarget::Summon);
         let combo = Hotkey {
             ctrl: true,
             shift: true,
@@ -2460,7 +3227,7 @@ mod tests {
             key: zouwu_core::hotkey::Key::Letter('q'),
         };
         assert!(capture_hotkey(&mut m, Some(combo)).is_some());
-        assert!(!m.capturing, "capture mode must end after a combo");
+        assert!(m.capturing.is_none(), "capture mode must end after a combo");
         assert_eq!(m.config.general.hotkey, "Ctrl+Shift+Q");
         assert!(m.notice.is_none());
     }
@@ -2480,5 +3247,291 @@ mod tests {
         reset(&mut m);
         assert_eq!(m.config.buddy.radius, Config::default().buddy.radius);
         assert_eq!(m.config.general.language, "en-US");
+    }
+    // ── 气泡球页（ADR-042） ──
+    //
+    // 每条断言都对着用户看得见的一件事：一颗球一行、关掉的球不上环、
+    // 上下箭头改顺序、每颗球的热键互不相干。
+
+    fn bubbles(m: &mut Model) -> Layout {
+        m.set_tab(Tab::Bubbles);
+        layout(m, 760.0, 600.0)
+    }
+
+    /// 第 `item` 颗球那一行的 **行下标**（不是控制类型下标）。
+    fn row_of_item(l: &Layout, item: usize) -> usize {
+        l.rows
+            .iter()
+            .position(
+                |(row, _)| matches!(row.control, Control::RingItem { index, .. } if index == item),
+            )
+            .expect("ring item row")
+    }
+
+    fn row_of_action(l: &Layout, want: Action) -> usize {
+        l.rows
+            .iter()
+            .position(
+                |(row, _)| matches!(row.control, Control::Button { action, .. } if action == want),
+            )
+            .expect("action button row")
+    }
+
+    #[test]
+    fn bubbles_tab_lists_one_row_per_configured_item() {
+        let mut m = model();
+        let l = bubbles(&mut m);
+
+        let items: Vec<(usize, String, bool)> = l
+            .rows
+            .iter()
+            .filter_map(|(row, _)| match &row.control {
+                Control::RingItem {
+                    index,
+                    name,
+                    enabled,
+                    ..
+                } => Some((*index, name.clone(), *enabled)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(items.len(), 2, "出厂配置就是两颗球");
+        assert_eq!(items[0].0, 0);
+        assert_eq!(items[1].0, 1);
+        // 名字必须是翻译过的（`t()` 找不到 key 会原样吐 key）。
+        for (_, name, _) in &items {
+            assert!(!name.is_empty());
+            assert!(!name.starts_with("action."), "untranslated label: {name}");
+        }
+        assert!(items[0].1 != items[1].1, "两颗球的名字不该一样");
+        assert!(items.iter().all(|(_, _, on)| *on));
+
+        // 自定义工具行（名称/命令）只该出现在自定义球上：内置球没有命令可填。
+        assert!(
+            !l.rows
+                .iter()
+                .any(|(row, _)| matches!(row.control, Control::Text { .. })),
+            "内置球不该出现命令输入框"
+        );
+    }
+
+    #[test]
+    fn bubbles_toggle_removes_from_ring_but_keeps_the_row() {
+        let mut m = model();
+        let l = bubbles(&mut m);
+        let index = row_of_item(&l, 0);
+
+        let kinds = activate(&mut m, &l, index);
+        assert!(kinds.contains(&ChangeKind::Ring));
+        assert!(!m.config.ring.items[0].enabled, "关掉的球要留在配置里");
+
+        // 关掉之后环上少一颗：这是"配置了几个功能就几个球"的实际效果。
+        let i18n = I18n::new(&m.config.general.language);
+        let shown = zouwu_core::action::resolve(&m.config.ring.items, &i18n);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].id, m.config.ring.items[1].id);
+
+        // 行还在（否则用户没法再打开），但开关显示为关。
+        let l = layout(&m, 760.0, 600.0);
+        let index = row_of_item(&l, 0);
+        assert!(matches!(
+            l.rows[index].0.control,
+            Control::RingItem { enabled: false, .. }
+        ));
+    }
+
+    #[test]
+    fn bubbles_up_down_reorders_the_ring() {
+        let mut m = model();
+        let before: Vec<String> = m.config.ring.items.iter().map(|i| i.id.clone()).collect();
+        let l = bubbles(&mut m);
+
+        // 第 1 颗按 ↑：应换到最前面（展开顺序就是这里的顺序）。
+        let kinds = ring_move(&mut m, 1, -1);
+        assert_eq!(kinds, vec![ChangeKind::Ring]);
+        let after: Vec<String> = m.config.ring.items.iter().map(|i| i.id.clone()).collect();
+        assert_eq!(after, vec![before[1].clone(), before[0].clone()]);
+
+        // 已经在最前面还按 ↑：什么都不做，不该冒出一个多余的变更。
+        assert!(ring_move(&mut m, 0, -1).is_empty());
+        // ↓ 移到末尾（两颗球时 = 换回原位）。
+        assert_eq!(ring_move(&mut m, 0, 1), vec![ChangeKind::Ring]);
+        let back: Vec<String> = m.config.ring.items.iter().map(|i| i.id.clone()).collect();
+        assert_eq!(back, before);
+
+        // 越界下标不该 panic（行刚被删掉时点旧位置就是这个情形）。
+        let _ = &l;
+        assert!(ring_move(&mut m, 99, 1).is_empty());
+        assert!(ring_move(&mut m, 99, -1).is_empty());
+    }
+
+    #[test]
+    fn bubbles_hotkeys_are_per_item() {
+        let mut m = model();
+        let combo = Hotkey {
+            ctrl: true,
+            shift: true,
+            alt: false,
+            meta: false,
+            key: zouwu_core::hotkey::Key::Letter('k'),
+        };
+
+        begin_capture(&mut m, CaptureTarget::Item(1));
+        assert_eq!(m.capturing, Some(CaptureTarget::Item(1)));
+        let kinds = capture_hotkey(&mut m, Some(combo)).expect("combo accepted");
+        assert_eq!(kinds, vec![ChangeKind::Ring]);
+        assert_eq!(m.config.ring.items[1].hotkey, "Ctrl+Shift+K");
+        // 呼出热键不能被球的捕获改掉 —— 那是另一个入口。
+        assert_eq!(m.config.general.hotkey, Config::default().general.hotkey);
+        assert_eq!(
+            m.config.ring.items[0].hotkey,
+            zouwu_core::action::default_hotkey(&m.config.ring.items[0].id)
+        );
+
+        // 同一个组合再绑给另一颗球：拒绝，且不写坏原有配置。
+        begin_capture(&mut m, CaptureTarget::Item(0));
+        assert!(capture_hotkey(&mut m, Some(combo)).is_none());
+        assert_eq!(
+            m.config.ring.items[0].hotkey,
+            zouwu_core::action::default_hotkey(&m.config.ring.items[0].id)
+        );
+        assert!(m.notice.is_some(), "撞车必须有提示");
+
+        // 清除：留空 = 这颗球没有热键。
+        begin_capture(&mut m, CaptureTarget::Item(1));
+        let kinds = clear_hotkey(&mut m).expect("clear");
+        assert_eq!(kinds, vec![ChangeKind::Ring]);
+        assert!(m.config.ring.items[1].hotkey.is_empty());
+        assert!(m.capturing.is_none());
+    }
+
+    #[test]
+    fn bubbles_add_and_remove_items() {
+        let mut m = model();
+        let l = bubbles(&mut m);
+        let index = row_of_action(&l, Action::AddItem);
+
+        let kinds = activate(&mut m, &l, index);
+        assert_eq!(kinds, vec![ChangeKind::Ring]);
+        assert_eq!(m.config.ring.items.len(), 3);
+        let added = m.config.ring.items[2].clone();
+        assert!(added.id.starts_with("custom."), "custom id: {}", added.id);
+        assert!(added.enabled);
+        assert!(added.command.is_empty());
+        // id 唯一是硬要求：`[[ring.items]]` 里重复 id 会被 `normalized` 丢掉。
+        let ids: Vec<&String> = m.config.ring.items.iter().map(|i| &i.id).collect();
+        for (a, b) in ids.iter().zip(ids.iter().skip(1)) {
+            assert_ne!(a, b);
+        }
+
+        // 连加两个也不能撞 id。
+        let l = layout(&m, 760.0, 600.0);
+        let index = row_of_action(&l, Action::AddItem);
+        activate(&mut m, &l, index);
+        assert_eq!(m.config.ring.items.len(), 4);
+        let mut ids: Vec<&String> = m.config.ring.items.iter().map(|i| &i.id).collect();
+        let len = ids.len();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), len, "custom id 撞车了");
+
+        // 移除：行变少，配置也少。
+        // （`activate` 里那一步会弹系统确认框，测试直接走底层函数。）
+        assert_eq!(remove_item(&mut m, 2), vec![ChangeKind::Ring]);
+        assert_eq!(m.config.ring.items.len(), 3);
+        // 越界下标（行刚被删掉又点了一次）不该 panic。
+        assert!(remove_item(&mut m, 99).is_empty());
+
+        // 到上限就不再加了（否则环上会摆出一圈看不清的球）。
+        while m.config.ring.items.len() < RingCfg::MAX_ITEMS {
+            let l = layout(&m, 760.0, 600.0);
+            let index = row_of_action(&l, Action::AddItem);
+            activate(&mut m, &l, index);
+        }
+        let l = layout(&m, 760.0, 600.0);
+        let index = row_of_action(&l, Action::AddItem);
+        assert!(activate(&mut m, &l, index).is_empty(), "到上限后不该再变");
+        assert_eq!(m.config.ring.items.len(), RingCfg::MAX_ITEMS);
+        assert!(m.notice.is_some(), "到上限要有提示");
+    }
+
+    #[test]
+    fn bubbles_label_and_command_edit_round_trip() {
+        let mut m = model();
+        // 先加一颗自定义球（内置球不需要命令，但名字也能改）。
+        let l = bubbles(&mut m);
+        let index = row_of_action(&l, Action::AddItem);
+        activate(&mut m, &l, index);
+
+        begin_edit(&mut m, EditTarget::ItemLabel(2));
+        assert!(m.editing.is_some());
+        edit_text(&mut m, "记事本");
+        let kinds = commit_edit(&mut m).expect("label changed");
+        assert_eq!(kinds, vec![ChangeKind::Ring]);
+        assert_eq!(m.config.ring.items[2].label, "记事本");
+        assert!(m.editing.is_none());
+
+        begin_edit(&mut m, EditTarget::ItemCommand(2));
+        edit_text(&mut m, "notepad.exe");
+        let kinds = commit_edit(&mut m).expect("command changed");
+        assert_eq!(kinds, vec![ChangeKind::Ring]);
+        assert_eq!(m.config.ring.items[2].command, "notepad.exe");
+
+        // Esc 取消：改了一半不写回，也不能报变更。
+        begin_edit(&mut m, EditTarget::ItemCommand(2));
+        edit_text(&mut m, "typo.exe");
+        assert!(edit_key(&mut m, EditKey::Cancel).is_none());
+        assert_eq!(m.config.ring.items[2].command, "notepad.exe");
+
+        // ⏎ 提交但内容没变：同样不算变更（否则每次点开再关都会写盘）。
+        begin_edit(&mut m, EditTarget::ItemCommand(2));
+        assert!(edit_key(&mut m, EditKey::Commit).is_none());
+
+        // 退格真的删字（编辑功能最容易写成"能打不能删"）。
+        begin_edit(&mut m, EditTarget::ItemLabel(2));
+        edit_text(&mut m, "X");
+        edit_key(&mut m, EditKey::Backspace);
+        commit_edit(&mut m);
+        assert_eq!(m.config.ring.items[2].label, "记事本");
+    }
+
+    #[test]
+    fn bubbles_row_controls_hit_their_own_rects() {
+        let mut m = model();
+        let l = bubbles(&mut m);
+        let index = row_of_item(&l, 0);
+        let rl = &l.rows[index].1;
+        let mid = |r: Rect| Point::new(r.x + r.w * 0.5, r.y + r.h * 0.5);
+
+        assert_eq!(hit(&l, mid(rl.up)), Some(Hit::RingMove(0, -1)));
+        assert_eq!(hit(&l, mid(rl.down)), Some(Hit::RingMove(0, 1)));
+        assert_eq!(hit(&l, mid(rl.hotkey)), Some(Hit::RingHotkey(0)));
+        assert_eq!(
+            hit(&l, mid(rl.hit)),
+            Some(Hit::Press(index)),
+            "开关本身点下去要能切换"
+        );
+
+        // 两个箭头不能重叠（重叠会导致"按 ↑ 结果往下走"）。
+        assert!(rl.up.right() <= rl.down.x + 0.01);
+        assert!(rl.down.right() <= rl.hotkey.x + 0.01);
+        assert!(rl.hotkey.right() <= rl.hit.x + 0.01);
+    }
+
+    #[test]
+    fn bubbles_rows_fit_the_minimum_window() {
+        // 这页控件最多（箭头+热键+开关），最小宽度下不能被挤到负宽。
+        let mut m = model();
+        m.set_tab(Tab::Bubbles);
+        let l = layout(&m, MIN_SIZE.0, MIN_SIZE.1);
+        for (row, rl) in &l.rows {
+            if matches!(row.control, Control::RingItem { .. }) {
+                assert!(rl.up.w > 10.0 && rl.up.h > 10.0);
+                assert!(rl.hotkey.w >= 80.0, "热键框被挤扁了: {}", rl.hotkey.w);
+                assert!(rl.hit.w > 20.0);
+                assert!(rl.hotkey.x >= rl.rect.x, "控件跑到行外面了");
+                assert!(rl.hit.right() <= rl.rect.right() + 0.01);
+            }
+        }
     }
 }
