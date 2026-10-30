@@ -5,7 +5,6 @@
 
 pub mod action;
 pub mod anim;
-pub mod beam;
 pub mod config;
 pub mod drag;
 pub mod geom;

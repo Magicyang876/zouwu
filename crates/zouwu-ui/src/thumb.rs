@@ -61,7 +61,6 @@ pub fn render(skin: Option<&Skin>, theme: &Theme, size: u32) -> Result<Thumb, St
         breath: 0.0,
         theme,
         bubbles: &[],
-        beams: &[],
         skin,
     };
     paint::render(&scene, &mut pixmap);

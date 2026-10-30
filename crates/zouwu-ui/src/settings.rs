@@ -897,16 +897,6 @@ pub fn build_rows(model: &Model) -> Vec<Row> {
                     text: i18n.t("settings.bubbles.note"),
                 },
             });
-            // 子项只给自定义球、而且目前只在 config.toml 里配（编辑器的
-            // 嵌套列表还没做），所以这里只放一句指路，不放半成品控件。
-            rows.push(Row {
-                field: None,
-                label: String::new(),
-                hint: None,
-                control: Control::Note {
-                    text: i18n.t("settings.bubbles.children.note"),
-                },
-            });
             let items = &model.config.ring.items;
             if items.is_empty() {
                 rows.push(Row {

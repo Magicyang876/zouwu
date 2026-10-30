@@ -7,7 +7,7 @@
 //! 这些历史遗留的占位早就从清单里撤掉了——那时候点下去只会写一行
 //! "action not implemented yet" 的日志，比没有更糟。
 
-use crate::config::{RingChild, RingItem};
+use crate::config::RingItem;
 use crate::i18n::I18n;
 use crate::theme::Rgba;
 
@@ -90,19 +90,12 @@ pub struct ActionItem {
     pub icon: Option<String>,
     /// 强调色覆盖（None = 用主题 glyph 色）
     pub tint: Option<Rgba>,
-    /// 挂在这颗球下面的子项（只在自定义球上有，见 ADR-045）
-    pub children: Vec<RingChild>,
 }
 
 impl ActionItem {
     /// 是不是自定义球（用 `command` 判断，id 只是标识）。
     pub fn is_custom(&self) -> bool {
         self.command.is_some()
-    }
-
-    /// 点它会不会展开激光条（有子项才展开）。
-    pub fn has_children(&self) -> bool {
-        !self.children.is_empty()
     }
 }
 
@@ -122,8 +115,6 @@ pub fn resolve(items: &[RingItem], i18n: &I18n) -> Vec<ActionItem> {
                 command: None,
                 icon: None,
                 tint: None,
-                // 内置球没有可拆的动作：配置里写了 children 也不认。
-                children: Vec::new(),
             },
             // 认不出来的 id：当自定义球处理，有命令就能点，没命令点下去只写日志。
             None => ActionItem {
@@ -133,7 +124,6 @@ pub fn resolve(items: &[RingItem], i18n: &I18n) -> Vec<ActionItem> {
                 command: Some(item.command.clone()),
                 icon: (!item.icon.is_empty()).then(|| item.icon.clone()),
                 tint: None,
-                children: item.children.clone(),
             },
         })
         .collect()

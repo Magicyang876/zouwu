@@ -13,7 +13,6 @@ use zouwu_core::skin::LayerRole;
 use zouwu_core::theme::{Rgba, Theme};
 
 use crate::skin::Skin;
-use crate::widget::{Painter, Weight};
 
 /// 代码绘制小兽的呼吸幅度（±3%）。位图皮肤用它自己的 `geometry.breath_amount`。
 pub const DEFAULT_BREATH_AMOUNT: f32 = 0.03;
@@ -28,17 +27,6 @@ pub struct BubblePaint<'a> {
     /// 自定义图标（PNG 位图）；有它就不画字形。
     pub icon: Option<&'a Pixmap>,
     pub selected: bool,
-}
-
-/// 一条子项激光条（`open_children` 展开时才有）。
-pub struct BeamPaint<'a> {
-    /// 起点：父球外沿（牌子从这里滑出去，不画连线）
-    pub base: Point,
-    /// 文字牌（逻辑坐标）
-    pub chip: zouwu_core::geom::Rect,
-    pub label: &'a str,
-    /// 鼠标停在这条牌子上
-    pub hovered: bool,
 }
 
 pub struct Scene<'a> {
@@ -60,8 +48,6 @@ pub struct Scene<'a> {
     pub bubbles: &'a [BubblePaint<'a>],
     /// 位图皮肤；`None` 或 `procedural` → 走代码绘制。
     pub skin: Option<&'a Skin>,
-    /// 子项激光条（画在气泡之上）
-    pub beams: &'a [BeamPaint<'a>],
 }
 
 impl Scene<'_> {
@@ -284,58 +270,7 @@ pub fn render(scene: &Scene<'_>, pixmap: &mut Pixmap) {
 
     draw_skin_or_buddy(&mut ctx, scene);
     draw_bubbles(&mut ctx, scene, theme);
-    draw_beams(&mut ctx, scene, theme);
 }
-
-/// 子项激光条 + 文字牌（ADR-045）。
-///
-/// 光条画三层（外晕 / 中亮 / 芯），一层比一层细、一层比一层亮，看起来才像
-/// "射出去的光"而不是一条直线。文字牌最后画，盖住光条的尾巴。
-fn draw_beams(ctx: &mut Ctx<'_>, scene: &Scene<'_>, theme: &Theme) {
-    let scale = ctx.s;
-    for beam in scene.beams {
-        // 不做入场动画：牌子直接摆在自己的位置上。之前是从球心滑出 + 淡入，
-        // 但"点开就看到全部选项"比"看它长出来"更有用（用户原话：动画去掉）。
-        let chip = crate::widget::Rect::new(beam.chip.x, beam.chip.y, beam.chip.w, beam.chip.h);
-        let bg = if beam.hovered {
-            theme.bubble_bg_active
-        } else {
-            theme.bubble_bg
-        };
-        let edge = if beam.hovered {
-            theme.bubble_edge_active
-        } else {
-            theme.bubble_edge
-        };
-        let mut painter = Painter::new(ctx.pixmap, scale);
-        painter.fill(chip, 7.0, bg.with_alpha(0.94));
-        painter.stroke(chip, 7.0, 1.0, edge);
-        let text_color = if beam.hovered {
-            theme.glyph_active
-        } else {
-            theme.glyph
-        };
-        // `text_in` 是左对齐（不是居中）：直接把整块牌子给它，字就会顶在圆角边上。
-        let budget =
-            (chip.w - zouwu_core::beam::CHIP_TEXT_PAD - zouwu_core::beam::CHIP_PAD).max(8.0);
-        let label = painter.truncate(beam.label, CHIP_FONT, budget);
-        painter.text_in(
-            &label,
-            crate::widget::Rect::new(
-                chip.x + zouwu_core::beam::CHIP_TEXT_PAD,
-                chip.y,
-                budget,
-                chip.h,
-            ),
-            CHIP_FONT,
-            text_color,
-            Weight::Regular,
-        );
-    }
-}
-
-/// 文字牌字号（逻辑像素）。与 `app.rs` 里量文字用的字号必须一致。
-pub const CHIP_FONT: f32 = 11.0;
 
 /// 本体：有位图皮肤就贴图层，否则代码绘制。
 fn draw_skin_or_buddy(ctx: &mut Ctx<'_>, scene: &Scene<'_>) {
@@ -491,7 +426,6 @@ pub fn tray_icon(theme: &Theme, skin: Option<&Skin>, size: u32) -> (Vec<u8>, u32
         breath: 0.0,
         theme,
         bubbles: &[],
-        beams: &[],
         skin,
     };
     render(&scene, &mut pixmap);
@@ -920,7 +854,6 @@ mod tests {
                 breath: 0.5,
                 theme: &Theme::fallback(),
                 bubbles: &[],
-                beams: &[],
                 skin: Some(&skin),
             };
             render(&scene, &mut pm);

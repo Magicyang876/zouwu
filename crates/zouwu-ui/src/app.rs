@@ -23,7 +23,6 @@ use winit::platform::windows::WindowAttributesExtWindows;
 
 use zouwu_core::action::ActionItem;
 use zouwu_core::anim::Spring;
-use zouwu_core::beam::{self, Beam, BeamInput};
 use zouwu_core::config::{ChangeKind, Config, WindowState};
 use zouwu_core::drag::{Drag, DragOutcome};
 use zouwu_core::geom::{Point, Rect};
@@ -45,16 +44,8 @@ use zouwu_platform::reload::{ConfigWatcher, ReloadEvent};
 use zouwu_platform::single_instance::InstanceSignal;
 use zouwu_platform::tray::{Tray, TrayCommand, TrayOptions};
 
-use crate::paint::{render, BeamPaint, BubblePaint, Scene, CHIP_FONT};
+use crate::paint::{render, BubblePaint, Scene};
 
-/// 开激光条时窗口往外扩的余量（逻辑像素，单侧）。
-///
-/// 牌子是横排文字，绕着一颗球往外射，需要的空间比气泡环大得多：默认 340 的
-/// 正方形窗口里，环外只剩十几像素，牌子必然挤成一堆。所以开激光条就把窗口
-/// 撑大一圈、关掉再收回——空闲时不占地方。
-const BEAM_ROOM: f32 = 18.0;
-/// 排在“理想大窗口”里用的假余量：先不算窗口限制，排出真实需求再撑窗口。
-const BEAM_SEED: f32 = 400.0;
 use crate::presenter::Presenter;
 use crate::report::{Entry, Outcome as ReportOutcome, Report, ReportWindow};
 
@@ -199,13 +190,6 @@ struct App {
     buddy_scale: Spring,
     hovered_bubble: Option<usize>,
 
-    /// 哪颗球的激光条正开着（下标指向 `items`）
-    open_children: Option<usize>,
-    /// 激光条的几何（只在 `open_children` 有值时非空）
-    beams: Vec<Beam>,
-    /// 鼠标停在哪条激光条的文字牌上
-    hovered_child: Option<usize>,
-    /// 激光条的生长弹簧（0 = 收，1 = 完全射出）
     /// 呼出即展开后的"钉住"状态：不因鼠标离远自动收起，点一下本体才收。
     pinned: bool,
 
@@ -269,9 +253,6 @@ struct App {
     /// 不直接在 `on_click` 里执行：有些动作要建窗口，而建窗口需要
     /// `&ActiveEventLoop`，那个引用只在 `about_to_wait` / `window_event` 里拿得到。
     pending_action: Option<String>,
-    /// 激光条里点中的子项：`(父球下标, 子项下标)`。与 `pending_action` 一样
-    /// 只是"记下来"，真正执行要等 `about_to_wait` 拿到 `&ActiveEventLoop`。
-    pending_child: Option<(usize, usize)>,
     /// 结果小窗（二维码扫描结果等）。
     report: Option<ReportWindow>,
     /// 剪贴板历史窗。
@@ -400,7 +381,6 @@ impl App {
             tray: None,
             hotkeys: None,
             pending_action: None,
-            pending_child: None,
             report: None,
             history_window: None,
             history,
@@ -427,9 +407,6 @@ impl App {
             anims: (0..n).map(|_| Spring::soft(0.0)).collect(),
             buddy_scale: Spring::soft(1.0),
             hovered_bubble: None,
-            open_children: None,
-            beams: Vec::new(),
-            hovered_child: None,
             pinned: false,
             blink_start: None,
             next_blink: Instant::now() + Duration::from_millis(2600),
@@ -616,10 +593,14 @@ impl App {
         }
 
         if changed.contains(&ChangeKind::WindowSize) {
-            // 改尺寸交给窗口事件：`Resized` 会顺带 resize presenter。
-            if let Some(window) = &self.window {
-                let size = self.config.window.size;
-                let _ = window.request_inner_size(LogicalSize::new(size, size));
+            // 要**一次**把位置和尺寸落地：`request_inner_size` 之后 winit 还得等一轮
+            // 事件才认新尺寸，中间画的那一帧会被 DWM 拉伸着合成（看着像抖一下）。
+            // `apply_window_extent` 会把目标边长记进 `pending_extent`，布局和重画
+            // 立刻按它算。
+            if self.window.is_some() {
+                self.apply_window_extent(self.config.window.size);
+                self.relayout();
+                self.repaint_now();
             }
         }
 
@@ -892,42 +873,6 @@ impl App {
                     entries: vec![Entry {
                         text: err,
                         screen: command.to_string(),
-                    }],
-                    footer: self.i18n.t("report.launch.footer"),
-                };
-                self.open_report(event_loop, report);
-            }
-        }
-    }
-
-    /// 执行某颗球的某个子项命令。
-    ///
-    /// 与 `run_custom` 同一条失败路径：起不来就弹报告，而不是悄悄吞掉——
-    /// 子项命令是用户手写的，写错很正常，必须让他看见错误。
-    fn run_child(&mut self, event_loop: &ActiveEventLoop, parent: usize, child: usize) {
-        let Some(item) = self.items.get(parent) else {
-            return;
-        };
-        let Some(entry) = item.children.get(child) else {
-            // 配置在运行期被改窄了（热重载）：安静走掉。
-            return;
-        };
-        let command = entry.command.trim().to_string();
-        if command.is_empty() {
-            log::warn!("child `{}` of `{}` has no command", entry.label, item.id);
-            return;
-        }
-        let name = entry.display_name().to_string();
-        match zouwu_platform::launch::run(&command) {
-            Ok(()) => log::info!("child `{name}` launched: {command}"),
-            Err(err) => {
-                log::warn!("child `{name}` failed: {err}");
-                let report = Report {
-                    headline: self.i18n.t("report.launch.failed"),
-                    detail: Some(name),
-                    entries: vec![Entry {
-                        text: err,
-                        screen: command,
                     }],
                     footer: self.i18n.t("report.launch.footer"),
                 };
@@ -1509,13 +1454,6 @@ impl App {
         if self.hovered_bubble.is_some_and(|i| i >= n) {
             self.hovered_bubble = None;
         }
-        // 打激光条的那颗球被删掉/关了子项 → 直接收起，别对着空气画光
-        if self
-            .open_children
-            .is_some_and(|i| self.items.get(i).map_or(true, |item| !item.has_children()))
-        {
-            self.close_children();
-        }
         log::info!(
             "ring items: {n} ({} configured)",
             self.config.ring.items.len()
@@ -1528,102 +1466,11 @@ impl App {
         let view = self.viewport();
         let rotation = solve_rotation(&self.ring, center, view, self.items.len());
         self.bubbles = self.ring.layout(self.items.len(), center, rotation);
-        self.relayout_beams(center, view);
-    }
-
-    /// 算激光条的位置。文字宽度要按**真字体**量，否则牌子宽度和里面的字对不上：
-    /// 量宽用与绘制同一个字号（`CHIP_FONT`），并根据 DPI 换算回逻辑像素。
-    fn relayout_beams(&mut self, center: Point, view: Rect) {
-        self.beams.clear();
-        let Some(parent_idx) = self.open_children else {
-            return;
-        };
-        let (Some(bubble), Some(item)) = (self.bubbles.get(parent_idx), self.items.get(parent_idx))
-        else {
-            return;
-        };
-        if !item.has_children() {
-            return;
-        }
-        let labels: Vec<String> = item
-            .children
-            .iter()
-            .map(|child| child.display_name().to_string())
-            .collect();
-        let scale = self
-            .window
-            .as_ref()
-            .map(|w| w.scale_factor() as f32)
-            .unwrap_or(1.0)
-            .max(0.5);
-        let mut measure = |text: &str| {
-            crate::text::TextEngine::with(|engine| engine.measure(text, CHIP_FONT * scale, false))
-                / scale
-        };
-        self.beams = beam::layout(
-            &BeamInput {
-                parent: bubble.center,
-                parent_radius: bubble.radius,
-                center,
-                viewport: view,
-                labels: &labels,
-            },
-            &mut measure,
-        );
-    }
-
-    /// 收起激光条（不碰气泡环本身）。
-    fn close_children(&mut self) {
-        if self.open_children.take().is_some() {
-            log::debug!("beams closed");
-            self.hovered_child = None;
-            // 窗口要立刻缩回原尺寸，几何留着会被裁掉一半、也不该继续接点击。
-            self.beams.clear();
-            self.dirty = true;
-            // 为激光条撑大的窗口收回原样（重画放在 relayout 之后，见 `repaint_now`）。
-            self.apply_window_extent(self.config.window.size);
-            self.relayout();
-            self.repaint_now();
-        }
-    }
-
-    /// 打开某颗球的激光条。
-    fn open_children_of(&mut self, index: usize) {
-        if !self
-            .items
-            .get(index)
-            .is_some_and(|item| item.has_children())
-        {
-            return;
-        }
-        if self.open_children != Some(index) {
-            self.open_children = Some(index);
-            log::debug!("beams opened for {}", self.items[index].id);
-            self.dirty = true;
-        }
-        self.grow_for_beams();
-    }
-
-    /// 先按“窗口够大”的理想情况排一次，据此把窗口撑到刚好，再按真实窗口重排。
-    ///
-    /// 反过来的话牌子会先被夹回小窗口、叠成一团，再撑大也回不去了。
-    fn grow_for_beams(&mut self) {
-        let center = self.center();
-        // 先给一个“够大且只在右下方”的虚拟画布：窗口左上角钉死，所以牌子不能
-        // 排到负坐标去（否则下一轮按真实窗口重排时会被夹回左边缘、堆在一起）。
-        let base = self.config.window.size + BEAM_SEED * 2.0;
-        self.relayout_beams(center, Rect::new(0.0, 0.0, base, base));
-        self.fit_window_to_beams();
-        // 顺序要紧：**先**按新窗口重排（`relayout` 用的是新中心），**再**画那一帧。
-        // 反过来的话，同步重画用的是旧窗口中心的气泡坐标，画在撑大的画布上——
-        // 整个环（连同牌子）会先跳一下、下一帧才回位，就是用户说的"飘一下"。
-        self.relayout();
-        self.repaint_now();
     }
 
     /// 几何刚变过：立刻重画一帧，别让 DWM 把上一帧拉伸着合成出来。
     ///
-    /// 调用时机必须是“布局已经按新窗口算完”之后（见 `grow_for_beams`）。
+    /// 调用时机必须是“布局已经按新窗口算完”之后（见 `apply_window_extent` 的调用方）。
     ///
     /// 还有个坑：`UpdateLayeredWindow` 会**按像素图尺寸**去改窗口，所以如果 winit 还没
     /// 认出新尺寸（`request_inner_size` 是异步的），拿旧尺寸的像素图去画会把窗口又
@@ -1657,40 +1504,16 @@ impl App {
         }
     }
 
-    /// 激光条要的地方比窗口大时，把窗口临时长大（小兽在屏幕上的位置不动）。
-    ///
-    /// 牌子是**横排文字**，绕着一颗球往外射，需要的空间比气泡环大得多：
-    /// 默认 340 的正方形窗口里，环外只剩十几像素，牌子必然会挤成一堆。
-    /// 所以开着激光条就把窗口撑大，关掉再收回去——只在需要时才变大，
-    /// 空闲时不占地方。
-    fn fit_window_to_beams(&mut self) {
-        if self.beams.is_empty() {
-            return;
-        }
-        // 需要多大由几何自己说：窗口左上角固定、小兽在“基础尺寸”的中心，所以
-        // 只需保证最靠右下那块牌子还在画布内。写死一个“光束预留空间”会两头不
-        // 讨好——短子项把窗口撑得很大（pixmap 白占内存），长子项又不够。
-        let mut reach = self.config.window.size;
-        for beam in &self.beams {
-            reach = reach.max((beam.chip.right() + BEAM_ROOM).max(beam.chip.bottom() + BEAM_ROOM));
-        }
-        let want = reach.max(self.config.window.size);
-        self.apply_window_extent(want);
-    }
-
     /// 把窗口边长改成 `want`（逻辑像素），保持小兽的屏幕位置不变。
     ///
-    /// 窗口以**中心**对称长大：小兽画在窗口中心，所以原点要往回收一半，
-    /// 否则被撑大的这半格会把小兽推走。
+    /// 窗口以**中心**对称长大/缩小：小兽画在窗口中心，所以原点要往回收半个
+    /// 增量，否则这半格会把小兽推走。
     fn apply_window_extent(&mut self, want: f32) {
         let Some(window) = self.window.clone() else {
             return;
         };
         let want = want.max(self.config.window.size);
         let scale = window.scale_factor() as f32;
-        // 只改尺寸，**不改位置**：左上角钉死，窗口向右下长大。
-        // 一旦连位置一起改（原来是“以小兽屏幕中心为不变量”对称长大），窗口动的
-        // 那一瞬间（DWM 还拿着上一帧的画面）小兽会在屏幕上错位、下一帧才回位。
         let rect = self.hwnd().and_then(zouwu_platform::layer::window_rect);
         let cur = match rect {
             Some((_, _, w, _)) => w as f32 / scale,
@@ -1703,10 +1526,11 @@ impl App {
         // 把目标边长记下来：重画和布局都按它算，不等 winit 的 `Resized`
         self.pending_extent = Some(want);
         let (x, y) = match rect {
-            Some((left, top, _, _)) => (left, top),
+            Some((left, top, w, h)) => (left + w / 2 - phys / 2, top + h / 2 - phys / 2),
             None => {
                 let before = window.outer_position().unwrap_or_default();
-                (before.x, before.y)
+                let delta = ((want - cur) * scale * 0.5).round() as i32;
+                (before.x - delta, before.y - delta)
             }
         };
         // 先让 winit 记下新尺寸（它内部有缓存），再用**一次** `SetWindowPos` 把
@@ -1726,12 +1550,7 @@ impl App {
         self.dirty = true;
         // 这里**不**顺手重画：`relayout()` 还没按新窗口算完，此刻画出来的是“新画布 +
         // 旧中心”的气泡，整圈（含牌子）会先跳一下再回位。重画由调用方在 `relayout()`
-        // 之后統一调 `repaint_now()`（见 `grow_for_beams` / `close_children`）。
-    }
-
-    /// 光标落在哪条激光条的文字牌上。
-    fn beam_hit(&self, p: Point) -> Option<usize> {
-        beam::hit(&self.beams, p, 2.0)
+        // 之后統一调 `repaint_now()`（见 `apply_config` 里改窗口尺寸那条路）。
     }
 
     fn set_expanded(&mut self, expanded: bool, now: Instant) {
@@ -1742,8 +1561,6 @@ impl App {
         self.expand_started = Some(now);
         if !expanded {
             self.pinned = false;
-            // 环收了，挂在球上的激光条没有立足之地。
-            self.close_children();
         }
         log::debug!(
             "ring {} (hover delay {} ms)",
@@ -1765,25 +1582,6 @@ impl App {
             .config
             .interaction
             .collapse_radius(self.ring.radius, self.ring.bubble_radius);
-        // 牌子张开时把判定范围放大到盖住最远那块牌子。手是从球心斜着划向牌子的，
-        // 中间要跨过环与牌子之间的空隙，按气泡环的半径判就等于"手还在半路，环先收了"。
-        let outer = match self.open_children {
-            Some(_) if !self.beams.is_empty() => {
-                let center = self.center();
-                let reach = self.beams.iter().fold(outer, |acc, beam| {
-                    let dx = (beam.chip.x - center.x)
-                        .abs()
-                        .max((beam.chip.right() - center.x).abs());
-                    let dy = (beam.chip.y - center.y)
-                        .abs()
-                        .max((beam.chip.bottom() - center.y).abs());
-                    acc.max((dx * dx + dy * dy).sqrt())
-                });
-                // 再留半块牌子的高：判定线贴着牌子边画还是会"明明在牌子上却算离开"。
-                reach + zouwu_core::beam::CHIP_H * 0.5
-            }
-            _ => outer,
-        };
         // 但窗口本身是有限的：判定半径不该超过窗口对角线的一半太多，
         // 否则光标早已在窗口外，判定却还说"没走"。
         let (w, h) = self.logical_size();
@@ -1828,15 +1626,6 @@ impl App {
             let gate_open = elapsed_ms >= i as u64 * stagger;
             spring.set_target(if self.expanded && gate_open { 1.0 } else { 0.0 });
             spring.step(dt);
-        }
-
-        // 2b) 牌子悬停（牌子没有入场动画，点开就在位）
-        if self.open_children.is_some() {
-            let hit = self.cursor.and_then(|p| self.beam_hit(p));
-            if hit != self.hovered_child {
-                self.hovered_child = hit;
-                self.dirty = true;
-            }
         }
 
         // 3) 本体悬停微放大
@@ -2506,9 +2295,6 @@ impl App {
         if self.hovered_bubble.take().is_some() {
             self.dirty = true;
         }
-        if self.hovered_child.take().is_some() {
-            self.dirty = true;
-        }
     }
 
     /// 按住本体：记下起点，等后续轮询判断是「点击」还是「拖动」。
@@ -2557,25 +2343,10 @@ impl App {
 
         match button {
             MouseButton::Left => {
-                if let Some(child) = self.beam_hit(pos) {
-                    // 激光条优先于气泡：牌子可能压在球上，用户点的是字。
-                    if let Some(parent) = self.open_children {
-                        log::info!("beam activated: item {parent} child {child}");
-                        self.pending_child = Some((parent, child));
-                        self.close_children();
-                    }
-                } else if let Some(idx) = self.hover_test(pos) {
-                    if self.items.get(idx).is_some_and(|item| item.has_children()) {
-                        // 有子项的球：点一下开激光条，再点一下收起，不执行它自己的命令。
-                        if self.open_children == Some(idx) {
-                            self.close_children();
-                        } else {
-                            self.open_children_of(idx);
-                        }
-                    } else if let Some(item) = self.items.get(idx) {
+                if let Some(idx) = self.hover_test(pos) {
+                    if let Some(item) = self.items.get(idx) {
                         let (id, label) = (item.id.clone(), item.label.clone());
                         log::info!("bubble activated: {id} ({label})");
-                        self.close_children();
                         self.pending_action = Some(id.to_string());
                     }
                 } else if on_buddy {
@@ -2664,27 +2435,6 @@ impl App {
             });
         }
 
-        // 激光条：只画当前张开的那一颗球的子项。文字牌上的字就是用户自己
-        // 写的子项名，所以标签直接从条目里借，不复制。
-        let mut beam_paints: Vec<BeamPaint<'_>> = Vec::new();
-        if let Some(parent) = self.open_children {
-            if let Some(item) = self.items.get(parent) {
-                for beam in &self.beams {
-                    let label = item
-                        .children
-                        .get(beam.index)
-                        .map(|child| child.display_name())
-                        .unwrap_or("");
-                    beam_paints.push(BeamPaint {
-                        base: beam.base,
-                        chip: beam.chip,
-                        label,
-                        hovered: self.hovered_child == Some(beam.index),
-                    });
-                }
-            }
-        }
-
         let scene = Scene {
             width,
             height,
@@ -2698,7 +2448,6 @@ impl App {
             breath: self.breath_amount(now),
             theme: &self.theme,
             bubbles: &paints,
-            beams: &beam_paints,
             skin: Some(&self.skin),
         };
         let Some(pixmap) = self.pixmap.as_mut() else {
@@ -3059,9 +2808,6 @@ impl ApplicationHandler for App {
 
         // 气泡/热键记下的动作在这里执行：建窗口要 `&ActiveEventLoop`，
         // 而点击处理（`on_click`）与热键轮询（`poll_shell`）都拿不到它。
-        if let Some((parent, child)) = self.pending_child.take() {
-            self.run_child(event_loop, parent, child);
-        }
         if let Some(id) = self.pending_action.take() {
             self.run_action(event_loop, &id);
         }
@@ -3207,7 +2953,15 @@ fn screen_label(i18n: &I18n, monitors: &[Rect], x: i32, y: i32) -> String {
 mod ring_tests {
     use super::*;
     use zouwu_core::action::{CLIPBOARD_ID, QRCODE_ID};
-    use zouwu_core::config::{RingChild, RingItem};
+    use zouwu_core::config::RingItem;
+
+    /// 一颗普通的自定义球（呼出即展开那几个测试只需要"环上有东西"）。
+    fn custom_one() -> RingItem {
+        let mut custom = RingItem::custom("custom.1");
+        custom.label = "编辑器".into();
+        custom.command = "notepad.exe".into();
+        custom
+    }
 
     fn app_with(items: Vec<RingItem>) -> App {
         let mut config = Config::default();
@@ -3228,141 +2982,13 @@ mod ring_tests {
         App::new(config, theme.clone(), vec![theme], instance)
     }
 
-    fn custom_with_children() -> RingItem {
-        let mut custom = RingItem::custom("custom.1");
-        custom.label = "编辑器".into();
-        custom.command = "notepad.exe".into();
-        custom.children = vec![
-            RingChild {
-                label: "开 IDE".into(),
-                command: "code".into(),
-            },
-            RingChild {
-                // 名字留空 → 牌子上直接用命令，不能显示成空白
-                label: String::new(),
-                command: "wt.exe".into(),
-            },
-        ];
-        custom
-    }
-
-    /// 点开有子项的球 → 激光条几何算出来；关掉就清空。
-    #[test]
-    fn opening_a_bubble_lays_out_its_children_as_beams() {
-        let mut app = app_with(vec![custom_with_children()]);
-        assert!(app.items[0].has_children());
-        assert_eq!(app.items[0].children[1].display_name(), "wt.exe");
-
-        app.set_expanded(true, Instant::now());
-        app.relayout();
-        app.open_children_of(0);
-        assert_eq!(app.open_children, Some(0));
-        assert_eq!(app.beams.len(), 2, "两个子项就该有两块牌子");
-
-        // 没有入场动画：刚摆出来就能点中，也不存在"画到一半点空"
-        let chip = app.beams[0].chip.center();
-        assert_eq!(app.beam_hit(chip), Some(0));
-        assert_eq!(app.beam_hit(Point::new(-50.0, -50.0)), None);
-
-        app.close_children();
-        assert_eq!(app.open_children, None);
-    }
-
-    /// 牌子张开时收起判定范围要放大：手从球心斜着划向牌子，中间那段空隙
-    /// 不能算"离开"（否则手还没到牌子，环先收了）。
-    #[test]
-    fn open_chips_widen_the_collapse_zone() {
-        let mut app = app_with(vec![custom_with_children()]);
-        app.set_expanded(true, Instant::now());
-        app.relayout();
-        let narrow = app.collapse_limit();
-        app.open_children_of(0);
-        let wide = app.collapse_limit();
-        assert!(wide > narrow, "牌子开着时判定半径要大：{wide} vs {narrow}");
-        // 并且真的盖住每块牌子的四角
-        let center = app.center();
-        for beam in &app.beams {
-            let far = Point::new(beam.chip.right(), beam.chip.bottom()).distance(center);
-            assert!(wide + 0.5 >= far, "判定半径 {wide} 没盖住牌子角 {far}");
-        }
-        app.close_children();
-        assert_eq!(app.collapse_limit(), narrow, "牌子收了就恢复原判定");
-    }
-
-    /// 点牌子 → 排队执行那个子项、并且把激光条收掉（片子不该赖在屏幕上）。
-    #[test]
-    fn clicking_a_beam_queues_its_child() {
-        let mut app = app_with(vec![custom_with_children()]);
-        app.set_expanded(true, Instant::now());
-        app.relayout();
-        app.open_children_of(0);
-
-        let chip = app.beams[1].chip.center();
-        app.cursor = Some(chip);
-        app.on_click(MouseButton::Left, Instant::now());
-
-        assert_eq!(app.pending_child, Some((0, 1)), "点第二块牌子要排第二子项");
-        assert_eq!(app.open_children, None, "执行完就没必要继续摆着");
-        assert!(app.beams.is_empty());
-        assert_eq!(app.pending_action, None, "子项不该顺手触发父项命令");
-    }
-
-    /// 再点一下同一颗球是收起；点别的球是换一颗展开。
-    #[test]
-    fn clicking_the_bubble_again_closes_and_another_one_switches() {
-        let mut other = custom_with_children();
-        other.id = "custom.2".into();
-        let mut app = app_with(vec![custom_with_children(), other]);
-        app.set_expanded(true, Instant::now());
-        app.relayout();
-
-        let first = app.bubbles[0].center;
-        app.cursor = Some(first);
-        app.on_click(MouseButton::Left, Instant::now());
-        assert_eq!(app.open_children, Some(0), "第一次点：展开");
-        assert_eq!(app.pending_action, None, "有子项的球不执行自己的命令");
-
-        app.cursor = Some(app.bubbles[0].center);
-        app.on_click(MouseButton::Left, Instant::now());
-        assert_eq!(app.open_children, None, "再点一下：收起");
-
-        app.cursor = Some(app.bubbles[1].center);
-        app.on_click(MouseButton::Left, Instant::now());
-        assert_eq!(app.open_children, Some(1), "点另一颗：换它展开");
-    }
-
-    /// 内置球没有子项：点它不能凭空长出激光条。
-    #[test]
-    fn a_bubble_without_children_has_no_beams() {
-        let mut app = app_with(vec![RingItem::builtin(QRCODE_ID)]);
-        app.set_expanded(true, Instant::now());
-        app.open_children_of(0);
-        assert_eq!(app.open_children, None);
-        assert!(app.beams.is_empty());
-
-        // 下标越界也要安静走掉（热重载删了球、菜单还指着旧下标）
-        app.open_children_of(9);
-        assert_eq!(app.open_children, None);
-    }
-
-    /// 收起环时激光条必须跟着走：它挂在球上，球都没了。
-    #[test]
-    fn collapsing_the_ring_closes_the_beams() {
-        let mut app = app_with(vec![custom_with_children()]);
-        app.set_expanded(true, Instant::now());
-        app.open_children_of(0);
-        assert_eq!(app.open_children, Some(0));
-        app.set_expanded(false, Instant::now());
-        assert_eq!(app.open_children, None);
-    }
-
     /// 呼出即展开：`expand_on_summon` 打开后，呼出就展开并钉住。
     #[test]
     fn summon_unfolds_and_pins_the_ring_when_configured() {
         let mut config = Config::default();
         config.general.show_on_start = false;
         config.interaction.expand_on_summon = true;
-        config.ring.items = vec![custom_with_children()];
+        config.ring.items = vec![custom_one()];
         let mut app = app_from(config);
         let now = Instant::now();
 
@@ -3415,20 +3041,18 @@ mod ring_tests {
 
     /// 躲进托盘时一切归零：下次呼出是干净状态。
     #[test]
-    fn hiding_clears_the_pin_and_the_beams() {
+    fn hiding_clears_the_pin() {
         let mut config = Config::default();
         config.general.show_on_start = false;
         config.interaction.expand_on_summon = true;
-        config.ring.items = vec![custom_with_children()];
+        config.ring.items = vec![custom_one()];
         let mut app = app_from(config);
         let now = Instant::now();
         app.set_visible(true, now);
-        app.open_children_of(0);
-        assert_eq!(app.open_children, Some(0));
+        assert!(app.pinned, "呼出就钉住");
 
         app.set_visible(false, now);
         assert!(!app.visible && !app.expanded && !app.pinned);
-        assert_eq!(app.open_children, None, "隐藏时激光条也要关掉");
     }
 
     #[test]
