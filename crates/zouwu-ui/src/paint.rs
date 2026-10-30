@@ -34,8 +34,6 @@ pub struct BubblePaint<'a> {
 pub struct BeamPaint<'a> {
     /// 起点：父球外沿（牌子从这里滑出去，不画连线）
     pub base: Point,
-    /// 生长进度 0..1（弹簧值，用来做"射出去"的动画）
-    pub progress: f32,
     /// 文字牌（逻辑坐标）
     pub chip: zouwu_core::geom::Rect,
     pub label: &'a str,
@@ -294,22 +292,11 @@ pub fn render(scene: &Scene<'_>, pixmap: &mut Pixmap) {
 /// 光条画三层（外晕 / 中亮 / 芯），一层比一层细、一层比一层亮，看起来才像
 /// "射出去的光"而不是一条直线。文字牌最后画，盖住光条的尾巴。
 fn draw_beams(ctx: &mut Ctx<'_>, scene: &Scene<'_>, theme: &Theme) {
-    if scene.beams.is_empty() {
-        return;
-    }
     let scale = ctx.s;
     for beam in scene.beams {
-        // 只画牌子，不画连线：光条每帧要填三个大三角形，CPU 光栅化很贵，
-        // 而且牌子自己从球心滑出来就够说明"它来自这颗球"（ADR-046）。
-        let p = (beam.progress / 0.5).clamp(0.0, 1.0);
-        if p <= 0.01 {
-            continue;
-        }
-        let fade = p;
-        let t = 1.0 - (1.0 - p) * (1.0 - p);
-        let x = beam.base.x + (beam.chip.x - beam.base.x) * t;
-        let y = beam.base.y + (beam.chip.y - beam.base.y) * t;
-        let chip = crate::widget::Rect::new(x, y, beam.chip.w, beam.chip.h);
+        // 不做入场动画：牌子直接摆在自己的位置上。之前是从球心滑出 + 淡入，
+        // 但"点开就看到全部选项"比"看它长出来"更有用（用户原话：动画去掉）。
+        let chip = crate::widget::Rect::new(beam.chip.x, beam.chip.y, beam.chip.w, beam.chip.h);
         let bg = if beam.hovered {
             theme.bubble_bg_active
         } else {
@@ -321,14 +308,14 @@ fn draw_beams(ctx: &mut Ctx<'_>, scene: &Scene<'_>, theme: &Theme) {
             theme.bubble_edge
         };
         let mut painter = Painter::new(ctx.pixmap, scale);
-        painter.fill(chip, 7.0, bg.with_alpha(0.94 * fade));
-        painter.stroke(chip, 7.0, 1.0, edge.with_alpha(fade));
+        painter.fill(chip, 7.0, bg.with_alpha(0.94));
+        painter.stroke(chip, 7.0, 1.0, edge);
         let text_color = if beam.hovered {
             theme.glyph_active
         } else {
             theme.glyph
         };
-        let textc = text_color.with_alpha(fade);
+        let textc = text_color;
         let label = painter.truncate(beam.label, CHIP_FONT, chip.w - 12.0);
         painter.text_in(
             &label,

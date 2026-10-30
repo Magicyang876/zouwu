@@ -206,7 +206,6 @@ struct App {
     /// 鼠标停在哪条激光条的文字牌上
     hovered_child: Option<usize>,
     /// 激光条的生长弹簧（0 = 收，1 = 完全射出）
-    child_anim: Spring,
     /// 呼出即展开后的"钉住"状态：不因鼠标离远自动收起，点一下本体才收。
     pinned: bool,
 
@@ -421,7 +420,6 @@ impl App {
             open_children: None,
             beams: Vec::new(),
             hovered_child: None,
-            child_anim: Spring::soft(0.0),
             pinned: false,
             blink_start: None,
             next_blink: Instant::now() + Duration::from_millis(2600),
@@ -1558,7 +1556,6 @@ impl App {
             // 为激光条撑大的窗口收回原样。
             self.apply_window_extent(self.config.window.size);
         }
-        self.child_anim.set_target(0.0);
     }
 
     /// 打开某颗球的激光条。
@@ -1572,9 +1569,6 @@ impl App {
         }
         if self.open_children != Some(index) {
             self.open_children = Some(index);
-            // 从头生长：弹簧归零再射出去，否则会从上一颗球的位置滑过来。
-            self.child_anim = Spring::soft(0.0);
-            self.child_anim.set_target(1.0);
             log::debug!("beams opened for {}", self.items[index].id);
             self.dirty = true;
         }
@@ -1669,9 +1663,6 @@ impl App {
 
     /// 光标落在哪条激光条的文字牌上。
     fn beam_hit(&self, p: Point) -> Option<usize> {
-        if self.child_anim.value < 0.5 {
-            return None;
-        }
         beam::hit(&self.beams, p, 2.0)
     }
 
@@ -1706,6 +1697,25 @@ impl App {
             .config
             .interaction
             .collapse_radius(self.ring.radius, self.ring.bubble_radius);
+        // 牌子张开时把判定范围放大到盖住最远那块牌子。手是从球心斜着划向牌子的，
+        // 中间要跨过环与牌子之间的空隙，按气泡环的半径判就等于"手还在半路，环先收了"。
+        let outer = match self.open_children {
+            Some(_) if !self.beams.is_empty() => {
+                let center = self.center();
+                let reach = self.beams.iter().fold(outer, |acc, beam| {
+                    let dx = (beam.chip.x - center.x)
+                        .abs()
+                        .max((beam.chip.right() - center.x).abs());
+                    let dy = (beam.chip.y - center.y)
+                        .abs()
+                        .max((beam.chip.bottom() - center.y).abs());
+                    acc.max((dx * dx + dy * dy).sqrt())
+                });
+                // 再留半块牌子的高：判定线贴着牌子边画还是会"明明在牌子上却算离开"。
+                reach + zouwu_core::beam::CHIP_H * 0.5
+            }
+            _ => outer,
+        };
         // 但窗口本身是有限的：判定半径不该超过窗口对角线的一半太多，
         // 否则光标早已在窗口外，判定却还说"没走"。
         let (w, h) = self.logical_size();
@@ -1752,8 +1762,7 @@ impl App {
             spring.step(dt);
         }
 
-        // 2b) 激光条弹簧与子项悬停
-        self.child_anim.step(dt);
+        // 2b) 牌子悬停（牌子没有入场动画，点开就在位）
         if self.open_children.is_some() {
             let hit = self.cursor.and_then(|p| self.beam_hit(p));
             if hit != self.hovered_child {
@@ -2590,7 +2599,6 @@ impl App {
                         .unwrap_or("");
                     beam_paints.push(BeamPaint {
                         base: beam.base,
-                        progress: self.child_anim.value.max(0.0),
                         chip: beam.chip,
                         label,
                         hovered: self.hovered_child == Some(beam.index),
@@ -3143,19 +3151,36 @@ mod ring_tests {
         app.relayout();
         app.open_children_of(0);
         assert_eq!(app.open_children, Some(0));
-        assert_eq!(app.beams.len(), 2, "两个子项就该有两条激光条");
-        assert_eq!(app.child_anim.target, 1.0);
+        assert_eq!(app.beams.len(), 2, "两个子项就该有两块牌子");
 
-        // 还在长的过程中不该能点中：牌子上半截还是空的
+        // 没有入场动画：刚摆出来就能点中，也不存在"画到一半点空"
         let chip = app.beams[0].chip.center();
-        assert_eq!(app.beam_hit(chip), None);
-        app.child_anim.snap(1.0);
         assert_eq!(app.beam_hit(chip), Some(0));
         assert_eq!(app.beam_hit(Point::new(-50.0, -50.0)), None);
 
         app.close_children();
         assert_eq!(app.open_children, None);
-        assert_eq!(app.child_anim.target, 0.0);
+    }
+
+    /// 牌子张开时收起判定范围要放大：手从球心斜着划向牌子，中间那段空隙
+    /// 不能算"离开"（否则手还没到牌子，环先收了）。
+    #[test]
+    fn open_chips_widen_the_collapse_zone() {
+        let mut app = app_with(vec![custom_with_children()]);
+        app.set_expanded(true, Instant::now());
+        app.relayout();
+        let narrow = app.collapse_limit();
+        app.open_children_of(0);
+        let wide = app.collapse_limit();
+        assert!(wide > narrow, "牌子开着时判定半径要大：{wide} vs {narrow}");
+        // 并且真的盖住每块牌子的四角
+        let center = app.center();
+        for beam in &app.beams {
+            let far = Point::new(beam.chip.right(), beam.chip.bottom()).distance(center);
+            assert!(wide + 0.5 >= far, "判定半径 {wide} 没盖住牌子角 {far}");
+        }
+        app.close_children();
+        assert_eq!(app.collapse_limit(), narrow, "牌子收了就恢复原判定");
     }
 
     /// 点牌子 → 排队执行那个子项、并且把激光条收掉（片子不该赖在屏幕上）。
@@ -3165,7 +3190,6 @@ mod ring_tests {
         app.set_expanded(true, Instant::now());
         app.relayout();
         app.open_children_of(0);
-        app.child_anim.snap(1.0);
 
         let chip = app.beams[1].chip.center();
         app.cursor = Some(chip);
@@ -3224,7 +3248,6 @@ mod ring_tests {
         assert_eq!(app.open_children, Some(0));
         app.set_expanded(false, Instant::now());
         assert_eq!(app.open_children, None);
-        assert_eq!(app.child_anim.target, 0.0);
     }
 
     /// 呼出即展开：`expand_on_summon` 打开后，呼出就展开并钉住。
