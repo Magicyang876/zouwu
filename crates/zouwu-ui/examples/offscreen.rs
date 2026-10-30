@@ -160,7 +160,6 @@ fn shoot_beams(name: &str, logical: f32, scale: f32, hovered: Option<usize>, the
         .iter()
         .map(|b| BeamPaint {
             base: b.base,
-            tip: b.tip,
             progress: 1.0,
             chip: b.chip,
             label: &labels[b.index],

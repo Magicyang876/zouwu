@@ -1632,27 +1632,37 @@ impl App {
             return;
         };
         let want = want.max(self.config.window.size);
-        let (cur, _) = self.logical_size();
+        let scale = window.scale_factor() as f32;
+        // 不变量是"小兽在屏幕上的中心点"。用**真实**窗口矩形来算：我们有时绕过
+        // winit 直接 `SetWindowPos`，winit 的位置缓存会落后一次，按它反推就会把
+        // 小兽在屏幕上挪走（实测收回窗口时偏 120px 级别，一眼就能看出）。
+        let rect = self.hwnd().and_then(zouwu_platform::layer::window_rect);
+        let cur = match rect {
+            Some((_, _, w, _)) => w as f32 / scale,
+            None => self.logical_size().0,
+        };
         if (want - cur).abs() < 2.0 {
             return;
         }
-        let scale = window.scale_factor() as f32;
-        let Ok(before) = window.outer_position() else {
-            return;
+        let phys = (want * scale).round() as i32;
+        let (x, y) = match rect {
+            Some((left, top, w, h)) => (left + w / 2 - phys / 2, top + h / 2 - phys / 2),
+            None => {
+                let before = window.outer_position().unwrap_or_default();
+                let delta = ((want - cur) * scale * 0.5).round() as i32;
+                (before.x - delta, before.y - delta)
+            }
         };
         // 先让 winit 记下新尺寸（它内部有缓存），再用**一次** `SetWindowPos` 把
-        // 位置和尺寸一起落实。分两步做实测会丢位置：尺寸生效了、"往回收半个
-        // 增量"那一步被覆盖，于是撑大窗口时小兽被推走半个增量（60px 级别，肉眼
-        // 一眼就能看出小兽跳了一下）。
+        // 位置和尺寸一起落实：分两步做实测会丢位置。
         let _ = window.request_inner_size(LogicalSize::new(want, want));
-        let delta = ((want - cur) * scale * 0.5).round() as i32;
         if let Some(hwnd) = self.hwnd() {
-            let phys = (want * scale).round() as i32;
-            zouwu_platform::layer::set_bounds(hwnd, before.x - delta, before.y - delta, phys, phys);
-        } else {
-            window.set_outer_position(PhysicalPosition::new(before.x - delta, before.y - delta));
+            zouwu_platform::layer::set_bounds(hwnd, x, y, phys, phys);
         }
-        log::debug!("window extent {cur} -> {want} (buddy stays put)");
+        // 把 winit 的缓存对齐到刚设的位置，否则它下一次自己 `SetWindowPos` 时
+        // 会把窗口拽回旧地方。
+        let _ = window.set_outer_position(PhysicalPosition::new(x, y));
+        log::debug!("window extent {cur} -> {want} at {x},{y} (buddy stays put)");
         self.dirty = true;
     }
 
@@ -2579,7 +2589,6 @@ impl App {
                         .unwrap_or("");
                     beam_paints.push(BeamPaint {
                         base: beam.base,
-                        tip: beam.tip,
                         progress: self.child_anim.value.max(0.0),
                         chip: beam.chip,
                         label,

@@ -38,6 +38,15 @@ struct Point {
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
+struct Rect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
 struct Size {
     cx: i32,
     cy: i32,
@@ -102,6 +111,7 @@ extern "system" {
     fn SetWindowLongPtrW(hwnd: Hwnd, index: i32, value: isize) -> isize;
     fn ShowWindow(hwnd: Hwnd, cmd: i32) -> Bool;
     fn IsWindowVisible(hwnd: Hwnd) -> Bool;
+    fn GetWindowRect(hwnd: Hwnd, rect: *mut Rect) -> Bool;
     fn SetForegroundWindow(hwnd: Hwnd) -> Bool;
     fn SetWindowPos(
         hwnd: Hwnd,
@@ -440,6 +450,25 @@ pub fn set_always_on_top(hwnd: isize, on_top: bool) {
             SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
         );
     }
+}
+
+/// 窗口在屏幕上的真实矩形（物理像素）：`(x, y, width, height)`。
+///
+/// 别用 winit 的 `outer_position()` 算"挪多少才能让小兽不动"：我们有时直接
+/// `SetWindowPos`，winit 的缓存就落后了，它会报出**改动前**的位置，于是收回
+/// 窗口时按旧位置反推，小兽在屏幕上跳一大截（实测偏 120px 级别）。
+pub fn window_rect(hwnd: isize) -> Option<(i32, i32, i32, i32)> {
+    let mut rect = Rect::default();
+    let ok = unsafe { GetWindowRect(hwnd as Hwnd, &mut rect) };
+    if ok == 0 {
+        return None;
+    }
+    Some((
+        rect.left,
+        rect.top,
+        (rect.right - rect.left).max(1),
+        (rect.bottom - rect.top).max(1),
+    ))
 }
 
 /// 一次调用同时改位置与尺寸（物理像素）。

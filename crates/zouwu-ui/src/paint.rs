@@ -32,10 +32,8 @@ pub struct BubblePaint<'a> {
 
 /// 一条子项激光条（`open_children` 展开时才有）。
 pub struct BeamPaint<'a> {
-    /// 起点：父球外沿
+    /// 起点：父球外沿（牌子从这里滑出去，不画连线）
     pub base: Point,
-    /// 终点：文字牌中心
-    pub tip: Point,
     /// 生长进度 0..1（弹簧值，用来做"射出去"的动画）
     pub progress: f32,
     /// 文字牌（逻辑坐标）
@@ -301,68 +299,17 @@ fn draw_beams(ctx: &mut Ctx<'_>, scene: &Scene<'_>, theme: &Theme) {
     }
     let scale = ctx.s;
     for beam in scene.beams {
-        let p = beam.progress.clamp(0.0, 1.2);
+        // 只画牌子，不画连线：光条每帧要填三个大三角形，CPU 光栅化很贵，
+        // 而且牌子自己从球心滑出来就够说明"它来自这颗球"（ADR-046）。
+        let p = (beam.progress / 0.5).clamp(0.0, 1.0);
         if p <= 0.01 {
             continue;
         }
-        // 光条长度跟着进度长出去，略微过冲（弹簧给的值常常 >1）。
-        let tip = Point::new(
-            beam.base.x + (beam.tip.x - beam.base.x) * p,
-            beam.base.y + (beam.tip.y - beam.base.y) * p,
-        );
-        let dx = tip.x - beam.base.x;
-        let dy = tip.y - beam.base.y;
-        let len = (dx * dx + dy * dy).sqrt();
-        if len < 0.5 {
-            continue;
-        }
-        // 垂直方向单位向量：光条是从 `base` 到 `tip` 的锥形四边形。
-        let (nx, ny) = (-dy / len, dx / len);
-        let (w0, w1) = (2.4, 0.9);
-        for (w_mul, alpha, color) in [
-            (3.2, 0.10, theme.glow),
-            (1.7, 0.34, theme.glow),
-            (1.0, 0.92, theme.accent),
-        ] {
-            let (a0, a1) = (w0 * w_mul, w1 * w_mul);
-            let mut pb = PathBuilder::new();
-            pb.move_to(
-                beam.base.x * scale + nx * a0 * scale,
-                beam.base.y * scale + ny * a0 * scale,
-            );
-            pb.line_to(
-                tip.x * scale + nx * a1 * scale,
-                tip.y * scale + ny * a1 * scale,
-            );
-            pb.line_to(
-                tip.x * scale - nx * a1 * scale,
-                tip.y * scale - ny * a1 * scale,
-            );
-            pb.line_to(
-                beam.base.x * scale - nx * a0 * scale,
-                beam.base.y * scale - ny * a0 * scale,
-            );
-            pb.close();
-            if let Some(path) = pb.finish() {
-                let mut paint = Paint::default();
-                paint.set_color(col(color, alpha));
-                paint.anti_alias = true;
-                ctx.pixmap.fill_path(
-                    &path,
-                    &paint,
-                    FillRule::Winding,
-                    Transform::identity(),
-                    None,
-                );
-            }
-        }
-
-        // 牌子在光条长到一半之后淡入：先看到光射出去，再读到字。
-        let fade = ((p - 0.5) / 0.5).clamp(0.0, 1.0);
-        if fade <= 0.01 {
-            continue;
-        }
-        let chip = crate::widget::Rect::new(beam.chip.x, beam.chip.y, beam.chip.w, beam.chip.h);
+        let fade = p;
+        let t = 1.0 - (1.0 - p) * (1.0 - p);
+        let x = beam.base.x + (beam.chip.x - beam.base.x) * t;
+        let y = beam.base.y + (beam.chip.y - beam.base.y) * t;
+        let chip = crate::widget::Rect::new(x, y, beam.chip.w, beam.chip.h);
         let bg = if beam.hovered {
             theme.bubble_bg_active
         } else {
