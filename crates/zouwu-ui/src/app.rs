@@ -1659,6 +1659,26 @@ impl App {
         // winit 自己会把位置缓存更新回来。
         log::debug!("window extent {cur} -> {want} at {x},{y} (buddy stays put)");
         self.dirty = true;
+        // 改完几何**立刻**重画一帧。分层窗口被 `SetWindowPos` 改了尺寸之后，DWM 会把
+        // 上一帧按新尺寸拉伸着合成出来，直到下一次 `RedrawRequested` 才恢复——那一帧
+        // 就是用户看到的“飘一下”（点开/关掉牌子时最明显，窗口一下从 340 到 489）。
+        //
+        // 但 `UpdateLayeredWindow` 会**按像素图尺寸**去改窗口（见 `LayeredTarget::present`），
+        // 所以必须先确认 winit 已经认了新尺寸，否则拿旧尺寸的像素图去画会把窗口又拽
+        // 回旧尺寸（比不画更难看）。认不出就只请求重绘，等 `Resized` 之后再说。
+        let size = window.inner_size();
+        if size.width as i32 == phys && size.height as i32 == phys {
+            if let Err(err) = self.render_frame(Instant::now()) {
+                log::warn!("repaint after extent failed: {err}");
+            }
+        } else {
+            log::debug!(
+                "extent applied, winit still reports {}x{} (repaint on resize)",
+                size.width,
+                size.height
+            );
+            window.request_redraw();
+        }
     }
 
     /// 光标落在哪条激光条的文字牌上。
