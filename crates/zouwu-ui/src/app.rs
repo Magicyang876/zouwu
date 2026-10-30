@@ -237,6 +237,16 @@ struct App {
     state_pos: Option<(i32, i32)>,
     /// 托盘点了「回到主屏」：窗口句柄只有 `about_to_wait` 里拿得到，先记个意愿
     pending_recenter: bool,
+    /// 刚被呼出：要在 `about_to_wait` 里查一次“是不是整只都在屏幕外”。
+    ///
+    /// 原来这件事挂在每 3 秒一次的巡检上（拔屏/换分辨率没有通知，只能轮询），
+    /// 但那支闹钟会在牌子张开/拖动途中把本体重摆——被骂了两次之后改成
+    /// **只在呼出时查一次**（ADR-046 第 8 条）。
+    pending_visibility_check: bool,
+    /// 刚用 `SetWindowPos` 改过几何、而 winit 还没认新尺寸时，这里记下目标边长。
+    /// 有值就让 `logical_size()` / `render_frame` 按它算，不等 `Resized`——
+    /// 否则那一帧会拿旧尺寸的像素图去画，整只小兽会先跳一下再回位。
+    pending_extent: Option<f32>,
     /// 上一次检查显示器的时刻
     last_monitor_check: Instant,
     /// 上一次打「输入诊断」日志的时刻（`ZOUWU_INPUT=1` 才用）。
@@ -435,6 +445,8 @@ impl App {
             drag: None,
             state_pos: None,
             pending_recenter: false,
+            pending_visibility_check: false,
+            pending_extent: None,
             last_monitor_check: Instant::now(),
             last_input_trace: Instant::now(),
             state_pending: false,
@@ -1158,6 +1170,11 @@ impl App {
                     zouwu_platform::layer::bring_to_front(hwnd);
                 }
             }
+            // 弹出来之前先看看还在不在屏幕里：拔掉外接屏、换了分辨率之后，
+            // 小兽可能落在已经不存在的位置上，呼出来就是一只看不见的宠物。
+            // 这件事以前挂在每 3 秒的巡检上，会在牌子张开/拖动途中把本体重摆，
+            // 现在只在呼出这一下查（ADR-046 第 8 条）。
+            self.pending_visibility_check = true;
             // 呼出即展开：钉住（`pinned`）之后自动收起判定不再生效，
             // 要收起来只能点本体 / 右键 / 拖动 / 再按一次热键。
             if self.config.interaction.expand_on_summon && !self.items.is_empty() {
@@ -1445,6 +1462,10 @@ impl App {
     }
 
     fn logical_size(&self) -> (f32, f32) {
+        // 刚改过几何、winit 还没认的时候按目标值算：重画必须和窗口同一步到位。
+        if let Some(e) = self.pending_extent {
+            return (e, e);
+        }
         let Some(win) = &self.window else {
             let s = self.config.window.size;
             return (s, s);
@@ -1459,9 +1480,15 @@ impl App {
         Rect::new(0.0, 0.0, w, h)
     }
 
+    /// 小兽在窗口里的位置（逻辑坐标）。
+    ///
+    /// **不是窗口中心**：窗口为了摆牌子会向右下长大，但左上角绝不动（ADR-046
+    /// 第 9 条）。挪窗口会让"上一帧的旧画面"在屏幕上错位一帧——那正是用户看到的
+    /// “小兽自己快速移动又回来了”。既然几何靠涨右下来腾地方，小兽就只能待在
+    /// 左上方那块“基础尺寸”的中心。
     fn center(&self) -> Point {
-        let (w, h) = self.logical_size();
-        Point::new(w * 0.5, h * 0.5)
+        let s = self.config.window.size;
+        Point::new(s * 0.5, s * 0.5)
     }
 
     /// 重新按配置解出环上的球（数量/顺序/名字/图标）。
@@ -1582,8 +1609,10 @@ impl App {
     /// 反过来的话牌子会先被夹回小窗口、叠成一团，再撑大也回不去了。
     fn grow_for_beams(&mut self) {
         let center = self.center();
-        let view = self.viewport();
-        self.relayout_beams(center, view.inset(-BEAM_SEED));
+        // 先给一个“够大且只在右下方”的虚拟画布：窗口左上角钉死，所以牌子不能
+        // 排到负坐标去（否则下一轮按真实窗口重排时会被夹回左边缘、堆在一起）。
+        let base = self.config.window.size + BEAM_SEED * 2.0;
+        self.relayout_beams(center, Rect::new(0.0, 0.0, base, base));
         self.fit_window_to_beams();
         // 顺序要紧：**先**按新窗口重排（`relayout` 用的是新中心），**再**画那一帧。
         // 反过来的话，同步重画用的是旧窗口中心的气泡坐标，画在撑大的画布上——
@@ -1608,10 +1637,17 @@ impl App {
             return;
         };
         let size = window.inner_size();
-        let settled = match self.hwnd().and_then(zouwu_platform::layer::window_rect) {
-            Some((_, _, w, h)) => w as u32 == size.width.max(1) && h as u32 == size.height.max(1),
-            None => true,
-        };
+        // 刚改过几何时不能等 winit（它要等事件循环跑一轮才更新尺寸），
+        // 直接按 `pending_extent` 画：`render_frame` 会把像素图和呈现层都按
+        // 目标尺寸做好，`UpdateLayeredWindow` 落地之后窗口就是那个尺寸。
+        // 等 winit 的话，这一帧会拿旧尺寸的像素图去画——整只小兽先跳一下再回位。
+        let settled = self.pending_extent.is_some()
+            || match self.hwnd().and_then(zouwu_platform::layer::window_rect) {
+                Some((_, _, w, h)) => {
+                    w as u32 == size.width.max(1) && h as u32 == size.height.max(1)
+                }
+                None => true,
+            };
         if !settled {
             window.request_redraw();
             return;
@@ -1631,24 +1667,14 @@ impl App {
         if self.beams.is_empty() {
             return;
         }
-        // 需要多大由几何自己说：牌子四角离环心最远的那个方向乘以二，再加一点
-        // 静空。写死一个“光束预留空间”会两头不讨好——短子项把窗口撑得很大
-        // （pixmap 白占内存），长子项又不够（牌子被夹回窗口、叠成一团）。
-        let center = self.center();
-        let mut half = 0.0f32;
+        // 需要多大由几何自己说：窗口左上角固定、小兽在“基础尺寸”的中心，所以
+        // 只需保证最靠右下那块牌子还在画布内。写死一个“光束预留空间”会两头不
+        // 讨好——短子项把窗口撑得很大（pixmap 白占内存），长子项又不够。
+        let mut reach = self.config.window.size;
         for beam in &self.beams {
-            half = half.max(
-                (beam.chip.x - center.x)
-                    .abs()
-                    .max((beam.chip.right() - center.x).abs()),
-            );
-            half = half.max(
-                (beam.chip.y - center.y)
-                    .abs()
-                    .max((beam.chip.bottom() - center.y).abs()),
-            );
+            reach = reach.max((beam.chip.right() + BEAM_ROOM).max(beam.chip.bottom() + BEAM_ROOM));
         }
-        let want = ((half + BEAM_ROOM) * 2.0).max(self.config.window.size);
+        let want = reach.max(self.config.window.size);
         self.apply_window_extent(want);
     }
 
@@ -1662,9 +1688,9 @@ impl App {
         };
         let want = want.max(self.config.window.size);
         let scale = window.scale_factor() as f32;
-        // 不变量是"小兽在屏幕上的中心点"。用**真实**窗口矩形来算：我们有时绕过
-        // winit 直接 `SetWindowPos`，winit 的位置缓存会落后一次，按它反推就会把
-        // 小兽在屏幕上挪走（实测收回窗口时偏 120px 级别，一眼就能看出）。
+        // 只改尺寸，**不改位置**：左上角钉死，窗口向右下长大。
+        // 一旦连位置一起改（原来是“以小兽屏幕中心为不变量”对称长大），窗口动的
+        // 那一瞬间（DWM 还拿着上一帧的画面）小兽会在屏幕上错位、下一帧才回位。
         let rect = self.hwnd().and_then(zouwu_platform::layer::window_rect);
         let cur = match rect {
             Some((_, _, w, _)) => w as f32 / scale,
@@ -1674,12 +1700,13 @@ impl App {
             return;
         }
         let phys = (want * scale).round() as i32;
+        // 把目标边长记下来：重画和布局都按它算，不等 winit 的 `Resized`
+        self.pending_extent = Some(want);
         let (x, y) = match rect {
-            Some((left, top, w, h)) => (left + w / 2 - phys / 2, top + h / 2 - phys / 2),
+            Some((left, top, _, _)) => (left, top),
             None => {
                 let before = window.outer_position().unwrap_or_default();
-                let delta = ((want - cur) * scale * 0.5).round() as i32;
-                (before.x - delta, before.y - delta)
+                (before.x, before.y)
             }
         };
         // 先让 winit 记下新尺寸（它内部有缓存），再用**一次** `SetWindowPos` 把
@@ -2592,8 +2619,14 @@ impl App {
             return Ok(());
         };
         let physical = win.inner_size();
-        let (pw, ph) = (physical.width.max(1), physical.height.max(1));
         let scale = win.scale_factor() as f32;
+        let (pw, ph) = match self.pending_extent {
+            Some(e) => {
+                let px = ((e * scale).round() as u32).max(1);
+                (px, px)
+            }
+            None => (physical.width.max(1), physical.height.max(1)),
+        };
         let (width, height) = self.logical_size();
 
         let need_new = match &self.pixmap {
@@ -2601,6 +2634,10 @@ impl App {
             None => true,
         };
         if need_new {
+            // 报给呈现层的尺寸也要跟上：`UpdateLayeredWindow` 是按像素图尺寸改窗口的。
+            if let Some(p) = self.presenter.as_mut() {
+                p.resize(pw, ph);
+            }
             self.pixmap = Pixmap::new(pw, ph);
             if let Some(p) = &mut self.pixmap {
                 p.fill(tiny_skia::Color::TRANSPARENT);
@@ -2897,6 +2934,18 @@ impl ApplicationHandler for App {
                 if let Some(p) = self.presenter.as_mut() {
                     p.resize(new_size.width.max(1), new_size.height.max(1));
                 }
+                // winit 认了新尺寸：不再需要借 `pending_extent` 代它说话。
+                let scale = self
+                    .window
+                    .as_ref()
+                    .map_or(1.0, |w| w.scale_factor() as f32);
+                let logical = new_size.width as f32 / scale;
+                if self
+                    .pending_extent
+                    .is_some_and(|want| (want - logical).abs() < 1.5)
+                {
+                    self.pending_extent = None;
+                }
                 log::debug!(
                     "resized to {}x{}, outer {:?}, rect {:?}",
                     new_size.width,
@@ -2913,6 +2962,10 @@ impl ApplicationHandler for App {
                     pos.y,
                     self.hwnd().and_then(zouwu_platform::layer::window_rect),
                 );
+                if self.config.window.remember_position {
+                    self.state_pos = Some((pos.x, pos.y));
+                    self.state_pending = true;
+                }
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state == ElementState::Pressed {
@@ -2934,12 +2987,6 @@ impl ApplicationHandler for App {
                             self.set_visible(false, now);
                         }
                     }
-                }
-            }
-            WindowEvent::Moved(pos) => {
-                if self.config.window.remember_position {
-                    self.state_pos = Some((pos.x, pos.y));
-                    self.state_pending = true;
                 }
             }
             WindowEvent::CloseRequested => {
@@ -2976,24 +3023,27 @@ impl ApplicationHandler for App {
 
             // 显示器状态搭同一班车：拔屏/改分辨率不会发通知给 winit，
             // 而这条 100ms 的闹钟本来就在跑，搭车的代价是每 3 秒一次枚举。
+            //
+            // 注意：**这里只管护眼遮罩的几何**，不管小兽的位置。以前这里还把
+            // “露出比例不够就重摆”也挂在这一闹钟上，结果牌子张开（窗口天生伸出
+            // 屏幕）、拖动途中都会被它把本体重摆——用户反馈“本体自己快速移动了”。
+            // 位置检查已经改到“呼出时查一次”（ADR-046 第 8 条）。
             if now.duration_since(self.last_monitor_check) >= MONITOR_CHECK {
                 self.last_monitor_check = now;
-                if let Some(window) = self.window_arc() {
-                    // 激光条把窗口撑大了就别查位置：撑大的窗口天生伸出屏幕，
-                    // 按它算"露出多少"会把本体重摆一遍（实测每 3 秒的这只闹钟
-                    // 会在牌子开着时把本体拽走 20~80px，而且看运气——取决于点开
-                    // 牌子离下一次闹钟多近）。
-                    if self.open_children.is_none() {
-                        let had_position = self.state_pos.is_some();
-                        if self.ensure_visible_on(event_loop, &window, had_position) {
-                            self.dirty = true;
-                            window.request_redraw();
-                        }
-                    }
-                }
                 // 遮罩盖的是整个虚拟桌面：换了分辨率/插拔了屏，几何得重贴一次。
                 if self.config.eye_care.enabled {
                     self.apply_eye_care("monitors", false);
+                }
+            }
+        }
+
+        // 刚被呼出：查一次“是不是整只都在屏幕外”，在外面才拽回宠物位。
+        if std::mem::take(&mut self.pending_visibility_check) {
+            if let Some(window) = self.window_arc() {
+                let had_position = self.state_pos.is_some();
+                if self.ensure_visible_on(event_loop, &window, had_position) {
+                    self.dirty = true;
+                    window.request_redraw();
                 }
             }
         }
