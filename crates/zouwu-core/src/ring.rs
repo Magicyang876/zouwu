@@ -1,6 +1,6 @@
 //! 气泡环（Bubble Ring）几何与命中判定。
 //!
-//! 形态决策见 `docs/decisions.md` ADR-003：
+//! 形态决策见 ADR-003：
 //! 每颗气泡是独立圆形，等角环绕小兽；命中用"圆心距离"精确判定。
 
 use crate::geom::{Point, Rect};

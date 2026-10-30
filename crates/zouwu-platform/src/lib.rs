@@ -1,6 +1,6 @@
 //! zouwu-platform —— 平台能力层。
 //!
-//! v1 只实现 Windows（见 `docs/decisions.md` ADR-001），但所有平台相关逻辑
+//! v1 只实现 Windows（见 ADR-001），但所有平台相关逻辑
 //! 都必须待在本 crate 里，UI 与领域层通过这里的函数/ trait 使用。
 
 pub mod assets;

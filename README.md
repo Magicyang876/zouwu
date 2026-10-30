@@ -17,7 +17,7 @@ GPU: just a layered Win32 window painted with a CPU rasterizer.
 </p>
 
 <p align="center">
-  <a href="https://github.com/yourname/zouwu/releases"><img alt="Platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4"></a>
+  <a href="https://github.com/magicyang876/zouwu/releases"><img alt="Platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4"></a>
   <img alt="Rust" src="https://img.shields.io/badge/rust-1.80%2B-dea584">
   <img alt="License" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue">
   <img alt="No webview" src="https://img.shields.io/badge/webview-none-success">
@@ -34,7 +34,7 @@ a hundred times a day.
 ## Features
 
 Everything below is implemented and wired in the current build — no placeholder bubbles
-that only write a log line (that was a deliberate cull, see [ADR-042](docs/decisions.md)).
+that only write a log line, that was a deliberate cull.
 
 **The widget**
 
@@ -43,7 +43,7 @@ that only write a log line (that was a deliberate cull, see [ADR-042](docs/decis
 | Always-on-top layered window | Borderless, transparent, per-pixel alpha, not in the taskbar, click-through outside the beast |
 | Blink & breathe | Idle animation on a deadline scheduler; **no frame is drawn when nothing moves** |
 | Bubble ring | 150 ms hover (or a click) unfolds N bubbles with a spring curve, 24 ms stagger, slow orbital float |
-| Drag & remember | Drag anywhere; position survives restarts; if the screen layout changes and the beast ends up off-screen, it walks back by itself (ADR-026) |
+| Drag & remember | Drag anywhere; position survives restarts; if the screen layout changes and the beast ends up off-screen, it walks back by itself |
 | Tray + hotkey + single instance | `Alt+Space` summons it; closing the window only hides it; a second launch wakes the first one |
 
 **Built-in actions**
@@ -81,7 +81,7 @@ features that actually work.
 
 ## Install
 
-Download `zouwu-<version>-win64.zip` from [Releases](https://github.com/yourname/zouwu/releases)
+Download `zouwu-<version>-win64.zip` from [Releases](https://github.com/magicyang876/zouwu/releases)
 (~1.9 MB) and unzip. Double-click `zouwu.exe` — that's it.
 
 ```powershell
@@ -97,7 +97,7 @@ Download `zouwu-<version>-win64.zip` from [Releases](https://github.com/yourname
 
 There is no MSI, no installer wizard and no admin prompt — the portable zip and the
 `--install` flag cover everything an installer would do, and one less installer is one
-less binary to sign ([ADR-025](docs/decisions.md)).
+less binary to sign.
 
 **Requires** Windows 10/11 x64. There is **no code signature**, so SmartScreen may say
 "unknown publisher" — check the SHA-256 printed next to the release.
@@ -118,11 +118,11 @@ Your data:
 
 The project is pinned to `stable-x86_64-pc-windows-gnu` (see `rust-toolchain.toml`) and
 uses `rust-lld`, so it builds without a Visual Studio installation. MSVC works too — the
-only difference is how the icon resource gets linked ([ADR-050](docs/decisions.md)).
+only difference is how the icon resource gets linked.
 
 ```bash
 cargo run --release -p zouwu-app        # run the widget
-cargo test --workspace                  # 266 unit tests, zero external fixtures
+cargo test --workspace                  # 271 unit tests, zero external fixtures
 cargo fmt --all --check
 ```
 
@@ -135,10 +135,10 @@ cargo run --release -p zouwu-ui --example bench  # per-frame cost model
 ZOUWU_PERF=1 cargo run --release -p zouwu-app    # report actual FPS every 60 frames
 ```
 
-Package a release zip (also prints its SHA-256):
+Ship it as a zip — the exe alone is the whole distribution:
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File packaging/package.ps1
+```bash
+cargo build --release -p zouwu-app        # -> target/release/zouwu.exe
 ```
 
 ---
@@ -146,7 +146,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/package.ps1
 ## Configuration
 
 Everything lives in `%APPDATA%\zouwu\config.toml` and hot-reloads on save — a broken file is
-reported and skipped, never applied ([ADR-012](docs/decisions.md)). Roughly:
+reported and skipped, never applied. Roughly:
 
 ```toml
 schema_version = 9
@@ -219,20 +219,15 @@ Four decisions explain most of the codebase:
 
 1. **No webview, no GPU.** A transparent, click-through, non-activating window with
    per-pixel alpha is exactly what `UpdateLayeredWindow` + a CPU rasterizer does well, and
-   what a webview does badly ([ADR-006](docs/decisions.md)). Release exe: ~7 MB, no runtime
-   to install.
+   what a webview does badly. Release exe: ~7 MB, no runtime to install.
 2. **Event-driven frames.** Rendering is scheduled by deadline with an adaptive frame rate:
-   20 fps when breathing, 60 fps while you interact, **0 frames when idle**
-   ([ADR-008](docs/decisions.md)). Measured idle: 0.31% of one core, 3.4–5 fps,
-   ~17.7 MB RSS — and 0 ms of CPU in the 15 s after hiding to the tray.
+   20 fps when breathing, 60 fps while you interact, **0 frames when idle**.
+   Measured idle: 0.31% of one core, 3.4–5 fps, ~17.7 MB RSS — and 0 ms of CPU in the 15 s
+   after hiding to the tray.
 3. **The system font stack, not a font library.** Parsing CJK fonts in-process cost 879 MB
-   RSS; GDI text brings it to 23 MB ([ADR-016](docs/decisions.md)).
+   RSS; GDI text brings it to 23 MB.
 4. **Poll the cursor instead of trusting hit-testing.** Layered windows do not reliably
-   receive mouse messages, so input is sampled on a 16 ms (inside) / 100 ms (outside) beat
-   ([ADR-009](docs/decisions.md)).
-
-More in [`docs/`](docs): [decisions](docs/decisions.md) (59 ADRs, each with the cost it
-accepted), [architecture](docs/architecture.md), [roadmap](docs/roadmap.md).
+   receive mouse messages, so input is sampled on a 16 ms (inside) / 100 ms (outside) beat.
 
 ---
 
@@ -244,10 +239,10 @@ Issues and PRs are welcome. Before sending a patch:
 cargo test --workspace && cargo fmt --all --check
 ```
 
-If the change alters behavior, add an ADR entry to `docs/decisions.md` — the file is the
-project's memory, and "why" ages better than "what". Windows-only code belongs in
-`zouwu-platform` behind a trait; `zouwu-core` and `zouwu-ui` must stay platform-neutral so a
-macOS/Linux port stays possible.
+If the change alters behavior, explain the *why* in the commit message or PR description —
+the reasoning is what future readers need, and "why" ages better than "what". Windows-only
+code belongs in `zouwu-platform` behind a trait; `zouwu-core` and `zouwu-ui` must stay
+platform-neutral so a macOS/Linux port stays possible.
 
 ## License
 

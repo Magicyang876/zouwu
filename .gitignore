@@ -8,4 +8,7 @@
 AGENTS.md
 README-dev.md
 config.toml.testbak
+
+# 本地设计笔记 / 打包脚本，不进公开仓库
+docs/
 packaging/

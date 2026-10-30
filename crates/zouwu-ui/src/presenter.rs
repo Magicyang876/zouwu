@@ -102,7 +102,7 @@ pub fn create(
     #[cfg(not(target_os = "windows"))]
     {
         let _ = (window, width, height);
-        Err("M0 只实现了 Windows 呈现后端（见 docs/decisions.md ADR-001）".to_string())
+        Err("M0 只实现了 Windows 呈现后端".to_string())
     }
 }
 

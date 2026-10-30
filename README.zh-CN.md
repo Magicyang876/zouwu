@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/yourname/zouwu/releases"><img alt="Platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4"></a>
+  <a href="https://github.com/magicyang876/zouwu/releases"><img alt="Platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4"></a>
   <img alt="Rust" src="https://img.shields.io/badge/rust-1.80%2B-dea584">
   <img alt="License" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue">
   <img alt="No webview" src="https://img.shields.io/badge/webview-none-success">
@@ -31,7 +31,7 @@
 ## 功能
 
 下面这些都已经接上线、现在就能用。环上不会出现「点了只写一行日志」的装饰性气泡
-（这是刻意的清理，见 [ADR-042](docs/decisions.md)）。
+——这是刻意的清理。
 
 **本体**
 
@@ -40,7 +40,7 @@
 | 置顶分层窗口 | 无边框、透明、逐像素 alpha、不进任务栏；小兽之外的地方点击穿透 |
 | 眨眼与呼吸 | deadline 调度的空闲动画；**没有变化时一帧都不画** |
 | 气泡环 | 悬停 150 ms（或点一下）弹出 N 颗气泡：弹簧曲线、24 ms 错峰、缓慢轨道浮动 |
-| 拖动与记忆 | 拖着走；位置跨重启保留；显示器变化导致它落在屏幕外时，会自己走回来（ADR-026） |
+| 拖动与记忆 | 拖着走；位置跨重启保留；显示器变化导致它落在屏幕外时，会自己走回来 |
 | 托盘 / 热键 / 单实例 | `Alt+Space` 呼出；关窗只是隐藏；再启动一次会把已有实例叫出来 |
 
 **内置功能**
@@ -75,7 +75,7 @@
 
 ## 安装
 
-从 [Releases](https://github.com/yourname/zouwu/releases) 下载
+从 [Releases](https://github.com/magicyang876/zouwu/releases) 下载
 `zouwu-<version>-win64.zip`（约 1.9 MB），解压，双击 `zouwu.exe`——就这样。
 
 ```powershell
@@ -90,7 +90,7 @@
 ```
 
 没有 MSI、没有安装向导、不需要管理员权限：便携 zip 加上 `--install` 已经覆盖了安装器
-能做的三件事，而少一个安装器就少一份要签名的东西（[ADR-025](docs/decisions.md)）。
+能做的三件事，而少一个安装器就少一份要签名的东西。
 
 **需要** Windows 10/11 x64。发布包**没有代码签名**，SmartScreen 可能提示「未知发布者」——
 请对照发布页上的 SHA-256。
@@ -110,12 +110,11 @@
 ## 从源码构建
 
 工具链固定在 `stable-x86_64-pc-windows-gnu`（见 `rust-toolchain.toml`），链接器用
-`rust-lld`，因此**不需要装 Visual Studio**。MSVC 也能编，区别只在图标资源怎么进 exe
-（[ADR-050](docs/decisions.md)）。
+`rust-lld`，因此**不需要装 Visual Studio**。MSVC 也能编，区别只在图标资源怎么进 exe。
 
 ```bash
 cargo run --release -p zouwu-app        # 跑起来
-cargo test --workspace                  # 266 个单测，不依赖任何外部夹具
+cargo test --workspace                  # 271 个单测，不依赖任何外部夹具
 cargo fmt --all --check
 ```
 
@@ -128,10 +127,10 @@ cargo run --release -p zouwu-ui --example bench  # 单帧成本模型
 ZOUWU_PERF=1 cargo run --release -p zouwu-app    # 每 60 帧报一次实际帧率
 ```
 
-出发布包（同时打印 SHA-256）：
+打包发布就一个 zip——一个 exe 就是全部：
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File packaging/package.ps1
+```bash
+cargo build --release -p zouwu-app        # -> target/release/zouwu.exe
 ```
 
 ---
@@ -139,7 +138,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/package.ps1
 ## 配置
 
 全部在 `%APPDATA%\zouwu\config.toml`，保存即热重载；配置文件坏了只会跳过并保留现状，
-不会把当前状态搞乱（[ADR-012](docs/decisions.md)）。大致长这样：
+不会把当前状态搞乱。大致长这样：
 
 ```toml
 schema_version = 9
@@ -210,18 +209,15 @@ crates/iconres         构建期生成 COFF 资源对象，让 exe 自己带图�
 四条决策解释了大部分代码长什么样：
 
 1. **不要 webview，也不要 GPU。** 透明、点击穿透、不抢焦点、逐像素 alpha 的窗口，
-   正好是 `UpdateLayeredWindow` + CPU 光栅最擅长、而 webview 最吃亏的地方
-   （[ADR-006](docs/decisions.md)）。release exe 约 7 MB，用户不用装任何运行时。
+   正好是 `UpdateLayeredWindow` + CPU 光栅最擅长、而 webview 最吃亏的地方。
+   release exe 约 7 MB，用户不用装任何运行时。
 2. **事件驱动的帧。** 按 deadline 调度并自适应帧率：呼吸时 20 fps，交互时 60 fps，
-   **空闲时 0 帧**（[ADR-008](docs/decisions.md)）。实测空闲占单核 0.31%、
-   3.4~5 fps、RSS 约 17.7 MB；隐藏到托盘后的 15 秒内 CPU 为 0 ms。
+   **空闲时 0 帧**。实测空闲占单核 0.31%、3.4~5 fps、RSS 约 17.7 MB；隐藏到托盘后
+   的 15 秒内 CPU 为 0 ms。
 3. **用系统字体栈，不引字体库。** 进程内解析 CJK 字体让面板 RSS 冲到 879 MB，
-   改用 GDI 栅格化后是 23 MB（[ADR-016](docs/decisions.md)）。
+   改用 GDI 栅格化后是 23 MB。
 4. **轮询光标，不信命中测试。** 分层窗口收不到可靠的鼠标消息，所以按 16 ms（窗口内）/
-   100 ms（窗口外）的节拍主动采样（[ADR-009](docs/decisions.md)）。
-
-更多写在 [`docs/`](docs)：[决策记录](docs/decisions.md)（55 条 ADR，每条都写清了它接受的
-代价）、[架构](docs/architecture.md)、[路线图](docs/roadmap.md)。
+   100 ms（窗口外）的节拍主动采样。
 
 ---
 
@@ -233,7 +229,7 @@ crates/iconres         构建期生成 COFF 资源对象，让 exe 自己带图�
 cargo test --workspace && cargo fmt --all --check
 ```
 
-如果改动影响了行为，请往 `docs/decisions.md` 加一条 ADR——那个文件是这个项目的记忆，
+如果改动影响了行为，请在提交信息或 PR 描述里写清「为什么」——那个理由才是以后要看的，
 「为什么」比「是什么」更耐放。平台相关的代码一律放在 `zouwu-platform` 的 trait 后面，
 `zouwu-core` 与 `zouwu-ui` 必须保持平台无关，这样将来移植 macOS / Linux 才有路。
 
