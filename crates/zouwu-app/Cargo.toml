@@ -9,6 +9,10 @@ license.workspace = true
 name = "zouwu"
 path = "src/main.rs"
 
+[build-dependencies]
+# 自造 COFF 资源对象（gnu 目标没有 windres，见 ADR-050）
+iconres = { path = "../iconres" }
+
 [dependencies]
 zouwu-core = { workspace = true }
 zouwu-platform = { workspace = true }

@@ -5,6 +5,7 @@ members = [
     "crates/zouwu-core",
     "crates/zouwu-platform",
     "crates/zouwu-ui",
+    "crates/iconres",
 ]
 
 [workspace.package]

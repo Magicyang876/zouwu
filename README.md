@@ -185,7 +185,8 @@
 | ADR-043 | **自绘输入框的选区模型**：`Editing` 加 `anchor`（`cursor != anchor` 即有选区）；光标由真实文字度量反算、严格走字符边界；`text_inner()` 让布局/命中/绘制共用一份几何；按下记锚点、移动改光标实现拖选（移出框也继续）；点同一个框只挪光标、点另一个框一次点击完成「提交上一个 + 接续编辑」；Shift/Home/End/Ctrl+A 与「选中即替换」齐全；长行左移保证光标可见；每次按下重置 `drag_text` |
 | ADR-044 | **输入框补齐系统常识**：剪贴板 `copy_selection`/`cut_selection`/`paste`（无选区复制整段、无选区剪切不碰剪贴板、单行清洗：回车丢/换行与制表符换空格）；双击按路径词法选词、三击全选、连击 400ms+4px 计数且上限 3；`Editing.offset` 驱动水平滚动条（宽度与 DPI 由窗口层 `sync_edit_viewport` 喂入，未量视口退化成 no-op），拖 thumb 不动光标、滚轮在溢出框上横滚，滚动条画在框内下沿 5px/命中 9px |
 | ADR-046 | **牌子不画连线、窗口几何以「小兽屏幕中心」为不变量**：去掉每帧填三块大三角形的光条（只留文字牌，牌子从球心滑出自己的位置）；撑大/收回窗口改用 `GetWindowRect` 读真实矩形再 `SetWindowPos`（不再二次 `set_outer_position`），牌子开着时整段跳过 3 秒一次的显示器巡检 —— 修掉"点完子项小兽在屏幕上跳一下"  · **已移除，见 ADR-047** |
-| ADR-049 | **默认应用图标：暖色方底 + 兽首**：`examples/make_icon.rs` 里重画——圆角方底（留 5% 边，16px 不会被切成方角）+ 深色兽首（耳朵先画、头圆盖上去糊住接缝；眼睛半径有 0.9px 下限；鼻子比眼睛小一号）+ 奶油色五官；仍是自写 ICO 容器（≤128 DIB / 256 PNG），一眼能在浅色与深色任务栏上认出来 |
+| ADR-050 | **gnu 目标的 exe 也带上图标：自己造 COFF 资源对象**：`crates/iconres` 把 `.ico` 解析成 `IMAGE_RESOURCE_DIRECTORY` 树（只用数字 ID：`NumberOfNamedEntries=0`）、再包成单段 COFF（每个数据项的 RVA 字段配一条 `ADDR32NB` 重定位，字段里写段内偏移），`build.rs` 只负责落盘 + `link-arg`；msvc 仍走 `llvm-rc`（还带版本信息），gnu 路径放弃版本信息——手写的 `VS_VERSIONINFO` 结构对但 Explorer 不显示，正文记了为什么不再试 |
+| ADR-049 | **默认应用图标：暖色方底 + 兽首（gnu 目标如何嵌进 exe 见 ADR-050）**：`examples/make_icon.rs` 里重画——圆角方底（留 5% 边，16px 不会被切成方角）+ 深色兽首（耳朵先画、头圆盖上去糊住接缝；眼睛半径有 0.9px 下限；鼻子比眼睛小一号）+ 奶油色五官；仍是自写 ICO 容器（≤128 DIB / 256 PNG），一眼能在浅色与深色任务栏上认出来 |
 | ADR-048 | **环的几何参数全部进面板**：`[ring]` 里的 `radius` / `orbit_start_deg` / `bubble_radius` / `max_per_ring` / `ring_gap` 都有步进控件（角度 `±180°/15°`、一圈 `3~16` 颗、外圈间距 `0~200px`），中文把 `radius` 改叫「气泡环离主体的距离」；新增 `Unit::Deg`（直接显示 `°`）与 `Unit::Bubbles`（显示「8 颗」，不借用剪贴板的「条」） |
 | ADR-047 | **砍掉子项（激光条）**：功能整个删除——`beam` 模块、`RingChild`/`children`、`Scene.beams`/`BeamPaint`、`App` 的 `open_children`/`beams`/`hovered_child`/`pending_child`/`relayout_beams`/`close_children`/`beam_hit`、设置页的指路行全部移除，点球恢复「直接执行」；`schema_version` 仍是 9（老配置里的 `[[ring.items.children]]` 被 serde 忽略）；保留 `expand_on_summon`/`pinned` 与「窗口只向右下长大」「呼出时才查位置」这些修好的窗口几何不变量 |
 | ADR-045 | **子项展开成激光条**：点一下球向外射光、光的尽头挂横排文字牌（子项名字按真字宽排版，张角 45°/条上限 135°，撞车先径向外推、再顺切线摊开、最后错行保底）；窗口按需长大且先排理想大窗口再撑、小兽位置不动；`interaction.expand_on_summon` 呼出即展开并钉住气泡环  · **已移除，见 ADR-047** |
@@ -262,7 +263,7 @@
 | 多语言 | ✔ Fluent 中/英，托盘内即时切换，`language = "auto"` 跟随系统 |
 | 配置热重载 | ✔ 改 `config.toml` 保存即生效（语言/主题/热键/自启/环/尺寸/置顶/日志），坏配置跳过并保留现状（ADR-012） |
 | 安装 / 卸载 | ✔ 便携 zip + `zouwu --install`（复制到 `%LOCALAPPDATA%\Programs\zouwu`、开始菜单快捷方式、设置→应用里的卸载项、`--uninstall --purge` 清用户数据）；不做安装器框架（ADR-025） |
-| exe 图标 | ◐ 默认图标 = 暖色圆角方底 + 深色兽首（两只尖耳、两眼、小鼻子），`examples/make_icon.rs` 用 tiny-skia 画完自己拼 ICO（16/20/24/32/48/64/128/256，≤128 用 DIB、256 用 PNG）；gnu 工具链下 exe 不嵌资源，安装时把 `zouwu.ico` 落到安装目录供快捷方式引用（ADR-025 / ADR-049） |
+| exe 图标 | ◐ 默认图标 = 暖色圆角方底 + 深色兽首（两只尖耳、两眼、小鼻子），`examples/make_icon.rs` 用 tiny-skia 画完自己拼 ICO（16/20/24/32/48/64/128/256，≤128 用 DIB、256 用 PNG）；gnu 工具链没有 `windres`，由 `crates/iconres` 现场把资源树拼成 COFF 对象再交给链接器，所以 **exe 自己也带图标**；安装时另把 `zouwu.ico` 落到安装目录供快捷方式引用（ADR-025 / ADR-049 / ADR-050） |
 | 矢量图标字体 | ✖ 8 个 glyph 先程序化绘制，M2 换图标字体 |
 
 **可复现的验收方式**：

@@ -1,11 +1,12 @@
-//! 把图标与版本信息编译进 exe（只对 Windows 目标生效）。
+//! 把图标编译进 exe（只对 Windows 目标生效）。
 //!
-//! 这一步为什么不用 `embed-resource` 之类的 crate：它们最终都要找一个
-//! **资源编译器**（`rc.exe` / `windres` / `llvm-rc`）来干活。本机没有 Windows SDK，
-//! 但有 LLVM 自带的 `llvm-rc`——那就直接调它，少一层依赖，也少一层"它在找什么"的猜谜。
+//! 两条路：
+//! * **msvc**：调 LLVM 自带的 `llvm-rc` 编 `.res`，再交给链接器（`.res` 里带图标 + 版本信息）。
+//! * **gnu**：`rust-lld -flavor gnu` 不认 `.res`，而 `windres` 在 Windows 上默认不存在。
+//!   所以自己拼一个 **COFF 资源对象**（`crates/iconres`，带单元测试），再 `-C link-arg` 交给
+//!   链接器。这条路只有图标——版本信息那一段没成（ADR-050 记了原因）。
 //!
-//! 找不到 `llvm-rc` 时**只警告、不失败**：图标是锦上添花，不该让
-//! 一个只想 `cargo test` 的人卡在构建脚本上。
+//! 任何一步失败都**只警告、不失败**：图标是锦上添花，不该让一个只想 `cargo test` 的人卡住。
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -18,30 +19,6 @@ fn main() {
         return;
     }
 
-    // 只有 MSVC 目标能可靠地把 `.res` 链进 exe。
-    //
-    // gnu 目标下 rustc 用 `rust-lld -flavor gnu`，它把 `.res` 当成“不认识的文件格式”
-    // （实测：`zouwu.res: file format not recognized`）。要在 gnu 下嵌资源得先用
-    // `windres` 转成 COFF 对象，而本机没有 windres——那就不假装能行：
-    // 直接跳过并说明白，同时靠“安装时把 ico 拷到 exe 旁边、快捷方式指向它”
-    // 把图标这件事办成（见 `install.rs`）。
-    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
-        println!(
-            "cargo:warning=skipping exe icon: only the msvc target embeds .res here \
-             (gnu needs windres). The installed shortcut still gets the icon from zouwu.ico."
-        );
-        return;
-    }
-
-    let Some(rc_tool) = find_rc() else {
-        println!(
-            "cargo:warning=no resource compiler (llvm-rc) found; \
-             the exe will have no icon/version info. \
-             Set LLVM_RC=/path/to/llvm-rc.exe to fix."
-        );
-        return;
-    };
-
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
     let ico = manifest_dir.join("../../assets/zouwu.ico");
     if !ico.is_file() {
@@ -52,11 +29,62 @@ fn main() {
         return;
     }
 
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        embed_with_rc(&ico);
+    } else {
+        embed_with_coff(&ico);
+    }
+}
+
+/// gnu：自己生成 COFF 资源对象。
+fn embed_with_coff(ico: &Path) {
+    // 我们只会为 x86-64 生成重定位；别的架构先在包里换 `coff_object` 的 Machine / 重定位类型。
+    if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() != Ok("x86_64") {
+        println!(
+            "cargo:warning=skipping exe icon: no COFF resource object for this arch \
+             (only x86_64 gnu is implemented)"
+        );
+        return;
+    }
+    let bytes = match std::fs::read(ico) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            println!("cargo:warning=cannot read {}: {err}", ico.display());
+            return;
+        }
+    };
+    let object = match iconres::resource_object(&bytes) {
+        Ok(object) => object,
+        Err(err) => {
+            println!("cargo:warning=cannot build a resource object from .ico: {err}");
+            return;
+        }
+    };
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("out dir"));
+    let obj = out_dir.join("zouwu-rsrc.obj");
+    if let Err(err) = std::fs::write(&obj, &object) {
+        println!("cargo:warning=cannot write {}: {err}", obj.display());
+        return;
+    }
+    println!("cargo:rustc-link-arg={}", obj.display());
+}
+
+/// msvc：`llvm-rc` 编 `.res`（图标 + 版本信息）。
+fn embed_with_rc(ico: &Path) {
+    let Some(rc_tool) = find_rc() else {
+        println!(
+            "cargo:warning=no resource compiler (llvm-rc) found; \
+             the exe will have no icon/version info. \
+             Set LLVM_RC=/path/to/llvm-rc.exe to fix."
+        );
+        return;
+    };
+
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("out dir"));
     let rc_path = out_dir.join("zouwu.rc");
     let res_path = out_dir.join("zouwu.res");
 
-    std::fs::write(&rc_path, resource_script(&ico)).expect("write rc");
+    std::fs::write(&rc_path, resource_script(ico)).expect("write rc");
 
     // llvm-rc 不做 C 预处理（`#define`/`#include` 都不认），所以 `.rc` 里的
     // 每个数字都由这里直接算好写死。

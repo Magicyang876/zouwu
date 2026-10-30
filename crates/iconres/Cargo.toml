@@ -1,0 +1,10 @@
+[package]
+name = "iconres"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Turn a .ico file into a COFF resource object, so gnu-target Windows exes can carry an icon without a resource compiler"
+
+[dependencies]
