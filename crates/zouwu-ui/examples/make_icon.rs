@@ -76,16 +76,23 @@ fn draw(size: u32) -> Pixmap {
         pm.fill_path(&path, &paint, FillRule::Winding, Default::default(), None);
     }
 
-    let (cx, cy) = (s * 0.5, s * 0.52);
-    let r = s * 0.30;
+    // 小尺寸（≤ 32）单独调：耳朵和眼睛按大图比例缩下去就只剩几颗像素，
+    // 所以把耳朵做大、眼睛加粗、鼻子干脆不画——16px 里鼻子和眼瞪会撞成一团。
+    let small = (size as f32) <= 32.0;
+
+    let (cx, cy) = (s * 0.5, if small { s * 0.53 } else { s * 0.52 });
+    let r = s * if small { 0.32 } else { 0.30 };
 
     // 耳朵：耳根压在头顶两侧，头圆盖上去正好把接缝糊住；耳尖向外上方挑。
     paint.set_color(ink);
     for side in [-1.0f32, 1.0] {
+        let (bx0, by0) = if small { (0.26, -0.74) } else { (0.30, -0.78) };
+        let (ox, oy) = if small { (1.00, -0.52) } else { (0.88, -0.60) };
+        let (tx, ty) = if small { (0.70, -1.20) } else { (0.66, -1.12) };
         let mut pb = PathBuilder::new();
-        pb.move_to(cx + side * r * 0.30, cy - r * 0.78);
-        pb.line_to(cx + side * r * 0.88, cy - r * 0.60);
-        pb.line_to(cx + side * r * 0.66, cy - r * 1.12);
+        pb.move_to(cx + side * r * bx0, cy + r * by0);
+        pb.line_to(cx + side * r * ox, cy + r * oy);
+        pb.line_to(cx + side * r * tx, cy + r * ty);
         pb.close();
         if let Some(path) = pb.finish() {
             pm.fill_path(&path, &paint, FillRule::Winding, Default::default(), None);
@@ -109,13 +116,21 @@ fn draw(size: u32) -> Pixmap {
         pm.fill_path(&path, &paint, FillRule::Winding, Default::default(), None);
     }
 
-    // 眼睛：16px 时半径只剩 0.9px，给下限保证"有瞳孔"。
+    // 眼睛：16px 时半径只剩 1px 以内，给下限保证"有瞳孔"。
     paint.set_color(cream);
-    let eye_r = (r * 0.15).max(0.9);
+    let eye_r = if small {
+        (r * 0.20).max(1.2)
+    } else {
+        (r * 0.15).max(0.9)
+    };
     for side in [-1.0f32, 1.0] {
         if let Some(path) = PathBuilder::from_circle(cx + side * r * 0.38, cy - r * 0.07, eye_r) {
             pm.fill_path(&path, &paint, FillRule::Winding, Default::default(), None);
         }
+    }
+
+    if small {
+        return pm;
     }
 
     // 鼻子：比眼睛小一号，16px 下基本糊掉，但不影响识别。
