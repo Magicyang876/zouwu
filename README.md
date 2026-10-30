@@ -8,6 +8,10 @@ Idle cost is **0.3% of one core and ~17 MB RSS**, because there is no webview an
 GPU: just a layered Win32 window painted with a CPU rasterizer.
 
 <p align="center">
+  <img src="assets/screenshots/preview.gif" width="340" alt="Hovering the beast unfolds its bubble ring">
+</p>
+
+<p align="center">
   <img src="assets/screenshots/ring-light.png" width="300" alt="Zouwu with its bubble ring open (light theme)">
   <img src="assets/screenshots/ring-dark.png" width="300" alt="Zouwu with its bubble ring open (dark theme)">
 </p>
