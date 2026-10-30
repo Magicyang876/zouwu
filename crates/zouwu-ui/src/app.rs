@@ -1553,8 +1553,10 @@ impl App {
             // 窗口要立刻缩回原尺寸，几何留着会被裁掉一半、也不该继续接点击。
             self.beams.clear();
             self.dirty = true;
-            // 为激光条撑大的窗口收回原样。
+            // 为激光条撑大的窗口收回原样（重画放在 relayout 之后，见 `repaint_now`）。
             self.apply_window_extent(self.config.window.size);
+            self.relayout();
+            self.repaint_now();
         }
     }
 
@@ -1583,7 +1585,40 @@ impl App {
         let view = self.viewport();
         self.relayout_beams(center, view.inset(-BEAM_SEED));
         self.fit_window_to_beams();
+        // 顺序要紧：**先**按新窗口重排（`relayout` 用的是新中心），**再**画那一帧。
+        // 反过来的话，同步重画用的是旧窗口中心的气泡坐标，画在撑大的画布上——
+        // 整个环（连同牌子）会先跳一下、下一帧才回位，就是用户说的"飘一下"。
         self.relayout();
+        self.repaint_now();
+    }
+
+    /// 几何刚变过：立刻重画一帧，别让 DWM 把上一帧拉伸着合成出来。
+    ///
+    /// 调用时机必须是“布局已经按新窗口算完”之后（见 `grow_for_beams`）。
+    ///
+    /// 还有个坑：`UpdateLayeredWindow` 会**按像素图尺寸**去改窗口，所以如果 winit 还没
+    /// 认出新尺寸（`request_inner_size` 是异步的），拿旧尺寸的像素图去画会把窗口又
+    /// 拽回旧尺寸——比不画更难看。认不出就只请求重绘，等 `Resized` 之后再说。
+    fn repaint_now(&mut self) {
+        if !self.visible {
+            return;
+        }
+        self.dirty = true;
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        let size = window.inner_size();
+        let settled = match self.hwnd().and_then(zouwu_platform::layer::window_rect) {
+            Some((_, _, w, h)) => w as u32 == size.width.max(1) && h as u32 == size.height.max(1),
+            None => true,
+        };
+        if !settled {
+            window.request_redraw();
+            return;
+        }
+        if let Err(err) = self.render_frame(Instant::now()) {
+            log::warn!("repaint after geometry change failed: {err}");
+        }
     }
 
     /// 激光条要的地方比窗口大时，把窗口临时长大（小兽在屏幕上的位置不动）。
@@ -1657,28 +1692,14 @@ impl App {
         // 那次谁后落地不确定，实测偶尔把窗口按 winit 的旧位置挪回去（就是"点完子项
         // 本体现在屏幕上跳一下"）。直接把几何改到位的 `SetWindowPos` 发 WM_MOVE 事件，
         // winit 自己会把位置缓存更新回来。
-        log::debug!("window extent {cur} -> {want} at {x},{y} (buddy stays put)");
+        log::debug!(
+            "window extent {cur} -> {want} at {x},{y} rect {rect:?}, hwnd {:?} (buddy stays put)",
+            self.hwnd()
+        );
         self.dirty = true;
-        // 改完几何**立刻**重画一帧。分层窗口被 `SetWindowPos` 改了尺寸之后，DWM 会把
-        // 上一帧按新尺寸拉伸着合成出来，直到下一次 `RedrawRequested` 才恢复——那一帧
-        // 就是用户看到的“飘一下”（点开/关掉牌子时最明显，窗口一下从 340 到 489）。
-        //
-        // 但 `UpdateLayeredWindow` 会**按像素图尺寸**去改窗口（见 `LayeredTarget::present`），
-        // 所以必须先确认 winit 已经认了新尺寸，否则拿旧尺寸的像素图去画会把窗口又拽
-        // 回旧尺寸（比不画更难看）。认不出就只请求重绘，等 `Resized` 之后再说。
-        let size = window.inner_size();
-        if size.width as i32 == phys && size.height as i32 == phys {
-            if let Err(err) = self.render_frame(Instant::now()) {
-                log::warn!("repaint after extent failed: {err}");
-            }
-        } else {
-            log::debug!(
-                "extent applied, winit still reports {}x{} (repaint on resize)",
-                size.width,
-                size.height
-            );
-            window.request_redraw();
-        }
+        // 这里**不**顺手重画：`relayout()` 还没按新窗口算完，此刻画出来的是“新画布 +
+        // 旧中心”的气泡，整圈（含牌子）会先跳一下再回位。重画由调用方在 `relayout()`
+        // 之后統一调 `repaint_now()`（见 `grow_for_beams` / `close_children`）。
     }
 
     /// 光标落在哪条激光条的文字牌上。
@@ -2876,7 +2897,22 @@ impl ApplicationHandler for App {
                 if let Some(p) = self.presenter.as_mut() {
                     p.resize(new_size.width.max(1), new_size.height.max(1));
                 }
+                log::debug!(
+                    "resized to {}x{}, outer {:?}, rect {:?}",
+                    new_size.width,
+                    new_size.height,
+                    self.window.as_ref().and_then(|w| w.outer_position().ok()),
+                    self.hwnd().and_then(zouwu_platform::layer::window_rect),
+                );
                 self.dirty = true;
+            }
+            WindowEvent::Moved(pos) => {
+                log::debug!(
+                    "moved to {},{}, rect {:?}",
+                    pos.x,
+                    pos.y,
+                    self.hwnd().and_then(zouwu_platform::layer::window_rect),
+                );
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state == ElementState::Pressed {
