@@ -19,6 +19,7 @@ use zouwu_core::hotkey::{Hotkey, HotkeyError};
 use zouwu_core::i18n::{I18n, AUTO, LANGUAGES};
 use zouwu_core::theme::{Rgba, Theme};
 
+use crate::linefield::{self, clamp_boundary};
 use crate::skin::Skin;
 use crate::thumb::{self, Thumb};
 use crate::widget::{Painter, Rect, Weight};
@@ -619,6 +620,48 @@ pub struct Editing {
     pub width: f32,
     /// 量文字用的 DPI 缩放（`width` 与它在同一次调用里设）。
     pub scale: f32,
+}
+
+impl linefield::LineField for Editing {
+    fn text(&self) -> &str {
+        &self.buffer
+    }
+    fn text_mut(&mut self) -> &mut String {
+        &mut self.buffer
+    }
+    fn caret(&self) -> usize {
+        self.cursor
+    }
+    fn set_caret(&mut self, index: usize) {
+        self.cursor = index;
+    }
+    fn anchor(&self) -> usize {
+        self.anchor
+    }
+    fn set_anchor(&mut self, index: usize) {
+        self.anchor = index;
+    }
+    fn offset(&self) -> usize {
+        self.offset
+    }
+    fn set_offset(&mut self, index: usize) {
+        self.offset = index;
+    }
+    fn width(&self) -> f32 {
+        self.width
+    }
+    fn set_width(&mut self, width: f32) {
+        self.width = width;
+    }
+    fn scale(&self) -> f32 {
+        self.scale
+    }
+    fn set_scale(&mut self, scale: f32) {
+        self.scale = scale;
+    }
+    fn font_px(&self) -> f32 {
+        TEXT_PX
+    }
 }
 
 /// 编辑框能识别的按键（winit 类型留在窗口层，这一层只认这个枚举）。
@@ -2361,12 +2404,9 @@ pub fn text_inner(rect: Rect) -> Rect {
 }
 
 /// 量一个字符串的宽度（逻辑像素）。`scale` 是当前的 DPI 缩放。
+#[cfg(test)]
 fn measure_text(text: &str, scale: f32) -> f32 {
-    if text.is_empty() {
-        return 0.0;
-    }
-    let px = TEXT_PX * scale;
-    crate::text::TextEngine::with(|engine| engine.measure(text, px, false)) / scale
+    linefield::measure_text(text, scale, TEXT_PX)
 }
 
 /// 量一段字节区间（`from..to`）的宽度。
@@ -2374,14 +2414,7 @@ fn measure_text(text: &str, scale: f32) -> f32 {
 /// 空区间要返回 **0.0**（不是 `measure_text("")` 那种“没量过就按 0 算”），
 /// 光标正好落在可视起点时 x 必须是 0，否则光标会被画偏一个字。
 fn width_between(text: &str, from: usize, to: usize, scale: f32) -> f32 {
-    let from = clamp_boundary(text, from);
-    let to = clamp_boundary(text, to).max(from);
-    measure_text(&text[from..to], scale)
-}
-
-/// 整段文本的宽度（用来判断要不要出现滚动条）。
-fn text_width(text: &str, scale: f32) -> f32 {
-    width_between(text, 0, text.len(), scale)
+    linefield::width_between(text, from, to, scale, TEXT_PX)
 }
 
 /// 把光标拉回可视区：跑到左边就跟过去，跑到右边就往前吃字。
@@ -2389,40 +2422,12 @@ fn text_width(text: &str, scale: f32) -> f32 {
 /// 只在“宽度量过了”之后才动 `offset`：没视口时改它只会让测试里的
 /// 光标位置莫名其妙缩到 0。
 fn ensure_caret_visible(editing: &mut Editing) {
-    if !editing.width.is_finite() || editing.width <= 0.0 {
-        return;
-    }
-    let (buffer, scale, avail) = (editing.buffer.clone(), editing.scale, editing.width);
-    let cursor = clamp_boundary(&buffer, editing.cursor);
-    let start = clamp_boundary(&buffer, editing.offset).min(cursor);
-    if cursor < start {
-        editing.offset = cursor;
-        return;
-    }
-    if width_between(&buffer, start, cursor, scale) <= avail {
-        // 光标本来就在框里，但可能因为删字而滚得太靠右了：往前收一收看能否贴回左端。
-        editing.offset = start;
-        return;
-    }
-    let mut start = cursor;
-    while let Some(prev) = prev_boundary(&buffer, start) {
-        if width_between(&buffer, prev, cursor, scale) > avail {
-            break;
-        }
-        start = prev;
-    }
-    editing.offset = start;
+    linefield::ensure_caret_visible(editing);
 }
 
 /// 当前选区（字节区间，左闭右开）。没选区返回 `None`。
 pub fn selection(editing: &Editing) -> Option<(usize, usize)> {
-    let anchor = clamp_boundary(&editing.buffer, editing.anchor);
-    let cursor = clamp_boundary(&editing.buffer, editing.cursor);
-    if anchor == cursor {
-        None
-    } else {
-        Some((anchor.min(cursor), anchor.max(cursor)))
-    }
+    linefield::selection(editing)
 }
 
 /// 有没有选中一段文本。
@@ -2441,35 +2446,16 @@ pub fn set_caret_from_x(model: &mut Model, inner: Rect, x: f32, extend: bool, sc
     let Some(editing) = model.editing.as_mut() else {
         return;
     };
-    // 点进来时顺手把视口量下来：光标换算要用“当前这次”的宽度与 DPI，
-    // 用上一次的会让 125% 下每点一次都可能偏半个字。
+    // 点进来时顺手把视口量下来：光标换算要用"当前这次"的宽度与 DPI。
     editing.width = inner.w.max(1.0);
     editing.scale = scale;
-    let start = clamp_boundary(&editing.buffer, editing.offset);
-    let local = (x - inner.x).max(0.0) + width_between(&editing.buffer, 0, start, scale);
-    // 严格照字符边界走：多字节字符（中文、emoji）不能被切一半。
-    let mut index = 0;
-    let mut acc = 0.0;
-    while let Some(next) = next_boundary(&editing.buffer, index) {
-        let w = measure_text(&editing.buffer[index..next], scale);
-        if acc + w * 0.5 > local {
-            break;
-        }
-        acc += w;
-        index = next;
-    }
-    if !extend {
-        editing.anchor = index;
-    }
-    editing.cursor = index;
-    ensure_caret_visible(editing);
+    linefield::set_caret_from_x(editing, inner, x, extend);
 }
 
 /// 全选（Ctrl+A）。
 pub fn select_all(model: &mut Model) {
     if let Some(editing) = model.editing.as_mut() {
-        editing.anchor = 0;
-        editing.cursor = editing.buffer.len();
+        linefield::select_all(editing);
     }
     sync_edit_viewport(model);
 }
@@ -2502,12 +2488,12 @@ pub fn sync_edit_viewport(model: &mut Model) {
 
 /// 输入框里的内容是否宽到放不下（放不下才画滚动条）。
 pub fn text_overflow(editing: &Editing) -> bool {
-    editing.width.is_finite() && text_width(&editing.buffer, editing.scale) > editing.width + 0.5
+    linefield::text_overflow(editing)
 }
 
 /// 单行框自己的水平滚动条（压在内框下沿，只有 5px 高，不抢正文的点击区）。
 pub fn text_scroll_track(inner: Rect) -> Rect {
-    Rect::new(inner.x, inner.bottom() - 5.0, inner.w, 5.0)
+    linefield::scroll_track(inner)
 }
 
 /// 水平滚动条的 thumb 矩形（与绘制用同一个公式）。
@@ -2515,89 +2501,26 @@ pub fn text_scroll_track(inner: Rect) -> Rect {
 /// `pub` 是因为绘制在 `draw_row` 里（那里手边只有 `Painter` 和调色板），
 /// 而命中判定在窗口层；两边必须拿同一个矩形，所以只算一次。
 pub fn text_thumb(editing: &Editing, inner: Rect) -> Option<Rect> {
-    if !text_overflow(editing) {
-        return None;
-    }
-    let total = text_width(&editing.buffer, editing.scale);
-    if total <= 0.0 {
-        return None;
-    }
-    let ratio = (editing.width / total).clamp(0.0, 1.0);
-    // 注意不能写 `.clamp(24.0, inner.w)`：内框比 24px 还窄时
-    // `clamp` 会因为 min > max 直接 panic（窄窗口就是这种情形）。
-    let thumb_w = (inner.w * ratio).clamp(inner.w.min(24.0), inner.w.max(0.0));
-    let start = clamp_boundary(&editing.buffer, editing.offset);
-    let scrolled = width_between(&editing.buffer, 0, start, editing.scale);
-    let max_scroll = (total - editing.width).max(1.0);
-    let x = inner.x + (inner.w - thumb_w) * (scrolled / max_scroll).clamp(0.0, 1.0);
-    Some(Rect::new(x, inner.bottom() - 5.0, thumb_w, 5.0))
+    linefield::thumb(editing, inner)
 }
 
 /// 拖动水平滚动条：把 viewport 的**左沿**放到鼠标那里（拖动的是那段 thumb）。
 pub fn set_offset_from_x(model: &mut Model, inner: Rect, x: f32) {
-    let Some(editing) = model.editing.as_mut() else {
-        return;
-    };
-    if !text_overflow(editing) {
-        return;
+    if let Some(editing) = model.editing.as_mut() {
+        linefield::set_offset_from_x(editing, inner, x);
     }
-    let total = text_width(&editing.buffer, editing.scale);
-    let max_scroll = (total - editing.width).max(1.0);
-    let ratio = ((x - inner.x) / inner.w.max(1.0)).clamp(0.0, 1.0);
-    let want = (ratio * max_scroll).clamp(0.0, max_scroll);
-    // 找一个“宽度刚好等于 want”的字符边界：只能滚到字缝上，滚到字中间会让字被切一半。
-    let mut index = 0;
-    let mut acc = 0.0;
-    while let Some(next) = next_boundary(&editing.buffer, index) {
-        let w = measure_text(&editing.buffer[index..next], editing.scale);
-        if acc + w > want {
-            break;
-        }
-        acc += w;
-        index = next;
-    }
-    editing.offset = index;
-    // 不碰光标与选区：拖滚动条只是“看看别处”，不是“把光标挪过去”，
-    // 直接改 cursor 会把用户刚选好的选区当场抹掉。
-    // 光标真在可视区外时由绘制层把它限到框边。
 }
 
 /// 鼠标滚轮在输入框上时横着滚。
 pub fn scroll_edit(model: &mut Model, dx: f32) {
-    let Some(editing) = model.editing.as_mut() else {
-        return;
-    };
-    if !text_overflow(editing) || dx.abs() < 0.01 {
-        return;
+    if let Some(editing) = model.editing.as_mut() {
+        linefield::scroll(editing, dx);
     }
-    let start = clamp_boundary(&editing.buffer, editing.offset);
-    let mut index = start;
-    if dx > 0.0 {
-        let mut left = dx;
-        while left > 0.0 {
-            let Some(next) = next_boundary(&editing.buffer, index) else {
-                break;
-            };
-            left -= measure_text(&editing.buffer[index..next], editing.scale);
-            index = next;
-        }
-    } else {
-        let mut left = -dx;
-        while left > 0.0 {
-            let Some(prev) = prev_boundary(&editing.buffer, index) else {
-                break;
-            };
-            left -= measure_text(&editing.buffer[prev..index], editing.scale);
-            index = prev;
-        }
-    }
-    editing.offset = index;
 }
 
 /// 拖动滚动条 / 点滚动条时，这个点是不是落在 thumb 上（窗口层判命中用）。
 pub fn text_scrollbar_at(editing: &Editing, inner: Rect, p: Point) -> bool {
-    text_thumb(editing, inner)
-        .is_some_and(|thumb| Rect::new(thumb.x, inner.bottom() - 7.0, thumb.w, 9.0).contains(p))
+    linefield::scrollbar_at(editing, inner, p)
 }
 
 /// 双击选词。中文按“连续同类别”分（汉字一串、字母数字一串），
@@ -2607,171 +2530,41 @@ pub fn select_word(model: &mut Model, inner: Rect, x: f32, scale: f32) {
     let Some(editing) = model.editing.as_mut() else {
         return;
     };
-    editing.width = inner.w.max(1.0);
     editing.scale = scale;
-    let start = clamp_boundary(&editing.buffer, editing.offset);
-    let local = (x - inner.x).max(0.0) + width_between(&editing.buffer, 0, start, scale);
-    let mut index = 0;
-    let mut acc = 0.0;
-    while let Some(next) = next_boundary(&editing.buffer, index) {
-        let w = measure_text(&editing.buffer[index..next], scale);
-        if acc + w * 0.5 > local {
-            break;
-        }
-        acc += w;
-        index = next;
-    }
-    let word = |editing: &Editing, i: usize| -> Option<char> { editing.buffer[i..].chars().next() };
-    // 点到字缝右边（index 已在下一个字上）：往左看一个字。
-    let mut lo = index;
-    if lo == editing.buffer.len() {
-        lo = prev_boundary(&editing.buffer, lo).unwrap_or(0);
-    }
-    let Some(ch) = word(editing, lo) else {
-        return;
-    };
-    if ch.is_whitespace() {
-        // 点空白：选中这段空白（跟系统输入框一样，双击空白选空白）。
-        let mut a = lo;
-        while let Some(prev) = prev_boundary(&editing.buffer, a) {
-            if !word(editing, prev).is_some_and(|c| c.is_whitespace()) {
-                break;
-            }
-            a = prev;
-        }
-        let mut b = next_boundary(&editing.buffer, lo).unwrap_or(lo);
-        while word(editing, b).is_some_and(|c| c.is_whitespace()) {
-            b = next_boundary(&editing.buffer, b).unwrap_or(b);
-        }
-        editing.anchor = a;
-        editing.cursor = b;
-        ensure_caret_visible(editing);
-        return;
-    }
-    // 路径/命令分隔符也开新词（但分隔符本身不算词）。
-    let is_break = |c: char| {
-        c.is_whitespace()
-            || matches!(
-                c,
-                '/' | '\\'
-                    | ':'
-                    | ';'
-                    | ','
-                    | '|'
-                    | '('
-                    | ')'
-                    | '['
-                    | ']'
-                    | '{'
-                    | '}'
-                    | '"'
-                    | '\''
-                    | '='
-                    | '<'
-                    | '>'
-                    | '&'
-            )
-    };
-    let lo = if is_break(ch) {
-        lo
-    } else {
-        let mut a = lo;
-        while let Some(prev) = prev_boundary(&editing.buffer, a) {
-            if word(editing, prev).is_none_or(is_break) {
-                break;
-            }
-            a = prev;
-        }
-        a
-    };
-    let mut hi = next_boundary(&editing.buffer, lo).unwrap_or(lo);
-    if !is_break(ch) {
-        while word(editing, hi).is_some_and(|c| !is_break(c)) {
-            hi = next_boundary(&editing.buffer, hi).unwrap_or(hi);
-        }
-    }
-    editing.anchor = lo;
-    editing.cursor = hi;
-    ensure_caret_visible(editing);
+    linefield::select_word(editing, inner, x);
 }
 
 /// 复制选区（没选区就复制整段）。返回是否真拷到了。
 pub fn copy_selection(model: &Model) -> bool {
-    let Some(editing) = model.editing.as_ref() else {
-        return false;
-    };
-    let text = match selection(editing) {
-        Some((a, b)) => &editing.buffer[a..b],
-        None => editing.buffer.as_str(),
-    };
-    if text.is_empty() {
-        return false;
-    }
-    host_clipboard_set(text)
+    model
+        .editing
+        .as_ref()
+        .is_some_and(linefield::copy::<Editing>)
 }
 
 /// 剪切选区（没选区就什么都不干：整段剪切等于“清空”，太危险）。
 pub fn cut_selection(model: &mut Model) -> bool {
-    let Some(editing) = model.editing.as_mut() else {
-        return false;
-    };
-    let Some((a, b)) = selection(editing) else {
-        return false;
-    };
-    if !host_clipboard_set(&editing.buffer[a..b]) {
-        return false;
-    }
-    delete_selection(editing);
-    ensure_caret_visible(editing);
-    true
+    model
+        .editing
+        .as_mut()
+        .is_some_and(linefield::cut::<Editing>)
 }
 
 /// 粘贴。多个换行会被折成空格（单行框）：直接插 `\n` 进去会让 frame_text
 /// 画出两行，而内框只裁上下，字符会溢出到面板别的地方。
 pub fn paste(model: &mut Model, raw: &str) -> bool {
-    let mut cleaned = String::with_capacity(raw.len());
-    for ch in raw.chars() {
-        match ch {
-            '\r' => {}
-            '\n' | '\t' => cleaned.push(' '),
-            c if c.is_control() => {}
-            c => cleaned.push(c),
-        }
-    }
-    if cleaned.is_empty() {
-        return false;
-    }
-    edit_text(model, &cleaned);
-    true
+    model
+        .editing
+        .as_mut()
+        .is_some_and(|editing| linefield::paste(editing, raw))
 }
 
 /// 从系统剪贴板粘贴。
 pub fn paste_clipboard(model: &mut Model) -> bool {
-    let Some(text) = host_clipboard_get() else {
-        return false;
-    };
-    paste(model, &text)
-}
-
-/// 写入系统剪贴板。
-fn host_clipboard_set(text: &str) -> bool {
-    zouwu_platform::clipboard::set_text(text)
-}
-
-/// 读系统剪贴板。
-fn host_clipboard_get() -> Option<String> {
-    zouwu_platform::clipboard::get_text()
-}
-
-/// 删掉选区；返回是否真的删了。
-fn delete_selection(editing: &mut Editing) -> bool {
-    let Some((start, end)) = selection(editing) else {
-        return false;
-    };
-    editing.buffer.replace_range(start..end, "");
-    editing.anchor = start;
-    editing.cursor = start;
-    true
+    model
+        .editing
+        .as_mut()
+        .is_some_and(linefield::paste_clipboard::<Editing>)
 }
 
 fn edit_value(model: &Model, target: EditTarget) -> String {
@@ -2811,15 +2604,9 @@ pub fn commit_edit(model: &mut Model) -> Option<Vec<ChangeKind>> {
 /// 把一段文本插到光标处（输入法上屏、逐字符输入都走这里）。
 /// 有选区时先删选区再插（和系统输入框一致：选中后打字 = 替换）。
 pub fn edit_text(model: &mut Model, text: &str) {
-    let Some(editing) = model.editing.as_mut() else {
-        return;
-    };
-    delete_selection(editing);
-    let cursor = clamp_boundary(&editing.buffer, editing.cursor);
-    editing.buffer.insert_str(cursor, text);
-    editing.cursor = cursor + text.len();
-    editing.anchor = editing.cursor;
-    ensure_caret_visible(editing);
+    if let Some(editing) = model.editing.as_mut() {
+        linefield::insert(editing, text);
+    }
 }
 
 /// 光标移动（方向键 / Home / End）。`extend` 即按住 Shift 拉选区。
@@ -2827,41 +2614,13 @@ pub fn edit_move(model: &mut Model, motion: EditMotion, extend: bool) {
     let Some(editing) = model.editing.as_mut() else {
         return;
     };
-    editing.cursor = clamp_boundary(&editing.buffer, editing.cursor);
-    editing.anchor = clamp_boundary(&editing.buffer, editing.anchor);
-    if extend {
-        editing.cursor = match motion {
-            EditMotion::Left => prev_boundary(&editing.buffer, editing.cursor).unwrap_or(0),
-            EditMotion::Right => {
-                next_boundary(&editing.buffer, editing.cursor).unwrap_or(editing.buffer.len())
-            }
-            EditMotion::Home => 0,
-            EditMotion::End => editing.buffer.len(),
-        };
-        ensure_caret_visible(editing);
-        return;
-    }
-    // 没按 Shift 时方向键先“收起”选区（← 去左端、→ 去右端），与系统输入框一致。
-    let target = if let Some((start, end)) = selection(editing) {
-        match motion {
-            EditMotion::Left => start,
-            EditMotion::Right => end,
-            EditMotion::Home => 0,
-            EditMotion::End => editing.buffer.len(),
-        }
-    } else {
-        match motion {
-            EditMotion::Left => prev_boundary(&editing.buffer, editing.cursor).unwrap_or(0),
-            EditMotion::Right => {
-                next_boundary(&editing.buffer, editing.cursor).unwrap_or(editing.buffer.len())
-            }
-            EditMotion::Home => 0,
-            EditMotion::End => editing.buffer.len(),
-        }
+    let motion = match motion {
+        EditMotion::Left => linefield::Motion::Left,
+        EditMotion::Right => linefield::Motion::Right,
+        EditMotion::Home => linefield::Motion::Home,
+        EditMotion::End => linefield::Motion::End,
     };
-    editing.cursor = target;
-    editing.anchor = target;
-    ensure_caret_visible(editing);
+    linefield::move_caret(editing, motion, extend);
 }
 
 /// 编辑框的按键处理。`Commit` / `Cancel` 返回 `Some`，其余返回 `None`。
@@ -2872,66 +2631,21 @@ pub fn edit_key(model: &mut Model, key: EditKey) -> Option<Vec<ChangeKind>> {
             model.editing = None;
             return None;
         }
-        _ => {}
+        EditKey::Backspace | EditKey::Delete => {}
     }
     let Some(editing) = model.editing.as_mut() else {
         return None;
     };
-    editing.cursor = clamp_boundary(&editing.buffer, editing.cursor);
-    editing.anchor = clamp_boundary(&editing.buffer, editing.anchor);
-    let cursor = editing.cursor;
     match key {
         EditKey::Backspace => {
-            if !delete_selection(editing) {
-                if let Some(prev) = prev_boundary(&editing.buffer, cursor) {
-                    editing.buffer.replace_range(prev..cursor, "");
-                    editing.cursor = prev;
-                    editing.anchor = prev;
-                }
-            }
+            linefield::backspace(editing);
         }
         EditKey::Delete => {
-            if !delete_selection(editing) {
-                if let Some(next) = next_boundary(&editing.buffer, cursor) {
-                    editing.buffer.replace_range(cursor..next, "");
-                }
-            }
+            linefield::delete_forward(editing);
         }
         EditKey::Commit | EditKey::Cancel => unreachable!(),
     }
-    ensure_caret_visible(editing);
     None
-}
-
-/// 把下标夹到最近的字符边界上（防止多字节字符被切半个）。
-fn clamp_boundary(text: &str, index: usize) -> usize {
-    let mut i = index.min(text.len());
-    while i > 0 && !text.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
-fn prev_boundary(text: &str, index: usize) -> Option<usize> {
-    if index == 0 {
-        return None;
-    }
-    let mut i = index - 1;
-    while i > 0 && !text.is_char_boundary(i) {
-        i -= 1;
-    }
-    Some(i)
-}
-
-fn next_boundary(text: &str, index: usize) -> Option<usize> {
-    if index >= text.len() {
-        return None;
-    }
-    let mut i = index + 1;
-    while i < text.len() && !text.is_char_boundary(i) {
-        i += 1;
-    }
-    Some(i)
 }
 
 fn reset(model: &mut Model) {
@@ -4448,9 +4162,9 @@ mod tests {
     #[test]
     #[ignore = "会读写系统剪贴板，需要交互式桌面"]
     fn the_clipboard_bridge_round_trips() {
-        let saved = host_clipboard_get();
+        let saved = zouwu_platform::clipboard::get_text();
         let text = "C:\\work\\tools\\run.exe --flag";
-        if !host_clipboard_set(text) {
+        if !zouwu_platform::clipboard::set_text(text) {
             // 剪贴板被别的程序长期占着（或远程会话没重定向剪贴板）时
             // `OpenClipboard` 会一直 `ACCESS_DENIED`。别把“环境没剪贴板”改成红测试，
             // 但也别假装通过 —— 用 eprintln 说清楚跳过。
@@ -4458,7 +4172,7 @@ mod tests {
             return;
         }
         assert_eq!(
-            host_clipboard_get().as_deref(),
+            zouwu_platform::clipboard::get_text().as_deref(),
             Some(text),
             "读回来的不一样"
         );
@@ -4469,7 +4183,7 @@ mod tests {
         assert_eq!(buffer_and_cursor(&m).0, text);
 
         if let Some(saved) = saved {
-            host_clipboard_set(&saved);
+            zouwu_platform::clipboard::set_text(&saved);
         }
     }
 

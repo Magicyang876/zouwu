@@ -11,7 +11,8 @@ use tiny_skia::Pixmap;
 
 use zouwu_core::history::Entry;
 use zouwu_core::theme::Theme;
-use zouwu_ui::history::{draw, filter, layout, query_terms, View};
+use zouwu_ui::history::{draw, filter, layout, query_terms, search_inner, Search, View};
+use zouwu_ui::linefield::LineField;
 
 fn main() {
     let out = PathBuf::from("target/zouwu-history");
@@ -41,16 +42,27 @@ fn main() {
     let footer = "↑↓ 选择 · Enter 复制并关闭 · 输入即搜索 · Delete 删除 · Esc 关闭";
     let placeholder = "搜索（空格分隔多个关键词）";
 
-    // 名字 / 条目 / 查询 / 选中 / 滚动
-    let cases: [(&str, &Vec<Entry>, &str, usize, usize); 5] = [
-        ("many", &many, "", 0, 0),
-        ("scrolled", &many, "", 12, 5),
-        ("empty", &empty, "", 0, 0),
-        ("search", &many, "cargo", 0, 0),
-        ("no-match", &many, "根本不存在的词", 0, 0),
+    // 名字 / 条目 / 查询 / 选中 / 滚动 / 光标或选区（字节区间，None＝不在框里）
+    let cases: [(
+        &str,
+        &Vec<Entry>,
+        &str,
+        usize,
+        usize,
+        Option<(usize, usize)>,
+    ); 7] = [
+        ("many", &many, "", 0, 0, None),
+        ("scrolled", &many, "", 12, 5, None),
+        ("empty", &empty, "", 0, 0, None),
+        ("search", &many, "cargo", 0, 0, None),
+        // 光标停在框里（空选区）：验证"点得进去"
+        ("search-focused", &many, "cargo", 0, 0, Some((5, 5))),
+        // 双击选中 test：验证选区底纹压在字上
+        ("search-selected", &many, "cargo test", 0, 0, Some((6, 10))),
+        ("no-match", &many, "根本不存在的词", 0, 0, None),
     ];
 
-    for (name, entries, query, selected, scroll) in cases {
+    for (name, entries, query, selected, scroll, span) in cases {
         let visible = filter(entries, &query_terms(query));
         let l = layout(visible.len());
         let theme = Theme::fallback();
@@ -62,6 +74,15 @@ fn main() {
         } else {
             "没有匹配的条目"
         };
+        // 搜索框的真实视口：宽度与 DPI 都得给，否则光标位置与横向滚动算不出来。
+        let mut search = Search::default();
+        search.set(query);
+        search.set_scale(dpi);
+        search.set_width(search_inner(l.search, !query.is_empty()).w);
+        if let Some((anchor, caret)) = span {
+            search.set_anchor(anchor);
+            search.set_caret(caret);
+        }
         draw(
             &mut pixmap,
             entries,
@@ -72,7 +93,8 @@ fn main() {
                 selected,
                 scroll,
                 hover: if visible.is_empty() { None } else { Some(0) },
-                query,
+                search: &search,
+                search_focus: span.is_some(),
                 placeholder,
                 footer,
                 empty: empty_text,

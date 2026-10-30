@@ -30,6 +30,7 @@ use winit::window::{CursorIcon, Window, WindowId};
 use zouwu_core::history::Entry;
 use zouwu_core::theme::{Rgba, Theme};
 
+use crate::linefield::{self, LineField};
 use crate::presenter::{create_soft, Presenter};
 use crate::widget::{Painter, Rect, Weight};
 use zouwu_core::geom::Point;
@@ -44,6 +45,93 @@ const SEARCH_H: f32 = 36.0;
 /// 搜索框本体的高度（比 `SEARCH_H` 矮，留出间隙）。
 const SEARCH_BOX_H: f32 = 28.0;
 const FOOTER_H: f32 = 34.0;
+/// 搜索框字号（逻辑像素）。
+pub const SEARCH_PX: f32 = 12.5;
+
+/// 搜索框的状态：内容 + 光标/选区/可视起点。
+///
+/// 编辑规则整体复用 `linefield`（与设置面板的文本框同一份实现）：
+/// 点哪落哪、拖着选、双击选词、长文本横向滚、Ctrl+A/C/X/V 都在那边。
+pub struct Search {
+    buffer: String,
+    cursor: usize,
+    anchor: usize,
+    offset: usize,
+    width: f32,
+    scale: f32,
+}
+
+impl Default for Search {
+    fn default() -> Self {
+        Self {
+            buffer: String::new(),
+            cursor: 0,
+            anchor: 0,
+            offset: 0,
+            // 没量过宽度就 `INFINITY`：`ensure_caret_visible` 会跳过，单测不用伪造视口。
+            width: f32::INFINITY,
+            scale: 1.0,
+        }
+    }
+}
+
+impl Search {
+    pub fn set(&mut self, text: &str) {
+        self.buffer = text.to_string();
+        self.cursor = self.buffer.len();
+        self.anchor = self.cursor;
+        self.offset = 0;
+    }
+
+    fn clear(&mut self) {
+        self.buffer.clear();
+        self.cursor = 0;
+        self.anchor = 0;
+        self.offset = 0;
+    }
+}
+
+impl LineField for Search {
+    fn text(&self) -> &str {
+        &self.buffer
+    }
+    fn text_mut(&mut self) -> &mut String {
+        &mut self.buffer
+    }
+    fn caret(&self) -> usize {
+        self.cursor
+    }
+    fn set_caret(&mut self, index: usize) {
+        self.cursor = index;
+    }
+    fn anchor(&self) -> usize {
+        self.anchor
+    }
+    fn set_anchor(&mut self, index: usize) {
+        self.anchor = index;
+    }
+    fn offset(&self) -> usize {
+        self.offset
+    }
+    fn set_offset(&mut self, index: usize) {
+        self.offset = index;
+    }
+    fn width(&self) -> f32 {
+        self.width
+    }
+    fn set_width(&mut self, width: f32) {
+        self.width = width;
+    }
+    fn scale(&self) -> f32 {
+        self.scale
+    }
+    fn set_scale(&mut self, scale: f32) {
+        self.scale = scale;
+    }
+    fn font_px(&self) -> f32 {
+        SEARCH_PX
+    }
+}
 
 /// 列表顶边：头部 + 搜索框。
 fn list_top() -> f32 {
@@ -164,6 +252,20 @@ pub fn layout(total: usize) -> Layout {
     }
 }
 
+/// 搜索框里真正放文字的那一段（左边让开放大镜、右边留出「×」）。
+///
+/// 点击换算、光标绘制、滚动条都用它——三处各写一份必然错位。
+pub fn search_inner(search: Rect, has_text: bool) -> Rect {
+    let right_pad = if has_text { 26.0 } else { 10.0 };
+    let text_x = search.x + 26.0;
+    Rect::new(
+        text_x,
+        search.y,
+        (search.right() - right_pad - text_x).max(10.0),
+        search.h,
+    )
+}
+
 /// 搜索框右侧那个「×」的点击范围（给定搜索框的矩形）。
 pub fn clear_button_in(search: Rect) -> Rect {
     Rect::new(search.right() - 26.0, search.y, 22.0, search.h)
@@ -232,8 +334,15 @@ pub struct HistoryWindow {
     selected: usize,
     scroll: usize,
     hover: Option<usize>,
-    /// 搜索词（空格分隔多关键词）。空串＝不筛。
-    query: String,
+    /// 搜索框（词、光标、选区、可视起点）。
+    search: Search,
+    /// 键盘焦点在搜索框里（点了框或刚打过字）：此时 ←→/Home/End 动光标而不是列表。
+    search_focus: bool,
+    /// 正在框里拖选。
+    drag_search: bool,
+    /// 上一次按下搜索框的时间/位置，用来数双击、三击。
+    last_click: Option<(std::time::Instant, f32, f32)>,
+    click_count: u8,
     placeholder: String,
     no_match_text: String,
     cursor: Point,
@@ -287,7 +396,11 @@ impl HistoryWindow {
             selected: 0,
             scroll: 0,
             hover: None,
-            query: String::new(),
+            search: Search::default(),
+            search_focus: false,
+            drag_search: false,
+            last_click: None,
+            click_count: 0,
             placeholder,
             no_match_text,
             cursor: Point::new(0.0, 0.0),
@@ -337,7 +450,7 @@ impl HistoryWindow {
     /// USER32 同步去通知另一个进程的窗口，那边慢一点整进程就冻住了。
     pub fn show(&mut self, entries: Vec<Entry>) {
         // 每次打开都是新的一轮：带着上次的搜索词打开会让人以为“记录都没了”。
-        self.query.clear();
+        self.search.clear();
         self.refresh(entries);
         self.selected = 0;
         self.scroll = 0;
@@ -348,11 +461,11 @@ impl HistoryWindow {
 
     /// 设置搜索词（测试/调试入口：`ZOUWU_HISTORY_QUERY`）。
     pub fn set_query(&mut self, query: &str) {
-        if self.query == query {
+        if self.search.buffer == query {
             return;
         }
-        self.query.clear();
-        self.query.push_str(query);
+        self.search.clear();
+        self.search.set(query);
         self.after_query_change();
     }
 
@@ -391,6 +504,7 @@ impl HistoryWindow {
                 .request_inner_size(LogicalSize::new(next.size.0, next.size.1));
         }
         self.layout = next;
+        self.sync_search_viewport();
     }
 
     fn move_by(&mut self, delta: isize) {
@@ -422,7 +536,7 @@ impl HistoryWindow {
 
     /// 命中的记录：搜索词筛过后、`entries` 里的下标（新→旧）。
     fn visible(&self) -> Vec<usize> {
-        filter(&self.entries, &query_terms(&self.query))
+        filter(&self.entries, &query_terms(&self.search.buffer))
     }
 
     /// 搜索词变了：选中回到第一条，行数变了就重排，并让输入法候选窗跟过来。
@@ -430,19 +544,47 @@ impl HistoryWindow {
         self.selected = 0;
         self.scroll = 0;
         self.rebuild_layout();
+        self.sync_search_viewport();
         self.update_ime_area();
         self.window.request_redraw();
     }
 
+    /// 把"框有多宽、现在什么 DPI"告诉搜索框：光标换算与横向滚动都要它。
+    fn sync_search_viewport(&mut self) {
+        let scale = self.window.scale_factor() as f32;
+        let scale = if scale > 0.01 { scale } else { 1.0 };
+        let inner = search_inner(self.layout.search, !self.search.buffer.is_empty());
+        self.search.set_scale(scale);
+        self.search.set_width(inner.w.max(1.0));
+        linefield::ensure_caret_visible(&mut self.search);
+    }
+
     fn clear_query(&mut self) {
-        if self.query.is_empty() {
+        if self.search.buffer.is_empty() {
             return;
         }
-        self.query.clear();
+        self.search.clear();
         self.after_query_change();
     }
 
     /// 把输入法候选窗贴到搜索框上（不贴的话候选窗会飘在屏幕左上角）。
+    /// 数搜索框上的连击：同一位置 400ms 内的连续按下算一次加击（最多三击）。
+    fn next_search_click(&mut self) -> u8 {
+        let now = std::time::Instant::now();
+        let near = self.last_click.is_some_and(|(at, x, y)| {
+            now.duration_since(at) < std::time::Duration::from_millis(400)
+                && (x - self.cursor.x).abs() <= 4.0
+                && (y - self.cursor.y).abs() <= 4.0
+        });
+        self.click_count = if near {
+            (self.click_count + 1).min(3)
+        } else {
+            1
+        };
+        self.last_click = Some((now, self.cursor.x, self.cursor.y));
+        self.click_count
+    }
+
     fn update_ime_area(&self) {
         let scale = self.window.scale_factor() as f32;
         let box_ = self.layout.search;
@@ -468,7 +610,7 @@ impl HistoryWindow {
             SearchEdit::Ignore => false,
             SearchEdit::Clear => {
                 // 第一次 Esc 只清搜索，第二次才关窗：误触不该直接关掉。
-                if self.query.is_empty() {
+                if self.search.buffer.is_empty() {
                     false
                 } else {
                     self.clear_query();
@@ -476,24 +618,23 @@ impl HistoryWindow {
                 }
             }
             SearchEdit::Backspace => {
-                if self.query.pop().is_some() {
+                if linefield::backspace(&mut self.search) {
                     self.after_query_change();
                 }
+                self.search_focus = true;
                 true
             }
             SearchEdit::Append(text) => {
-                self.query.push_str(&text);
+                linefield::insert(&mut self.search, &text);
+                self.search_focus = true;
                 self.after_query_change();
                 true
             }
             SearchEdit::Paste => {
-                // 把剪贴板的第一行粘进来：整个多行文本塞进单行搜索框没意义。
-                if let Some(text) = zouwu_platform::clipboard::get_text() {
-                    let line = text.lines().next().unwrap_or("").trim().to_string();
-                    if !line.is_empty() {
-                        self.query.push_str(&line);
-                        self.after_query_change();
-                    }
+                // 粘进光标处（多行会被折成一行，单行框里塞 `\n` 会画到框外）。
+                self.search_focus = true;
+                if linefield::paste_clipboard(&mut self.search) {
+                    self.after_query_change();
                 }
                 true
             }
@@ -539,7 +680,7 @@ impl HistoryWindow {
             self.footer_help.as_str()
         };
         // "空"分两种：历史本来就没东西，还是搜索没命中——两句话差别很大。
-        let empty = if !self.entries.is_empty() && !self.query.is_empty() {
+        let empty = if !self.entries.is_empty() && !self.search.buffer.is_empty() {
             self.no_match_text.as_str()
         } else {
             self.empty_text.as_str()
@@ -557,7 +698,8 @@ impl HistoryWindow {
                 selected: self.selected,
                 scroll: self.scroll,
                 hover: self.hover,
-                query: &self.query,
+                search: &self.search,
+                search_focus: self.search_focus,
                 placeholder: &self.placeholder,
                 footer,
                 empty,
@@ -597,6 +739,13 @@ impl HistoryWindow {
                 let scale = if scale > 0.01 { scale } else { 1.0 };
                 let p = Point::new(position.x as f32 / scale, position.y as f32 / scale);
                 self.cursor = p;
+                if self.drag_search {
+                    // 拖拽扩选：锚点留在按下处，光标跟着鼠标走。
+                    let inner = search_inner(self.layout.search, !self.search.buffer.is_empty());
+                    linefield::set_caret_from_x(&mut self.search, inner, p.x, true);
+                    self.window.request_redraw();
+                    return Vec::new();
+                }
                 let total = self.visible().len();
                 let hover = row_at(&self.layout, p, self.scroll).filter(|&i| i < total);
                 if hover != self.hover {
@@ -617,15 +766,48 @@ impl HistoryWindow {
                 Vec::new()
             }
             WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
+                self.drag_search = false;
+                Vec::new()
+            }
+            WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
             } => {
                 // 点「×」先于选行：那个位置在列表上方，两者不重叠，但读起来清楚。
-                if !self.query.is_empty() && clear_button(&self.layout).contains(self.cursor) {
+                if !self.search.buffer.is_empty()
+                    && clear_button(&self.layout).contains(self.cursor)
+                {
                     self.clear_query();
                     return Vec::new();
                 }
+                // 点搜索框：定位光标；拖 = 选；双击 = 选词；三击 = 全选。
+                if self.layout.search.contains(self.cursor) {
+                    let has_text = !self.search.buffer.is_empty();
+                    let inner = search_inner(self.layout.search, has_text);
+                    let count = self.next_search_click();
+                    self.search_focus = true;
+                    match count {
+                        1 => {
+                            linefield::set_caret_from_x(
+                                &mut self.search,
+                                inner,
+                                self.cursor.x,
+                                false,
+                            );
+                            self.drag_search = true;
+                        }
+                        2 => linefield::select_word(&mut self.search, inner, self.cursor.x),
+                        _ => linefield::select_all(&mut self.search),
+                    }
+                    self.window.request_redraw();
+                    return Vec::new();
+                }
+                self.search_focus = false;
                 // 点哪条就选哪条并直接复制：鼠标用户不需要"先选中再回车"两下。
                 if let Some(index) = self.hover {
                     self.selected = index;
@@ -635,6 +817,18 @@ impl HistoryWindow {
                 Vec::new()
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                let lines = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => *y,
+                    MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / ROW_H,
+                };
+                // 长搜索词横向滚：鼠标在框上时滚轮不翻列表，跟输入框一致。
+                if self.layout.search.contains(self.cursor)
+                    && linefield::text_overflow(&self.search)
+                {
+                    linefield::scroll(&mut self.search, -lines * 48.0);
+                    self.window.request_redraw();
+                    return Vec::new();
+                }
                 // 以前这里啥也没做：一屏放不下时只能靠 ↑↓ 翻，鼠标用户直接卡住。
                 let total = self.visible().len();
                 let rows = visible_rows(total);
@@ -657,7 +851,8 @@ impl HistoryWindow {
                 // 中文/日文输入法提交的整串字符走这里（走不了按键字符）。
                 let cleaned: String = text.chars().filter(|c| !c.is_control()).collect();
                 if !cleaned.is_empty() {
-                    self.query.push_str(&cleaned);
+                    linefield::insert(&mut self.search, &cleaned);
+                    self.search_focus = true;
                     self.after_query_change();
                 }
                 Vec::new()
@@ -669,6 +864,46 @@ impl HistoryWindow {
                 // 搜索框先吃键（打字/退格/Ctrl+V），再轮到列表。
                 if self.search_key(event) {
                     return Vec::new();
+                }
+                // 焦点在搜索框里：方向键/Home/End/Ctrl+A/C/X 都是编辑动作，别去翻列表。
+                if self.search_focus {
+                    let extend = self.modifiers.shift_key();
+                    let motion = match &event.logical_key {
+                        Key::Named(NamedKey::ArrowLeft) => Some(linefield::Motion::Left),
+                        Key::Named(NamedKey::ArrowRight) => Some(linefield::Motion::Right),
+                        Key::Named(NamedKey::Home) => Some(linefield::Motion::Home),
+                        Key::Named(NamedKey::End) => Some(linefield::Motion::End),
+                        _ => None,
+                    };
+                    if let Some(motion) = motion {
+                        linefield::move_caret(&mut self.search, motion, extend);
+                        self.window.request_redraw();
+                        return Vec::new();
+                    }
+                    if self.modifiers.control_key() {
+                        let mut redraw = false;
+                        match &event.logical_key {
+                            Key::Character(ch) if ch.as_str().eq_ignore_ascii_case("a") => {
+                                linefield::select_all(&mut self.search);
+                                redraw = true;
+                            }
+                            Key::Character(ch) if ch.as_str().eq_ignore_ascii_case("c") => {
+                                linefield::copy(&self.search);
+                            }
+                            Key::Character(ch) if ch.as_str().eq_ignore_ascii_case("x") => {
+                                if linefield::cut(&mut self.search) {
+                                    self.after_query_change();
+                                }
+                            }
+                            _ => {}
+                        }
+                        if redraw {
+                            self.window.request_redraw();
+                        }
+                        if matches!(&event.logical_key, Key::Character(_)) {
+                            return Vec::new();
+                        }
+                    }
                 }
                 match &event.logical_key {
                     Key::Named(NamedKey::Escape) => vec![Outcome::Close],
@@ -725,8 +960,10 @@ pub struct View<'a> {
     pub selected: usize,
     pub scroll: usize,
     pub hover: Option<usize>,
-    /// 搜索词（空串＝没在搜）。
-    pub query: &'a str,
+    /// 搜索框（内容非空＝正在筛选）。
+    pub search: &'a Search,
+    /// 光标在搜索框里（空框也要把光标画出来，否则用户不知道在打字）。
+    pub search_focus: bool,
     /// 搜索框为空时显示的提示语。
     pub placeholder: &'a str,
     pub footer: &'a str,
@@ -808,7 +1045,7 @@ pub fn draw(
 
 /// 搜索框：左侧放大镜、提示语/输入内容、右侧「×」。
 fn draw_search(p: &mut Painter<'_>, rect: Rect, view: &View<'_>, pal: &Palette) {
-    let active = !view.query.is_empty();
+    let active = !view.search.buffer.is_empty();
     p.fill(rect, 7.0, pal.raised);
     p.stroke(
         rect,
@@ -838,23 +1075,24 @@ fn draw_search(p: &mut Painter<'_>, rect: Rect, view: &View<'_>, pal: &Palette) 
         1.4,
     );
 
-    let text_x = rect.x + 26.0;
-    // 右侧留出「×」的位置（内容为空时不留，腾出宽度）。
-    let right_pad = if active { 26.0 } else { 10.0 };
-    let area = Rect::new(
-        text_x,
-        rect.y,
-        (rect.right() - right_pad - text_x).max(10.0),
-        rect.h,
-    );
+    let area = search_inner(rect, active);
+    if active || view.search_focus {
+        // 内容、选区底纹、光标、横向滚动条都由 `linefield` 一处画：
+        // 点在哪、选到哪、光标画在哪必须用同一份几何，各算一次必然对不上。
+        linefield::draw_contents(
+            p,
+            area,
+            view.search,
+            pal.text,
+            pal.dim.with_alpha(0.28),
+            pal.accent,
+        );
+    } else {
+        p.text_in(view.placeholder, area, SEARCH_PX, pal.dim, Weight::Regular);
+    }
     if active {
-        // 从左边截：搜索时人要看的是最后一个词，所以尾巴永远可见。
-        let shown = p.truncate_left(view.query, 12.5, area.w);
-        p.text_in(&shown, area, 12.5, pal.text, Weight::Regular);
         let clear = clear_button_in(rect);
         p.text_center("×", clear, 14.0, pal.dim, Weight::Regular);
-    } else {
-        p.text_in(view.placeholder, area, 12.5, pal.dim, Weight::Regular);
     }
 }
 
@@ -1144,5 +1382,151 @@ mod tests {
         assert_eq!(ago_label(0, 86_400 * 3), "3 天前");
         // 时钟回拨：差值算成 0，不要显示"18446744073 秒前"。
         assert_eq!(ago_label(500, 100), "刚刚");
+    }
+
+    // ── 搜索框的鼠标行为 ──────────────────────
+
+    /// 按真实度量算"第 `index` 个字节处的横坐标"（内框左沿为 0）。
+    fn caret_x_of(text: &str, index: usize) -> f32 {
+        linefield::width_between(text, 0, index, 1.0, SEARCH_PX)
+    }
+
+    fn search_with(text: &str) -> Search {
+        let mut search = Search::default();
+        search.set(text);
+        let inner = search_inner(layout(0).search, !text.is_empty());
+        search.set_scale(1.0);
+        search.set_width(inner.w);
+        search
+    }
+
+    fn search_inner_rect(text: &str) -> Rect {
+        search_inner(layout(0).search, !text.is_empty())
+    }
+
+    #[test]
+    fn clicking_the_search_box_puts_the_caret_under_the_pointer() {
+        let mut search = search_with("cargo test");
+        let inner = search_inner_rect("cargo test");
+        // 点在 "test" 前面（第 6 个字节处）
+        let x = inner.x + caret_x_of("cargo test", 6);
+        linefield::set_caret_from_x(&mut search, inner, x, false);
+        assert_eq!(search.cursor, 6, "点哪落哪");
+        assert_eq!(search.anchor, 6, "单击不产生选区");
+        // 点到文字右边很远处：夹到末尾
+        linefield::set_caret_from_x(&mut search, inner, inner.right() + 200.0, false);
+        assert_eq!(search.cursor, 10);
+        // 点到左边很远处：夹到开头
+        linefield::set_caret_from_x(&mut search, inner, inner.x - 200.0, false);
+        assert_eq!(search.cursor, 0);
+    }
+
+    #[test]
+    fn clicking_a_chinese_query_lands_on_a_character_boundary() {
+        let text = "中文字符";
+        let mut search = search_with(text);
+        let inner = search_inner_rect(text);
+        // 点在第 2 个字的后半（过了中点才落到下一个边界）
+        let x = inner.x + caret_x_of(text, 3) + 10.0;
+        linefield::set_caret_from_x(&mut search, inner, x, false);
+        assert!(text.is_char_boundary(search.cursor), "不能切在多字节中间");
+        assert_eq!(search.cursor, 6);
+    }
+
+    #[test]
+    fn dragging_inside_the_search_box_selects_a_range() {
+        let text = "cargo test";
+        let mut search = search_with(text);
+        let inner = search_inner_rect(text);
+        // 按下（锚点）在第 6 字节，拖到第 10 字节
+        linefield::set_caret_from_x(&mut search, inner, inner.x + caret_x_of(text, 6), false);
+        linefield::set_caret_from_x(&mut search, inner, inner.x + caret_x_of(text, 10), true);
+        assert_eq!(
+            linefield::selection(&search),
+            Some((6, 10)),
+            "拖选保留锚点，得到一段选区"
+        );
+    }
+
+    #[test]
+    fn double_clicking_selects_one_word_in_the_search() {
+        let text = "C:\\work\\tools\\run.exe";
+        let mut search = search_with(text);
+        let inner = search_inner_rect(text);
+        // 双击 tools 中间
+        let mid = caret_x_of(text, 9) + 2.0;
+        linefield::select_word(&mut search, inner, inner.x + mid);
+        let picked = &text[search.anchor..search.cursor];
+        assert_eq!(picked, "tools", "双击按路径分隔符切词");
+        // 双击中文：整串汉字算一个词
+        let zh = "中文字符";
+        let mut search = search_with(zh);
+        let inner = search_inner_rect(zh);
+        linefield::select_word(&mut search, inner, inner.x + 4.0);
+        assert_eq!(&zh[search.anchor..search.cursor], zh);
+    }
+
+    #[test]
+    fn typing_and_backspace_replace_the_selection() {
+        let text = "cargo test";
+        let mut search = search_with(text);
+        let inner = search_inner_rect(text);
+        // 双击选中 test，然后打字顶掉
+        linefield::select_word(&mut search, inner, inner.x + caret_x_of(text, 8));
+        assert_eq!(&text[search.anchor..search.cursor], "test");
+        linefield::insert(&mut search, "build");
+        assert_eq!(search.buffer, "cargo build");
+        assert_eq!(search.cursor, search.buffer.len());
+        // 再全选后按退格：一次清空
+        linefield::select_all(&mut search);
+        assert!(linefield::backspace(&mut search));
+        assert!(search.buffer.is_empty());
+    }
+
+    #[test]
+    fn a_long_query_scrolls_so_the_caret_stays_visible() {
+        let text = "一个很长很长的搜索词用来测试水平滚动到底会不会把光标挤出框外";
+        let mut search = Search::default();
+        search.set(text);
+        // 窄框：只有 60px
+        search.set_scale(1.0);
+        search.set_width(60.0);
+        linefield::ensure_caret_visible(&mut search);
+        assert!(search.offset > 0, "光标在末尾，必须往左滚");
+        assert!(text.is_char_boundary(search.offset));
+        // 滚过去之后，光标到可视起点的宽度必须放得下
+        let shown = linefield::width_between(text, search.offset, search.cursor, 1.0, SEARCH_PX);
+        assert!(shown <= 60.0 + 0.01, "滚动之后光标要在框里：{shown}");
+        // Ctrl+A 之后光标回到末尾，但可视起点不变（全选不需要滚）
+        linefield::select_all(&mut search);
+        assert_eq!(search.cursor, text.len());
+    }
+
+    #[test]
+    fn a_wide_query_shows_a_scrollbar() {
+        let text = "一个很长很长的搜索词用来测试水平滚动到底会不会把光标挤出框外";
+        let mut search = search_with("短");
+        let inner = search_inner_rect("短");
+        assert!(!linefield::text_overflow(&search), "短词不该有滚动条");
+        assert!(linefield::thumb(&search, inner).is_none());
+        search.set(text);
+        search.set_width(60.0);
+        assert!(linefield::text_overflow(&search));
+        let thumb = linefield::thumb(&search, inner).expect("溢出就有 thumb");
+        assert!(thumb.w >= 24.0, "thumb 不能窄到点不到：{}", thumb.w);
+        // 拖到最右边：可视起点应该到末尾附近
+        linefield::set_offset_from_x(&mut search, inner, inner.right());
+        assert!(search.offset > 0);
+        assert!(text.is_char_boundary(search.offset));
+    }
+
+    #[test]
+    fn the_search_box_text_area_leaves_room_for_the_icon_and_the_clear_button() {
+        let box_ = layout(0).search;
+        let empty = search_inner(box_, false);
+        let typed = search_inner(box_, true);
+        assert!(empty.x > box_.x + 20.0, "左边给放大镜让位");
+        assert!(typed.right() < box_.right() - 20.0, "有字时右边给 × 让位");
+        assert!(typed.w > 40.0, "别把自己挤没了");
     }
 }
