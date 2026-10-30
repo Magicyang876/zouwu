@@ -243,6 +243,7 @@ impl ReportWindow {
     ) -> Result<Self, String> {
         let layout = layout(&report);
         let attrs = Window::default_attributes()
+            .with_window_icon(crate::icon::app_icon())
             .with_title(title)
             .with_inner_size(LogicalSize::new(layout.size.0, layout.size.1))
             .with_min_inner_size(LogicalSize::new(360.0, 160.0))

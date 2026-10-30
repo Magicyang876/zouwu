@@ -246,4 +246,10 @@ fn main() {
         out.len(),
         entries.len()
     );
+
+    // 顺带导出同一张图的 PNG：窗口图标（任务栏 / Alt-Tab / 标题栏）直接吃它，
+    // 见 `crates/zouwu-ui/src/icon.rs`。两处都从 `draw()` 来，改配色不会只改一半。
+    let png = path.with_file_name("zouwu-icon.png");
+    draw(128).save_png(&png).expect("write icon png");
+    println!("wrote {}", png.display());
 }

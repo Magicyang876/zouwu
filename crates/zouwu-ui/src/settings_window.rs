@@ -70,6 +70,7 @@ impl SettingsWindow {
         let (w, h) = settings::DEFAULT_SIZE;
         let attrs = Window::default_attributes()
             .with_title("zouwu")
+            .with_window_icon(crate::icon::app_icon())
             .with_inner_size(LogicalSize::new(w, h))
             .with_min_inner_size(LogicalSize::new(settings::MIN_SIZE.0, settings::MIN_SIZE.1))
             .with_resizable(true)

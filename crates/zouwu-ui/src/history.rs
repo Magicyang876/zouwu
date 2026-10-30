@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use tiny_skia::Pixmap;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
@@ -41,6 +41,32 @@ const FOOTER_H: f32 = 34.0;
 /// 一次能在窗口里看到的条数。
 pub fn visible_rows(total: usize) -> usize {
     total.min(MAX_ROWS)
+}
+
+/// 滚轮一格滚几行。三行是"看得见变化、又不会一下冲过头"的折中。
+pub const WHEEL_ROWS: f32 = 3.0;
+
+/// 滚轮带来的新滚动偏移（只动视口，不动选中项）。
+///
+/// `lines` 是向上的格数（winit 的约定：正数＝向上滚）。像素级滚动（触摸板）按行高折算。
+/// 夹在 `[0, total - rows]`：滚到底再滚不会越界，也不会出现空白。
+pub fn scroll_from_wheel(scroll: usize, total: usize, rows: usize, lines: f32) -> usize {
+    let max = total.saturating_sub(rows);
+    if max == 0 || lines == 0.0 {
+        return scroll.min(max);
+    }
+    // 小于半行的滑动（触摸板的细微移动）按一格算，否则手感是"滚了没反应"。
+    let step = if lines.abs() < 0.5 {
+        // 向下滚（lines < 0）＝往后看，偏移加一
+        if lines > 0.0 {
+            -1
+        } else {
+            1
+        }
+    } else {
+        (lines.abs() * WHEEL_ROWS).round() as isize * if lines > 0.0 { -1 } else { 1 }
+    };
+    (scroll as isize + step).clamp(0, max as isize) as usize
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -117,6 +143,7 @@ impl HistoryWindow {
         let layout = layout(entries.len());
         let attrs = Window::default_attributes()
             .with_title(&title)
+            .with_window_icon(crate::icon::app_icon())
             .with_inner_size(LogicalSize::new(layout.size.0, layout.size.1))
             .with_resizable(false)
             .with_visible(true);
@@ -357,6 +384,20 @@ impl HistoryWindow {
                 }
                 Vec::new()
             }
+            WindowEvent::MouseWheel { delta, .. } => {
+                // 以前这里啥也没做：一屏放不下时只能靠 ↑↓ 翻，鼠标用户直接卡住。
+                let rows = visible_rows(self.entries.len());
+                let lines = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => *y,
+                    MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / ROW_H,
+                };
+                let next = scroll_from_wheel(self.scroll, self.entries.len(), rows, lines);
+                if next != self.scroll {
+                    self.scroll = next;
+                    self.window.request_redraw();
+                }
+                Vec::new()
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
                     return Vec::new();
@@ -529,6 +570,46 @@ fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_wheel_scrolls_the_viewport_and_stops_at_the_ends() {
+        // 一屏 10 行、共 30 条：可滚区间是 0..=20
+        assert_eq!(
+            scroll_from_wheel(0, 30, 10, -1.0),
+            3,
+            "向下滚一格＝下移三行"
+        );
+        assert_eq!(scroll_from_wheel(3, 30, 10, 1.0), 0, "向上滚回顶部");
+        assert_eq!(scroll_from_wheel(0, 30, 10, 1.0), 0, "到顶不再动");
+        assert_eq!(scroll_from_wheel(20, 30, 10, -1.0), 20, "到底不再动");
+        assert_eq!(
+            scroll_from_wheel(19, 30, 10, -5.0),
+            20,
+            "一次滚很远也只到边界"
+        );
+    }
+
+    #[test]
+    fn the_wheel_does_nothing_when_everything_fits() {
+        for scroll in [0, 5] {
+            assert_eq!(scroll_from_wheel(scroll, 4, 4, -1.0), 0);
+        }
+    }
+
+    #[test]
+    fn tiny_trackpad_slides_still_move_one_row() {
+        // 触摸板一次只推 0.1 行，不能因为取整变成"滚了没反应"
+        assert_eq!(scroll_from_wheel(5, 30, 10, -0.05), 6);
+        assert_eq!(scroll_from_wheel(5, 30, 10, 0.05), 4);
+        assert_eq!(scroll_from_wheel(5, 30, 10, 0.0), 5);
+    }
+
+    #[test]
+    fn pixel_deltas_are_converted_to_rows() {
+        // 触摸板的像素级滚动按行高折算（44px 一行）后走同一套夹取逻辑
+        let lines = -ROW_H * 2.0 / ROW_H;
+        assert_eq!(scroll_from_wheel(0, 30, 10, lines), 6);
+    }
 
     #[test]
     fn window_grows_with_rows_up_to_the_cap() {

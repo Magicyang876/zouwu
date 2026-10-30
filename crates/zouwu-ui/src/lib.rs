@@ -7,6 +7,7 @@
 pub mod app;
 pub mod frame;
 pub mod history;
+pub mod icon;
 pub mod paint;
 pub mod presenter;
 #[cfg(feature = "gpu")]
