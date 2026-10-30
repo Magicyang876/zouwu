@@ -16,8 +16,11 @@ use std::f32::consts::PI;
 
 /// 文字牌高度（逻辑像素）
 pub const CHIP_H: f32 = 20.0;
-/// 文字牌左右单侧内边距
+/// 文字牌右侧内边距（文字末尾到牌右缘）
 pub const CHIP_PAD: f32 = 7.0;
+/// 文字牌左侧内边距：文字起点到牌左缘。比右侧宽一点——两个汉字顶在圆角边上
+/// 像被挤出了牌面（ADR-046 实测），留一截反而显得这块牌子是“装”着这行字的。
+pub const CHIP_TEXT_PAD: f32 = 10.0;
 /// 文字牌之间至少留的空隙
 const CHIP_GAP: f32 = 5.0;
 /// 文字牌最大宽度：再长的名字截断（截断由绘制层做，这里只要几何）
@@ -95,8 +98,8 @@ pub fn layout(input: &BeamInput<'_>, measure: &mut dyn FnMut(&str) -> f32) -> Ve
             base_angle - fan * 0.5 + fan * i as f32 / (n - 1) as f32
         };
         let full = measure(label);
-        let text_width = full.clamp(0.0, CHIP_MAX_W - CHIP_PAD * 2.0);
-        let chip_w = text_width + CHIP_PAD * 2.0;
+        let text_width = full.clamp(0.0, CHIP_MAX_W - CHIP_TEXT_PAD - CHIP_PAD);
+        let chip_w = text_width + CHIP_TEXT_PAD + CHIP_PAD;
 
         // 牌子中心离父球圆心多远：球半径 + 静空 + 条长 + 半个牌子，
         // 这样激光条露在外面的长度是固定的，牌子宽窄只影响牌子自身占多少地方。
@@ -406,7 +409,7 @@ mod tests {
         let huge = "字".repeat(120);
         let beams = layout_at(Point::new(300.0, 88.0), &[huge.as_str()]);
         assert!(
-            beams[0].text_width <= CHIP_MAX_W - CHIP_PAD * 2.0 + 0.01,
+            beams[0].text_width <= CHIP_MAX_W - CHIP_TEXT_PAD - CHIP_PAD + 0.01,
             "超长名字要截断，不然牌子顶出屏幕"
         );
     }

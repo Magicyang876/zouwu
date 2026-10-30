@@ -315,13 +315,20 @@ fn draw_beams(ctx: &mut Ctx<'_>, scene: &Scene<'_>, theme: &Theme) {
         } else {
             theme.glyph
         };
-        let textc = text_color;
-        let label = painter.truncate(beam.label, CHIP_FONT, chip.w - 12.0);
+        // `text_in` 是左对齐（不是居中）：直接把整块牌子给它，字就会顶在圆角边上。
+        let budget =
+            (chip.w - zouwu_core::beam::CHIP_TEXT_PAD - zouwu_core::beam::CHIP_PAD).max(8.0);
+        let label = painter.truncate(beam.label, CHIP_FONT, budget);
         painter.text_in(
             &label,
-            crate::widget::Rect::new(chip.x, chip.y, chip.w, chip.h),
+            crate::widget::Rect::new(
+                chip.x + zouwu_core::beam::CHIP_TEXT_PAD,
+                chip.y,
+                budget,
+                chip.h,
+            ),
             CHIP_FONT,
-            textc,
+            text_color,
             Weight::Regular,
         );
     }
