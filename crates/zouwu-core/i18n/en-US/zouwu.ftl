@@ -64,8 +64,13 @@ settings-breathe = Breathing animation
 settings-theme = Theme
 settings-skin = Skin
 settings-skin-procedural = Procedural (built in)
-settings-ring-radius = Bubble ring radius
+settings-ring-radius = Distance from body
+settings-orbit-start = Angle of the first bubble
 settings-bubble-radius = Bubble size
+settings-max-per-ring = Bubbles per ring
+settings-ring-gap = Outer ring gap
+settings-orbit-start-hint = 0° right, -90° up, 180° left
+settings-ring-gap-hint = How much farther the second ring sits
 settings-float-amplitude = Orbit drift amplitude
 settings-expand-stagger = Bubble stagger
 
@@ -82,6 +87,7 @@ settings-about-config = Config file
 settings-about-log = Log file
 settings-ms = {$ms} ms
 settings-px = {$px} px
+settings-bubbles-count = {$count} bubbles
 
 # ── Settings panel (added in M1) ──────────────────────────
 settings-window-size = Window size

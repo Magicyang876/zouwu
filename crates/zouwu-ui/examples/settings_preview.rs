@@ -93,6 +93,29 @@ fn main() {
     let mut model = Model::new(config.clone(), Vec::new(), Vec::new(), paths);
     model.set_tab(Tab::Bubbles);
     shoot("settings-bubbles.png", 760.0, 600.0, &mut model, 1.0);
+    // 「交互」页：环的几个调参项现在都在面板里了，看一眼有没有被挤扁。
+    let paths = Paths {
+        config: "C:\\Users\\admin\\AppData\\Roaming\\zouwu\\config.toml".into(),
+        log: "C:\\Users\\admin\\AppData\\Roaming\\zouwu\\logs\\zouwu.log".into(),
+    };
+    let mut inter = Model::new(config.clone(), Vec::new(), Vec::new(), paths);
+    inter.set_tab(Tab::Interaction);
+    shoot("settings-interaction.png", 760.0, 600.0, &mut inter, 1.0);
+    shoot(
+        "settings-interaction-min.png",
+        560.0,
+        620.0,
+        &mut inter,
+        1.25,
+    );
+    inter.scroll = 100000.0;
+    shoot(
+        "settings-interaction-ring.png",
+        760.0,
+        600.0,
+        &mut inter,
+        1.0,
+    );
     // 最小尺寸 + 125% DPI：检查控件是否被挤扁、文字是否错位。
     shoot("settings-bubbles-min.png", 560.0, 620.0, &mut model, 1.25);
 

@@ -138,7 +138,10 @@ pub enum Field {
     BuddyRadius,
     Breathe,
     RingRadius,
+    OrbitStart,
     BubbleRadius,
+    MaxPerRing,
+    RingGap,
     FloatAmplitude,
     ExpandStagger,
     Theme,
@@ -159,6 +162,10 @@ enum Unit {
     Px,
     Percent,
     Count,
+    /// 角度：设置面板里直接用 `°`，配置文件里存的是度数（不是弧度）。
+    Deg,
+    /// 气泡个数：单独一个单位，因为「8 条」读起来像剪贴板条数。
+    Bubbles,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -189,7 +196,10 @@ impl Field {
             Field::BuddyRadius => "settings.buddy-radius",
             Field::Breathe => "settings.breathe",
             Field::RingRadius => "settings.ring-radius",
+            Field::OrbitStart => "settings.orbit-start",
             Field::BubbleRadius => "settings.bubble-radius",
+            Field::MaxPerRing => "settings.max-per-ring",
+            Field::RingGap => "settings.ring-gap",
             Field::FloatAmplitude => "settings.float-amplitude",
             Field::ExpandStagger => "settings.expand-stagger",
             Field::Theme => "settings.theme",
@@ -277,6 +287,24 @@ impl Field {
                 step: 2,
                 unit: Unit::Px,
             },
+            Field::OrbitStart => NumSpec {
+                min: -180,
+                max: 180,
+                step: 15,
+                unit: Unit::Deg,
+            },
+            Field::MaxPerRing => NumSpec {
+                min: 3,
+                max: 16,
+                step: 1,
+                unit: Unit::Bubbles,
+            },
+            Field::RingGap => NumSpec {
+                min: 0,
+                max: 200,
+                step: 4,
+                unit: Unit::Px,
+            },
             Field::FloatAmplitude => NumSpec {
                 min: 0,
                 max: 10,
@@ -308,7 +336,10 @@ impl Field {
             Field::HitTolerance => (cfg.interaction.hit_tolerance * 100.0).round() as i64,
             Field::BuddyRadius => cfg.buddy.radius.round() as i64,
             Field::RingRadius => cfg.ring.radius.round() as i64,
+            Field::OrbitStart => cfg.ring.orbit_start_deg.round() as i64,
             Field::BubbleRadius => cfg.ring.bubble_radius.round() as i64,
+            Field::MaxPerRing => cfg.ring.max_per_ring as i64,
+            Field::RingGap => cfg.ring.ring_gap.round() as i64,
             Field::FloatAmplitude => cfg.ring.float_amplitude.round() as i64,
             Field::ExpandStagger => cfg.ring.expand_stagger_ms as i64,
             _ => return None,
@@ -331,7 +362,10 @@ impl Field {
             Field::HitTolerance => cfg.interaction.hit_tolerance = v as f32 / 100.0,
             Field::BuddyRadius => cfg.buddy.radius = v as f32,
             Field::RingRadius => cfg.ring.radius = v as f32,
+            Field::OrbitStart => cfg.ring.orbit_start_deg = v as f32,
             Field::BubbleRadius => cfg.ring.bubble_radius = v as f32,
+            Field::MaxPerRing => cfg.ring.max_per_ring = v.max(1) as usize,
+            Field::RingGap => cfg.ring.ring_gap = v.max(0) as f32,
             Field::FloatAmplitude => cfg.ring.float_amplitude = v as f32,
             Field::ExpandStagger => cfg.ring.expand_stagger_ms = v.max(0) as u64,
             _ => {}
@@ -992,7 +1026,18 @@ pub fn build_rows(model: &Model) -> Vec<Row> {
             rows.push(toggle_row(model, Field::Breathe));
             rows.push(Row::section(i18n.t("settings.section.ring")));
             rows.push(step_row(model, Field::RingRadius));
+            rows.push(step_row_hint(
+                model,
+                Field::OrbitStart,
+                "settings.orbit-start.hint",
+            ));
             rows.push(step_row(model, Field::BubbleRadius));
+            rows.push(step_row(model, Field::MaxPerRing));
+            rows.push(step_row_hint(
+                model,
+                Field::RingGap,
+                "settings.ring-gap.hint",
+            ));
             rows.push(step_row(model, Field::FloatAmplitude));
             rows.push(step_row(model, Field::ExpandStagger));
         }
@@ -1310,6 +1355,13 @@ fn step_row(model: &Model, field: Field) -> Row {
     }
 }
 
+/// 同上，但多一行说明（角度、外圈这类“光看名字不知道填多少”的项用）。
+fn step_row_hint(model: &Model, field: Field, hint_key: &str) -> Row {
+    let mut row = step_row(model, field);
+    row.hint = Some(model.i18n.t(hint_key));
+    row
+}
+
 /// 数值行的控件部分（带提示的行自己拼 `Row`，但仍要用同一套控件）。
 fn step_control(model: &Model, field: Field) -> Control {
     let spec = field.num_spec().expect("step field needs a spec");
@@ -1342,6 +1394,8 @@ fn format_value(i18n: &I18n, value: i64, unit: Unit) -> String {
         Unit::Px => i18n.t_args("settings.px", &[("px", &value.to_string())]),
         Unit::Percent => format!("{value}%"),
         Unit::Count => i18n.t_args("settings.count", &[("count", &value.to_string())]),
+        Unit::Deg => format!("{value}\u{b0}"),
+        Unit::Bubbles => i18n.t_args("settings.bubbles.count", &[("count", &value.to_string())]),
     }
 }
 
@@ -2197,9 +2251,13 @@ fn changed(model: &mut Model, field: Field) -> Vec<ChangeKind> {
         Field::AltDragEnabled => kinds.push(ChangeKind::AltDrag),
         Field::WindowSize => kinds.push(ChangeKind::WindowSize),
         Field::BuddyRadius | Field::Breathe => kinds.push(ChangeKind::Buddy),
-        Field::RingRadius | Field::BubbleRadius | Field::FloatAmplitude | Field::ExpandStagger => {
-            kinds.push(ChangeKind::Ring)
-        }
+        Field::RingRadius
+        | Field::OrbitStart
+        | Field::BubbleRadius
+        | Field::MaxPerRing
+        | Field::RingGap
+        | Field::FloatAmplitude
+        | Field::ExpandStagger => kinds.push(ChangeKind::Ring),
         _ => kinds.push(ChangeKind::Interaction),
     }
     kinds
@@ -3686,6 +3744,53 @@ mod tests {
         ));
         assert_eq!(activate(&mut m, &l, index), vec![ChangeKind::EyeCare]);
         assert!(!m.config.eye_care.enabled);
+    }
+
+    #[test]
+    fn the_ring_geometry_knobs_are_in_the_panel() {
+        let mut m = model();
+        m.set_tab(Tab::Interaction);
+        let l = layout(&m, 760.0, 600.0);
+        for field in [
+            Field::RingRadius,
+            Field::OrbitStart,
+            Field::MaxPerRing,
+            Field::RingGap,
+        ] {
+            let index = l
+                .rows
+                .iter()
+                .position(|(row, _)| row.field == Some(field))
+                .unwrap_or_else(|| panic!("{field:?} should have a row"));
+            assert!(matches!(l.rows[index].0.control, Control::Step { .. }));
+            let before = field.num(&m.config).expect("number field");
+            let kinds = step(&mut m, field, 1);
+            assert_eq!(kinds, vec![ChangeKind::Ring], "{field:?}");
+            let step_by = field.num_spec().expect("spec").step;
+            assert_eq!(field.num(&m.config), Some(before + step_by), "{field:?}");
+        }
+        // 落点检查：确认真的写到了 `[ring]` 那一段，而不是写回了交互参数。
+        assert_eq!(m.config.ring.orbit_start_deg, -75.0);
+        assert_eq!(m.config.ring.max_per_ring, 9);
+        assert_eq!(m.config.ring.ring_gap, 74.0);
+    }
+
+    #[test]
+    fn the_ring_knobs_stop_at_their_limits() {
+        let mut m = model();
+        for field in [Field::OrbitStart, Field::MaxPerRing, Field::RingGap] {
+            let spec = field.num_spec().expect("spec");
+            field.set_num(&mut m.config, spec.max);
+            assert!(step(&mut m, field, 1).is_empty(), "{field:?} at max");
+            assert_eq!(field.num(&m.config), Some(spec.max));
+            field.set_num(&mut m.config, spec.min);
+            assert!(step(&mut m, field, -1).is_empty(), "{field:?} at min");
+            assert_eq!(field.num(&m.config), Some(spec.min));
+        }
+        // 角度能绕过 0：-180° 与 +180° 是同一个方向，不必在面板上手动“绕一圈”。
+        Field::OrbitStart.set_num(&mut m.config, 0);
+        step(&mut m, Field::OrbitStart, -1);
+        assert_eq!(m.config.ring.orbit_start_deg, -15.0);
     }
 
     #[test]

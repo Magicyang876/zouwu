@@ -64,8 +64,13 @@ settings-breathe = 呼吸动画
 settings-theme = 主题
 settings-skin = 皮肤
 settings-skin-procedural = 代码绘制（内置）
-settings-ring-radius = 气泡环半径
+settings-ring-radius = 气泡环离主体的距离
+settings-orbit-start = 第一颗球的角度
 settings-bubble-radius = 气泡大小
+settings-max-per-ring = 一圈最多几颗
+settings-ring-gap = 外圈间距
+settings-orbit-start-hint = 0° 正右，-90° 正上方，180° 正左
+settings-ring-gap-hint = 第二圈比第一圈再远多少
 settings-float-amplitude = 轨道浮动幅度
 settings-expand-stagger = 气泡出场错峰
 
@@ -82,6 +87,7 @@ settings-about-config = 配置文件
 settings-about-log = 日志文件
 settings-ms = {$ms} 毫秒
 settings-px = {$px} 像素
+settings-bubbles-count = {$count} 颗
 
 # ── 设置面板（M1 新增） ────────────────────────────────────
 settings-window-size = 窗口大小
