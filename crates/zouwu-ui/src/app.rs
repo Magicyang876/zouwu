@@ -2085,9 +2085,20 @@ impl App {
             self.i18n.t("history.footer"),
             self.i18n.t("history.footer-empty"),
             self.i18n.t("history.empty"),
+            self.i18n.t("history.search"),
+            self.i18n.t("history.no-match"),
         );
         match window {
-            Ok(window) => {
+            Ok(mut window) => {
+                // 调试/截图入口：带一个初始搜索词打开（人肉验筛选时不用手打）。
+                if let Ok(query) = std::env::var("ZOUWU_HISTORY_QUERY") {
+                    window.set_query(&query);
+                    log::debug!(
+                        "clipboard: history query {query:?} -> {} of {} entries",
+                        window.visible_len(),
+                        self.history.len()
+                    );
+                }
                 self.history_window = Some(window);
                 log::info!(
                     "clipboard: history window opened ({} entries)",

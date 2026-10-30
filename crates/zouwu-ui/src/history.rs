@@ -11,17 +11,20 @@
 //! | ↑ / ↓ | 移动选中 |
 //! | Home / End | 跳到首/尾 |
 //! | PageUp / PageDown | 翻一屏 |
+//! | 直接打字 | 搜索（空格分隔多个关键词，全部命中才算匹配） |
+//! | Backspace | 删掉搜索的最后一个字符 |
+//! | Ctrl+V | 把剪贴板里的第一行粘进搜索框 |
 //! | Enter | 复制选中并关闭 |
 //! | Delete | 从历史里删掉这一条 |
-//! | Esc | 关闭 |
+//! | Esc | 先清空搜索；搜索为空时才关闭 |
 
 use std::sync::Arc;
 
 use tiny_skia::Pixmap;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
 use zouwu_core::history::Entry;
@@ -36,7 +39,16 @@ pub const MAX_ROWS: usize = 10;
 pub const ROW_H: f32 = 44.0;
 const PAD: f32 = 16.0;
 const HEADER_H: f32 = 8.0;
+/// 搜索框那一条占的高度（含与列表之间的间隙）。
+const SEARCH_H: f32 = 36.0;
+/// 搜索框本体的高度（比 `SEARCH_H` 矮，留出间隙）。
+const SEARCH_BOX_H: f32 = 28.0;
 const FOOTER_H: f32 = 34.0;
+
+/// 列表顶边：头部 + 搜索框。
+fn list_top() -> f32 {
+    HEADER_H + SEARCH_H
+}
 
 /// 一次能在窗口里看到的条数。
 pub fn visible_rows(total: usize) -> usize {
@@ -45,6 +57,61 @@ pub fn visible_rows(total: usize) -> usize {
 
 /// 滚轮一格滚几行。三行是"看得见变化、又不会一下冲过头"的折中。
 pub const WHEEL_ROWS: f32 = 3.0;
+
+/// 按键对搜索框的影响。抽成纯数据是为了能单测：窗口那一层的副作用（重排/重绘）
+/// 没法在无头环境里验，但“按 Esc 到底是清搜索还是关窗”这种事必须验。
+#[derive(Clone, Debug, PartialEq)]
+pub enum SearchEdit {
+    /// 不归搜索框管，让列表处理（↑↓/Enter/Delete…）。
+    Ignore,
+    /// 清空搜索词。
+    Clear,
+    /// 删掉最后一个字符。
+    Backspace,
+    /// 追加这些字符。
+    Append(String),
+    /// 把剪贴板第一行粘进来。
+    Paste,
+}
+
+/// 这个按键在搜索框里应该干什么。
+///
+/// `text` 是 winit 给出的可打印字符（受布局/输入法影响，比自己映射键位可靠）。
+pub fn search_edit(key: &Key, text: Option<&str>, control: bool) -> SearchEdit {
+    if control {
+        if let Key::Character(ch) = key {
+            if ch.eq_ignore_ascii_case("v") {
+                return SearchEdit::Paste;
+            }
+        }
+        // Ctrl+A、Ctrl+C 之类交给别人（目前没有别的处理器，就是“没反应”）。
+        return SearchEdit::Ignore;
+    }
+    match key {
+        // Esc 先交给搜索框（清空）；空的时候外部才关窗。
+        Key::Named(NamedKey::Escape) => SearchEdit::Clear,
+        Key::Named(NamedKey::Backspace) => SearchEdit::Backspace,
+        _ => {
+            let cleaned: String = text
+                .unwrap_or("")
+                .chars()
+                .filter(|c| !c.is_control())
+                .collect();
+            if cleaned.is_empty() {
+                SearchEdit::Ignore
+            } else {
+                SearchEdit::Append(cleaned)
+            }
+        }
+    }
+}
+
+/// 选中行 → `entries` 下标。
+///
+/// 搜索把列表缩短后"第 3 行"和"`entries[3]`"就不是同一个了，所以两边都得走这里。
+pub fn selected_entry(visible: &[usize], selected: usize) -> Option<usize> {
+    visible.get(selected).copied()
+}
 
 /// 滚轮带来的新滚动偏移（只动视口，不动选中项）。
 ///
@@ -73,6 +140,8 @@ pub fn scroll_from_wheel(scroll: usize, total: usize, rows: usize, lines: f32) -
 pub struct Layout {
     pub size: (f32, f32),
     pub header: Rect,
+    /// 搜索框。
+    pub search: Rect,
     pub list: Rect,
     pub footer: Rect,
     pub rows: Vec<Rect>,
@@ -81,16 +150,57 @@ pub struct Layout {
 pub fn layout(total: usize) -> Layout {
     let rows_n = visible_rows(total);
     let list_h = rows_n.max(1) as f32 * ROW_H;
-    let h = HEADER_H + list_h + FOOTER_H;
+    let top = list_top();
+    let h = top + list_h + FOOTER_H;
     Layout {
         size: (WIDTH, h),
         header: Rect::new(PAD, 0.0, WIDTH - PAD * 2.0, HEADER_H),
-        list: Rect::new(PAD, HEADER_H, WIDTH - PAD * 2.0, list_h),
-        footer: Rect::new(PAD, HEADER_H + list_h, WIDTH - PAD * 2.0, FOOTER_H),
+        search: Rect::new(PAD, HEADER_H + 2.0, WIDTH - PAD * 2.0, SEARCH_BOX_H),
+        list: Rect::new(PAD, top, WIDTH - PAD * 2.0, list_h),
+        footer: Rect::new(PAD, top + list_h, WIDTH - PAD * 2.0, FOOTER_H),
         rows: (0..rows_n)
-            .map(|i| Rect::new(PAD, HEADER_H + i as f32 * ROW_H, WIDTH - PAD * 2.0, ROW_H))
+            .map(|i| Rect::new(PAD, top + i as f32 * ROW_H, WIDTH - PAD * 2.0, ROW_H))
             .collect(),
     }
+}
+
+/// 搜索框右侧那个「×」的点击范围（给定搜索框的矩形）。
+pub fn clear_button_in(search: Rect) -> Rect {
+    Rect::new(search.right() - 26.0, search.y, 22.0, search.h)
+}
+
+/// 搜索框右侧那个「×」的点击范围。
+pub fn clear_button(layout: &Layout) -> Rect {
+    clear_button_in(layout.search)
+}
+
+/// 查询拆成关键词（空格分隔，统一小写）。
+pub fn query_terms(query: &str) -> Vec<String> {
+    query.split_whitespace().map(|t| t.to_lowercase()).collect()
+}
+
+/// 一条记录是否命中：**每个**关键词都是大小写不敏感的子串。
+///
+/// 多关键词取"与"而不是"或"：搜 `npm build` 的人不想要只提到 build 的 100 条。
+pub fn matches_query(text: &str, terms: &[String]) -> bool {
+    if terms.is_empty() {
+        return true;
+    }
+    let lower = text.to_lowercase();
+    terms.iter().all(|term| lower.contains(term.as_str()))
+}
+
+/// 命中的记录在 `entries` 里的下标，保持原顺序（筛选不改变"新→旧"）。
+pub fn filter(entries: &[Entry], terms: &[String]) -> Vec<usize> {
+    if terms.is_empty() {
+        return (0..entries.len()).collect();
+    }
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| matches_query(&entry.text, terms))
+        .map(|(index, _)| index)
+        .collect()
 }
 
 /// 指针落在第几行（含滚动偏移）。
@@ -117,10 +227,17 @@ pub struct HistoryWindow {
     pixmap: Option<Pixmap>,
     theme: Theme,
     entries: Vec<Entry>,
-    /// 当前选中项在 `entries` 里的下标（不是屏幕行）。
+    /// 当前选中项在**筛后可视列表**里的下标（不是 `entries` 下标，也不是屏幕行）。
+    /// 映射回 `entries` 一律走 `visible()`。
     selected: usize,
     scroll: usize,
     hover: Option<usize>,
+    /// 搜索词（空格分隔多关键词）。空串＝不筛。
+    query: String,
+    placeholder: String,
+    no_match_text: String,
+    cursor: Point,
+    modifiers: ModifiersState,
     layout: Layout,
     footer_help: String,
     footer_empty: String,
@@ -139,6 +256,8 @@ impl HistoryWindow {
         footer_help: String,
         footer_empty: String,
         empty_text: String,
+        placeholder: String,
+        no_match_text: String,
     ) -> Result<Self, String> {
         let layout = layout(entries.len());
         let attrs = Window::default_attributes()
@@ -157,6 +276,8 @@ impl HistoryWindow {
         crate::frame::apply(&window, &theme);
         crate::frame::life("history", "created", &window);
         window.focus_window();
+        // 搜索要能输中文：开会话 IME，候选窗随后由 `update_ime_area()` 贴到搜索框。
+        window.set_ime_allowed(true);
         let this = Self {
             window,
             presenter,
@@ -166,12 +287,18 @@ impl HistoryWindow {
             selected: 0,
             scroll: 0,
             hover: None,
+            query: String::new(),
+            placeholder,
+            no_match_text,
+            cursor: Point::new(0.0, 0.0),
+            modifiers: ModifiersState::empty(),
             layout,
             footer_help,
             footer_empty,
             empty_text,
             frame_dark: false,
         };
+        this.update_ime_area();
         this.window.request_redraw();
         Ok(this)
     }
@@ -209,32 +336,52 @@ impl HistoryWindow {
     /// **不要改成“关掉就销毁”**：析构一个当时正持有焦点的窗口会让
     /// USER32 同步去通知另一个进程的窗口，那边慢一点整进程就冻住了。
     pub fn show(&mut self, entries: Vec<Entry>) {
+        // 每次打开都是新的一轮：带着上次的搜索词打开会让人以为“记录都没了”。
+        self.query.clear();
         self.refresh(entries);
+        self.selected = 0;
+        self.scroll = 0;
         self.window.set_visible(true);
         self.window.focus_window();
         self.window.request_redraw();
     }
 
+    /// 设置搜索词（测试/调试入口：`ZOUWU_HISTORY_QUERY`）。
+    pub fn set_query(&mut self, query: &str) {
+        if self.query == query {
+            return;
+        }
+        self.query.clear();
+        self.query.push_str(query);
+        self.after_query_change();
+    }
+
+    /// 当前命中的条数（给交互/调试用）。
+    pub fn visible_len(&self) -> usize {
+        self.visible().len()
+    }
+
     fn clamp_selection(&mut self) {
-        if self.entries.is_empty() {
+        let total = self.visible().len();
+        if total == 0 {
             self.selected = 0;
             self.scroll = 0;
             return;
         }
-        self.selected = self.selected.min(self.entries.len() - 1);
+        self.selected = self.selected.min(total - 1);
         // 选中项必须可见：滚动偏移跟着选中走，但不要越过两端。
-        let rows = visible_rows(self.entries.len());
+        let rows = visible_rows(total);
         if self.selected < self.scroll {
             self.scroll = self.selected;
         } else if self.selected >= self.scroll + rows {
             self.scroll = self.selected + 1 - rows;
         }
-        let max_scroll = self.entries.len().saturating_sub(rows);
+        let max_scroll = total.saturating_sub(rows);
         self.scroll = self.scroll.min(max_scroll);
     }
 
     fn rebuild_layout(&mut self) {
-        let next = layout(self.entries.len());
+        let next = layout(self.visible().len());
         if (next.size.0 - self.layout.size.0).abs() > 0.5
             || (next.size.1 - self.layout.size.1).abs() > 0.5
         {
@@ -247,10 +394,11 @@ impl HistoryWindow {
     }
 
     fn move_by(&mut self, delta: isize) {
-        if self.entries.is_empty() {
+        let total = self.visible().len();
+        if total == 0 {
             return;
         }
-        let last = self.entries.len() as isize - 1;
+        let last = total as isize - 1;
         let next = (self.selected as isize + delta).clamp(0, last);
         self.selected = next as usize;
         self.clamp_selection();
@@ -258,21 +406,106 @@ impl HistoryWindow {
     }
 
     fn jump(&mut self, to_end: bool) {
-        if self.entries.is_empty() {
+        let total = self.visible().len();
+        if total == 0 {
             return;
         }
-        self.selected = if to_end { self.entries.len() - 1 } else { 0 };
+        self.selected = if to_end { total - 1 } else { 0 };
         self.clamp_selection();
         self.window.request_redraw();
     }
 
     fn page(&mut self, down: bool) {
-        let step = visible_rows(self.entries.len()).max(1) as isize;
+        let step = visible_rows(self.visible().len()).max(1) as isize;
         self.move_by(if down { step } else { -step });
     }
 
+    /// 命中的记录：搜索词筛过后、`entries` 里的下标（新→旧）。
+    fn visible(&self) -> Vec<usize> {
+        filter(&self.entries, &query_terms(&self.query))
+    }
+
+    /// 搜索词变了：选中回到第一条，行数变了就重排，并让输入法候选窗跟过来。
+    fn after_query_change(&mut self) {
+        self.selected = 0;
+        self.scroll = 0;
+        self.rebuild_layout();
+        self.update_ime_area();
+        self.window.request_redraw();
+    }
+
+    fn clear_query(&mut self) {
+        if self.query.is_empty() {
+            return;
+        }
+        self.query.clear();
+        self.after_query_change();
+    }
+
+    /// 把输入法候选窗贴到搜索框上（不贴的话候选窗会飘在屏幕左上角）。
+    fn update_ime_area(&self) {
+        let scale = self.window.scale_factor() as f32;
+        let box_ = self.layout.search;
+        self.window.set_ime_cursor_area(
+            winit::dpi::PhysicalPosition::new(
+                ((box_.x + 26.0) * scale) as i32,
+                ((box_.y + box_.h) * scale) as i32,
+            ),
+            winit::dpi::PhysicalSize::new(1, (box_.h * scale) as u32),
+        );
+    }
+
+    /// 搜索框先吃键。返回 true ＝ 这个键已被它吃掉。
+    ///
+    /// 故意没有"先点一下输入框才能打字"这层状态：这个窗口的用途就是“翻找”，
+    /// 打开就能直接敲字最省事，而 ↑↓/Enter/Delete 仍然管列表。
+    fn search_key(&mut self, event: &KeyEvent) -> bool {
+        match search_edit(
+            &event.logical_key,
+            event.text.as_deref(),
+            self.modifiers.control_key(),
+        ) {
+            SearchEdit::Ignore => false,
+            SearchEdit::Clear => {
+                // 第一次 Esc 只清搜索，第二次才关窗：误触不该直接关掉。
+                if self.query.is_empty() {
+                    false
+                } else {
+                    self.clear_query();
+                    true
+                }
+            }
+            SearchEdit::Backspace => {
+                if self.query.pop().is_some() {
+                    self.after_query_change();
+                }
+                true
+            }
+            SearchEdit::Append(text) => {
+                self.query.push_str(&text);
+                self.after_query_change();
+                true
+            }
+            SearchEdit::Paste => {
+                // 把剪贴板的第一行粘进来：整个多行文本塞进单行搜索框没意义。
+                if let Some(text) = zouwu_platform::clipboard::get_text() {
+                    let line = text.lines().next().unwrap_or("").trim().to_string();
+                    if !line.is_empty() {
+                        self.query.push_str(&line);
+                        self.after_query_change();
+                    }
+                }
+                true
+            }
+        }
+    }
+
     fn copy_selected(&mut self) -> Vec<Outcome> {
-        let Some(entry) = self.entries.get(self.selected) else {
+        let visible = self.visible();
+        let Some(index) = selected_entry(&visible, self.selected) else {
+            return Vec::new();
+        };
+        let Some(entry) = self.entries.get(index) else {
             return Vec::new();
         };
         if zouwu_platform::clipboard::set_text(&entry.text) {
@@ -298,25 +531,36 @@ impl HistoryWindow {
             self.pixmap = Pixmap::new(size.width, size.height);
             self.presenter.resize(size.width.max(1), size.height.max(1));
         }
-        let Some(pixmap) = self.pixmap.as_mut() else {
-            return;
-        };
+        // 先把“筛后列表”算好：拿 `pixmap` 的可变借用后再读 `self` 会借不了。
+        let visible = self.visible();
         let footer = if self.entries.is_empty() {
             self.footer_empty.as_str()
         } else {
             self.footer_help.as_str()
         };
+        // "空"分两种：历史本来就没东西，还是搜索没命中——两句话差别很大。
+        let empty = if !self.entries.is_empty() && !self.query.is_empty() {
+            self.no_match_text.as_str()
+        } else {
+            self.empty_text.as_str()
+        };
+        let Some(pixmap) = self.pixmap.as_mut() else {
+            return;
+        };
         draw(
             pixmap,
             &self.entries,
+            &visible,
             &self.layout,
             &self.theme,
             View {
                 selected: self.selected,
                 scroll: self.scroll,
                 hover: self.hover,
+                query: &self.query,
+                placeholder: &self.placeholder,
                 footer,
-                empty: &self.empty_text,
+                empty,
             },
         );
 
@@ -352,8 +596,9 @@ impl HistoryWindow {
                 let scale = self.window.scale_factor() as f32;
                 let scale = if scale > 0.01 { scale } else { 1.0 };
                 let p = Point::new(position.x as f32 / scale, position.y as f32 / scale);
-                let hover =
-                    row_at(&self.layout, p, self.scroll).filter(|&i| i < self.entries.len());
+                self.cursor = p;
+                let total = self.visible().len();
+                let hover = row_at(&self.layout, p, self.scroll).filter(|&i| i < total);
                 if hover != self.hover {
                     self.hover = hover;
                     self.window.set_cursor(if hover.is_some() {
@@ -376,6 +621,11 @@ impl HistoryWindow {
                 button: MouseButton::Left,
                 ..
             } => {
+                // 点「×」先于选行：那个位置在列表上方，两者不重叠，但读起来清楚。
+                if !self.query.is_empty() && clear_button(&self.layout).contains(self.cursor) {
+                    self.clear_query();
+                    return Vec::new();
+                }
                 // 点哪条就选哪条并直接复制：鼠标用户不需要"先选中再回车"两下。
                 if let Some(index) = self.hover {
                     self.selected = index;
@@ -386,20 +636,38 @@ impl HistoryWindow {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 // 以前这里啥也没做：一屏放不下时只能靠 ↑↓ 翻，鼠标用户直接卡住。
-                let rows = visible_rows(self.entries.len());
+                let total = self.visible().len();
+                let rows = visible_rows(total);
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => *y,
                     MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / ROW_H,
                 };
-                let next = scroll_from_wheel(self.scroll, self.entries.len(), rows, lines);
+                let next = scroll_from_wheel(self.scroll, total, rows, lines);
                 if next != self.scroll {
                     self.scroll = next;
                     self.window.request_redraw();
                 }
                 Vec::new()
             }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
+                Vec::new()
+            }
+            WindowEvent::Ime(Ime::Commit(text)) => {
+                // 中文/日文输入法提交的整串字符走这里（走不了按键字符）。
+                let cleaned: String = text.chars().filter(|c| !c.is_control()).collect();
+                if !cleaned.is_empty() {
+                    self.query.push_str(&cleaned);
+                    self.after_query_change();
+                }
+                Vec::new()
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
+                    return Vec::new();
+                }
+                // 搜索框先吃键（打字/退格/Ctrl+V），再轮到列表。
+                if self.search_key(event) {
                     return Vec::new();
                 }
                 match &event.logical_key {
@@ -430,11 +698,11 @@ impl HistoryWindow {
                         Vec::new()
                     }
                     Key::Named(NamedKey::Delete) => {
-                        if self.entries.is_empty() {
-                            Vec::new()
-                        } else {
-                            // 删除由宿主改数据再回填：窗口不掌握唯一真相。
-                            vec![Outcome::Delete(self.selected)]
+                        // 注意报出去的是 **`entries` 下标**：删数据的是宿主，
+                        // 给它一个筛后行号会删错条目。
+                        match selected_entry(&self.visible(), self.selected) {
+                            Some(index) => vec![Outcome::Delete(index)],
+                            None => Vec::new(),
                         }
                     }
                     _ => Vec::new(),
@@ -457,13 +725,19 @@ pub struct View<'a> {
     pub selected: usize,
     pub scroll: usize,
     pub hover: Option<usize>,
+    /// 搜索词（空串＝没在搜）。
+    pub query: &'a str,
+    /// 搜索框为空时显示的提示语。
+    pub placeholder: &'a str,
     pub footer: &'a str,
     pub empty: &'a str,
 }
 
+/// `visible` 是筛后的 `entries` 下标序列：画的是它，选中/滚动也是对它的下标。
 pub fn draw(
     pixmap: &mut Pixmap,
     entries: &[Entry],
+    visible: &[usize],
     layout: &Layout,
     theme: &Theme,
     view: View<'_>,
@@ -477,18 +751,24 @@ pub fn draw(
         pal.bg,
     );
 
+    draw_search(&mut p, layout.search, &view, &pal);
+
     // 列表
     p.set_clip(layout.list);
-    if entries.is_empty() {
+    if visible.is_empty() {
         p.text_in(view.empty, layout.list, 12.0, pal.dim, Weight::Regular);
     }
     for (row, rect) in layout.rows.iter().enumerate() {
-        let index = row + view.scroll;
+        // 行号（含滚动）与条目下标是两个名字空间：搜索后“第 0 行”往往是 `entries[3]`。
+        let row_index = row + view.scroll;
+        let Some(index) = visible.get(row_index).copied() else {
+            break;
+        };
         let Some(entry) = entries.get(index) else {
             break;
         };
-        let selected = index == view.selected;
-        let hovered = view.hover == Some(index);
+        let selected = row_index == view.selected;
+        let hovered = view.hover == Some(row_index);
         if selected {
             p.fill(*rect, 7.0, pal.accent.with_alpha(0.18));
         } else if hovered {
@@ -524,6 +804,58 @@ pub fn draw(
     p.clear_clip();
 
     p.text_in(view.footer, layout.footer, 11.0, pal.dim, Weight::Regular);
+}
+
+/// 搜索框：左侧放大镜、提示语/输入内容、右侧「×」。
+fn draw_search(p: &mut Painter<'_>, rect: Rect, view: &View<'_>, pal: &Palette) {
+    let active = !view.query.is_empty();
+    p.fill(rect, 7.0, pal.raised);
+    p.stroke(
+        rect,
+        7.0,
+        1.0,
+        if active {
+            pal.accent.with_alpha(0.75)
+        } else {
+            pal.dim.with_alpha(0.35)
+        },
+    );
+
+    // 放大镜：两个圆 + 一根斜柄，比一个文字符号在任何字体下都稳。
+    let cy = rect.center().y;
+    p.circle(
+        Point::new(rect.x + 15.0, cy - 1.0),
+        4.2,
+        pal.dim.with_alpha(0.75),
+    );
+    p.circle(Point::new(rect.x + 15.0, cy - 1.0), 2.4, pal.raised);
+    p.line(
+        rect.x + 18.0,
+        cy + 2.0,
+        rect.x + 21.0,
+        cy + 5.0,
+        pal.dim.with_alpha(0.75),
+        1.4,
+    );
+
+    let text_x = rect.x + 26.0;
+    // 右侧留出「×」的位置（内容为空时不留，腾出宽度）。
+    let right_pad = if active { 26.0 } else { 10.0 };
+    let area = Rect::new(
+        text_x,
+        rect.y,
+        (rect.right() - right_pad - text_x).max(10.0),
+        rect.h,
+    );
+    if active {
+        // 从左边截：搜索时人要看的是最后一个词，所以尾巴永远可见。
+        let shown = p.truncate_left(view.query, 12.5, area.w);
+        p.text_in(&shown, area, 12.5, pal.text, Weight::Regular);
+        let clear = clear_button_in(rect);
+        p.text_center("×", clear, 14.0, pal.dim, Weight::Regular);
+    } else {
+        p.text_in(view.placeholder, area, 12.5, pal.dim, Weight::Regular);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -628,11 +960,163 @@ mod tests {
     fn rows_tile_the_list_without_gaps() {
         let l = layout(5);
         for (i, row) in l.rows.iter().enumerate() {
-            assert!((row.y - (HEADER_H + i as f32 * ROW_H)).abs() < 0.01);
+            assert!((row.y - (list_top() + i as f32 * ROW_H)).abs() < 0.01);
             assert!((row.h - ROW_H).abs() < 0.01);
         }
         let last = l.rows.last().unwrap();
         assert!((last.bottom() - l.list.bottom()).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_search_box_sits_above_the_list() {
+        let l = layout(5);
+        assert!(
+            l.search.bottom() <= l.list.y + 0.01,
+            "search must not overlap the rows"
+        );
+        assert!(l.search.y >= l.header.bottom() - 0.01);
+        assert!(l.search.h < SEARCH_H, "box is shorter than its slot");
+        // 零条命中时也要留出搜索框的高度（空结果也得能继续改关键词）。
+        assert!(l.size.1 >= list_top() + FOOTER_H + ROW_H);
+    }
+
+    #[test]
+    fn the_clear_button_lives_inside_the_search_box() {
+        let l = layout(3);
+        let clear = clear_button(&l);
+        assert!(l.search.contains(clear.center()));
+        assert!((clear.right() - l.search.right()).abs() < 8.0);
+    }
+
+    fn sample_entries() -> Vec<Entry> {
+        [
+            "cargo test --workspace",
+            "git commit -m search",
+            "有一个中文字符串",
+            "C:\\work\\tools\\run.exe",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, text)| Entry {
+            text: (*text).to_string(),
+            copied_at: 1000 + i as u64,
+        })
+        .collect()
+    }
+
+    #[test]
+    fn matching_is_case_insensitive_and_substring() {
+        let terms = query_terms("CARGO");
+        assert!(matches_query("cargo test", &terms));
+        assert!(matches_query("run CARGO now", &terms));
+        assert!(!matches_query("carg", &terms));
+        // 空查询＝全匹配（连纯空白也算空）
+        assert!(matches_query("anything", &query_terms("   ")));
+    }
+
+    #[test]
+    fn every_term_must_match() {
+        let terms = query_terms("cargo test");
+        assert!(matches_query("cargo test --workspace", &terms));
+        assert!(!matches_query("cargo build", &terms), "缺一个词就不算命中");
+        assert!(!matches_query("test only", &terms));
+    }
+
+    #[test]
+    fn filtering_keeps_the_newest_first_order() {
+        let entries = sample_entries();
+        assert_eq!(filter(&entries, &query_terms("")), vec![0, 1, 2, 3]);
+        assert_eq!(filter(&entries, &query_terms("cargo")), vec![0]);
+        assert_eq!(filter(&entries, &query_terms("搜索")), Vec::<usize>::new());
+        assert_eq!(filter(&entries, &query_terms("中文")), vec![2]);
+        assert_eq!(filter(&entries, &query_terms("run")), vec![3]);
+        assert_eq!(filter(&entries, &query_terms("nope")), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn a_search_hit_maps_back_to_the_entry_index() {
+        // 这是最容易错的地方：筛选后第 0 行不该被当成 entries[0]。
+        let entries = sample_entries();
+        let visible = filter(&entries, &query_terms("run.exe"));
+        assert_eq!(visible, vec![3]);
+        assert_eq!(entries[visible[0]].text, "C:\\work\\tools\\run.exe");
+    }
+
+    #[test]
+    fn extreme_queries_do_not_panic() {
+        let entries = sample_entries();
+        // 全角空格、大小写混合、只有空格——都不能把列表搞崩。
+        for query in ["　", "CARGO  TEST", "   ", "cargo\tcargo"] {
+            let visible = filter(&entries, &query_terms(query));
+            assert!(visible.len() <= entries.len());
+        }
+    }
+
+    #[test]
+    fn search_keys_are_classified_before_the_list_gets_them() {
+        use winit::keyboard::SmolStr;
+        let named = |k: NamedKey| Key::Named(k);
+        // 打字 → 追加
+        assert_eq!(
+            search_edit(&Key::Character(SmolStr::new("a")), Some("a"), false),
+            SearchEdit::Append("a".into())
+        );
+        // 中文输入法提交的整串
+        assert_eq!(
+            search_edit(&Key::Character(SmolStr::new("文")), Some("中文"), false),
+            SearchEdit::Append("中文".into())
+        );
+        // 退格 / Esc / Ctrl+V
+        assert_eq!(
+            search_edit(&named(NamedKey::Backspace), None, false),
+            SearchEdit::Backspace
+        );
+        assert_eq!(
+            search_edit(&named(NamedKey::Escape), None, false),
+            SearchEdit::Clear
+        );
+        assert_eq!(
+            search_edit(&Key::Character(SmolStr::new("v")), None, true),
+            SearchEdit::Paste
+        );
+        assert_eq!(
+            search_edit(&Key::Character(SmolStr::new("V")), None, true),
+            SearchEdit::Paste,
+            "大写 V 也是粘贴"
+        );
+        // 方向键、Enter、Delete 不归搜索框
+        for key in [
+            named(NamedKey::ArrowDown),
+            named(NamedKey::Enter),
+            named(NamedKey::Delete),
+            named(NamedKey::Home),
+        ] {
+            assert_eq!(search_edit(&key, None, false), SearchEdit::Ignore);
+        }
+        // Ctrl+A 不要变成字母 a
+        assert_eq!(
+            search_edit(&Key::Character(SmolStr::new("a")), Some("a"), true),
+            SearchEdit::Ignore
+        );
+        // 控制字符不进入查询
+        assert_eq!(
+            search_edit(&Key::Character(SmolStr::new("\t")), Some("\t"), false),
+            SearchEdit::Ignore
+        );
+    }
+
+    #[test]
+    fn the_selected_row_follows_the_filter() {
+        let entries = sample_entries();
+        let all = filter(&entries, &query_terms(""));
+        // 没搜索时行号就是条目下标
+        assert_eq!(selected_entry(&all, 2), Some(2));
+        // 搜索后第 0 行是原来的第 3 条
+        let only_path = filter(&entries, &query_terms("run.exe"));
+        assert_eq!(selected_entry(&only_path, 0), Some(3));
+        // 越界不再返回“最后一条”而是 None——否则空列表也会“选中第 0 条”
+        assert_eq!(selected_entry(&only_path, 1), None);
+        assert_eq!(selected_entry(&[], 0), None);
     }
 
     #[test]

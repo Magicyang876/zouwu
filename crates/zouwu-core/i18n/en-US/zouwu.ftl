@@ -187,9 +187,11 @@ settings-clipboard-clear-button = Clear...
 settings-clipboard-clear-confirm = Clear the whole clipboard history? This cannot be undone.
 tray-clipboard = Clipboard history
 history-title = Clipboard history
-history-footer = ↑↓ select · Enter copy and close · Delete remove · Esc close
+history-footer = ↑↓ select · Enter copy and close · type to search · Delete remove · Esc close
 history-footer-empty = Nothing yet; copy something and it shows up here
 history-empty = Nothing yet
+history-search = Search (space separates terms)
+history-no-match = No matching entries
 
 # ── Bubbles (the ring's feature list) ─────────────────────
 settings-section-bubbles = Order & hotkeys

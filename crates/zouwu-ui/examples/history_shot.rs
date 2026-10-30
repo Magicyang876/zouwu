@@ -11,7 +11,7 @@ use tiny_skia::Pixmap;
 
 use zouwu_core::history::Entry;
 use zouwu_core::theme::Theme;
-use zouwu_ui::history::{draw, layout, View};
+use zouwu_ui::history::{draw, filter, layout, query_terms, View};
 
 fn main() {
     let out = PathBuf::from("target/zouwu-history");
@@ -38,37 +38,52 @@ fn main() {
         })
         .collect();
     let empty: Vec<Entry> = Vec::new();
+    let footer = "↑↓ 选择 · Enter 复制并关闭 · 输入即搜索 · Delete 删除 · Esc 关闭";
+    let placeholder = "搜索（空格分隔多个关键词）";
 
-    let cases: [(&str, &Vec<Entry>, usize, usize); 3] = [
-        ("many", &many, 0, 0),
-        ("scrolled", &many, 12, 5),
-        ("empty", &empty, 0, 0),
+    // 名字 / 条目 / 查询 / 选中 / 滚动
+    let cases: [(&str, &Vec<Entry>, &str, usize, usize); 5] = [
+        ("many", &many, "", 0, 0),
+        ("scrolled", &many, "", 12, 5),
+        ("empty", &empty, "", 0, 0),
+        ("search", &many, "cargo", 0, 0),
+        ("no-match", &many, "根本不存在的词", 0, 0),
     ];
 
-    for (name, entries, selected, scroll) in cases {
-        let l = layout(entries.len());
+    for (name, entries, query, selected, scroll) in cases {
+        let visible = filter(entries, &query_terms(query));
+        let l = layout(visible.len());
         let theme = Theme::fallback();
         let w = (l.size.0 * dpi).round() as u32;
         let h = (l.size.1 * dpi).round() as u32;
         let mut pixmap = Pixmap::new(w, h).expect("pixmap");
+        let empty_text = if query.is_empty() {
+            "还没有记录"
+        } else {
+            "没有匹配的条目"
+        };
         draw(
             &mut pixmap,
             entries,
+            &visible,
             &l,
             &theme,
             View {
                 selected,
                 scroll,
-                hover: if entries.is_empty() { None } else { Some(2) },
-                footer: "↑↓ 选择 · Enter 复制并关闭 · Delete 删除 · Esc 关闭",
-                empty: "还没有记录",
+                hover: if visible.is_empty() { None } else { Some(0) },
+                query,
+                placeholder,
+                footer,
+                empty: empty_text,
             },
         );
         let path = out.join(format!("{name}.png"));
         pixmap.save_png(&path).expect("save png");
         println!(
-            "{}: rows {} @ {:.0}x{:.0}",
+            "{}: {} hits, rows {} @ {:.0}x{:.0}",
             path.display(),
+            visible.len(),
             l.rows.len(),
             l.size.0,
             l.size.1
