@@ -88,6 +88,17 @@ struct Msg {
 
 /// `MSLLHOOKSTRUCT`：低层鼠标钩子的 `lparam` 指向它。
 #[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct WindowPlacement {
+    length: u32,
+    flags: u32,
+    show_cmd: u32,
+    min_position: Point,
+    max_position: Point,
+    normal_position: Rect,
+}
+
+#[repr(C)]
 struct Msllhookstruct {
     pt: Point,
     mouse_data: u32,
@@ -177,6 +188,8 @@ extern "system" {
     fn GetWindowThreadProcessId(hwnd: Hwnd, pid: *mut u32) -> u32;
     fn IsWindowVisible(hwnd: Hwnd) -> Bool;
     fn IsZoomed(hwnd: Hwnd) -> Bool;
+    fn GetWindowPlacement(hwnd: Hwnd, placement: *mut WindowPlacement) -> Bool;
+    fn SetWindowPlacement(hwnd: Hwnd, placement: *const WindowPlacement) -> Bool;
     fn IsIconic(hwnd: Hwnd) -> Bool;
     fn GetClassNameW(hwnd: Hwnd, buf: *mut u16, len: i32) -> i32;
     fn GetWindowRect(hwnd: Hwnd, rect: *mut Rect) -> Bool;
@@ -431,6 +444,42 @@ fn toggle_maximize(hwnd: Hwnd) {
     }
 }
 
+/// 让"还原后回哪儿"跟着窗口走。
+///
+/// 最大化窗口只记得**当年最大化那一刻**的 `rcNormalPosition`；之后我们把它挪到
+/// 另一块屏，这个记忆并不跟着变。于是"按住 Alt 拖到另一块屏，松手再双击"会
+/// `SW_RESTORE` 回到原来那块屏（用户实测现象："发现回到原来的屏幕，没有直接
+/// 获取当前移动之后窗口的位置"）。
+///
+/// 松手时把当前左上角写回 placement 即可。**尺寸不能动**：最大化状态下
+/// `GetWindowRect` 给的是整屏大小，拿它当"还原后的尺寸"会把窗口撑满。
+fn remember_restore_rect(hwnd: Hwnd) {
+    unsafe {
+        // 没最大化时 `rcNormalPosition` 本来就等于当前矩形，不用管。
+        if IsZoomed(hwnd) == 0 {
+            return;
+        }
+        let mut rect = Rect::default();
+        if GetWindowRect(hwnd, &mut rect) == 0 {
+            return;
+        }
+        let mut placement = WindowPlacement {
+            length: std::mem::size_of::<WindowPlacement>() as u32,
+            ..Default::default()
+        };
+        if GetWindowPlacement(hwnd, &mut placement) == 0 {
+            return;
+        }
+        placement.normal_position.left = rect.left;
+        placement.normal_position.top = rect.top;
+        SetWindowPlacement(hwnd, &placement);
+        trace(&format!(
+            "  remember restore rect: hwnd={hwnd:?} -> ({}, {})",
+            rect.left, rect.top
+        ));
+    }
+}
+
 fn resize_action(hwnd: Hwnd, what: Wheel) {
     unsafe {
         match what {
@@ -602,19 +651,27 @@ fn handle_event(msg: u32, pos: (i32, i32), mouse_data: u32, now: Instant, env: &
             swallow
         }
         WM_LBUTTONUP => {
-            let (dragging, swallow) = STATE.with(|cell| {
+            let (swallow, dragged_to) = STATE.with(|cell| {
                 let Ok(mut st) = cell.try_borrow_mut() else {
-                    return (false, false);
+                    return (false, None);
                 };
                 st.lbtn = false;
                 let dragging = st.tracker.up();
+                // 拖过谁就要给谁记一下还原位置（见 remember_restore_rect）。
+                let dragged_to = if dragging {
+                    st.drag.as_ref().map(|drag| drag.hwnd)
+                } else {
+                    None
+                };
                 st.drag = None;
                 st.pending = None;
                 let swallow = st.swallow_up || dragging;
                 st.swallow_up = false;
-                (dragging, swallow)
+                (swallow, dragged_to)
             });
-            let _ = dragging;
+            if let Some(hwnd) = dragged_to {
+                remember_restore_rect(hwnd as Hwnd);
+            }
             swallow
         }
         WM_MOUSEWHEEL => {
@@ -1038,6 +1095,44 @@ mod tests {
             unsafe { IsZoomed(hwnd) },
             zoomed,
             "防抖窗口内的滚轮不该翻转状态"
+        );
+        unsafe { DestroyWindow(hwnd) };
+    }
+
+    /// 最大化窗口被拖到别处后，`SW_RESTORE` 必须回**拖过去的地方**。
+    ///
+    /// 用户实测：拖动（换屏）之后一双击，窗口跳回原来那块屏。根因是
+    /// `rcNormalPosition` 只记得"当年最大化那一刻"的矩形，我们的拖动不更新它
+    /// （见 `remember_restore_rect`）；松手时补写一次就好。
+    #[test]
+    #[ignore = "需要交互式 Windows 桌面（要建真窗口）"]
+    fn dragging_a_maximized_window_moves_where_it_will_restore() {
+        let hwnd = test_window(120, 120);
+        let env = env_for(hwnd, true);
+        let t0 = Instant::now();
+        unsafe {
+            ShowWindow(hwnd, SW_MAXIMIZE);
+        }
+        assert_ne!(unsafe { IsZoomed(hwnd) }, 0, "先得最大化");
+
+        // 拖 300,200 的位移（真机上就是拖到另一块屏）
+        let before = origin(hwnd);
+        assert!(handle_event(WM_LBUTTONDOWN, (400, 400), 0, t0, &env));
+        assert!(!handle_event(WM_MOUSEMOVE, (700, 600), 0, t0, &env));
+        assert!(handle_event(WM_LBUTTONUP, (700, 600), 0, t0, &env));
+
+        unsafe {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
+        let after = origin(hwnd);
+        let dragged = (before.0 + 300, before.1 + 200);
+        assert!(
+            (after.0 - dragged.0).abs() <= 16 && (after.1 - dragged.1).abs() <= 16,
+            "还原位置要跟着拖动走：期望≈{dragged:?}，实际{after:?}"
+        );
+        assert!(
+            after != (120, 120),
+            "还原位置不该回到最大化之前的老位置，实际{after:?}"
         );
         unsafe { DestroyWindow(hwnd) };
     }

@@ -19,6 +19,7 @@
 //! | Esc | 先清空搜索；搜索为空时才关闭 |
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tiny_skia::Pixmap;
 use winit::dpi::LogicalSize;
@@ -47,6 +48,18 @@ const SEARCH_BOX_H: f32 = 28.0;
 const FOOTER_H: f32 = 34.0;
 /// 搜索框字号（逻辑像素）。
 pub const SEARCH_PX: f32 = 12.5;
+
+/// 开窗后的这段时间内不收字符：呼出快捷键（Ctrl+Alt+V）的那一下 V 会漏进来。
+pub const TYPING_GRACE: Duration = Duration::from_millis(250);
+
+/// 开窗后的这一瞬间（以及按住 Ctrl/Alt 的组合键）不收字符。
+///
+/// 呼出快捷键是 `Ctrl+Alt+V`：那一下 V 的**抬起**以及输入法对它的提交会落到刚开的
+/// 窗口上，搜索框里就凭空多一个 `v`（用户实测："按快捷键的时候，搜索框自动带入了
+/// v"）。`chord = true` 表示当前有 Ctrl/Alt 按着——那种按键是快捷键，不是文字。
+pub fn accepts_typing(since_open: Duration, chord: bool) -> bool {
+    since_open >= TYPING_GRACE && !chord
+}
 
 /// 搜索框的状态：内容 + 光标/选区/可视起点。
 ///
@@ -343,6 +356,8 @@ pub struct HistoryWindow {
     /// 上一次按下搜索框的时间/位置，用来数双击、三击。
     last_click: Option<(std::time::Instant, f32, f32)>,
     click_count: u8,
+    /// 开窗时刻：快捷键（Ctrl+Alt+V）的那一下 V 会漏进来，窗口刚开的一瞬间不收字符。
+    opened_at: std::time::Instant,
     placeholder: String,
     no_match_text: String,
     cursor: Point,
@@ -399,6 +414,7 @@ impl HistoryWindow {
             search: Search::default(),
             search_focus: false,
             drag_search: false,
+            opened_at: Instant::now(),
             last_click: None,
             click_count: 0,
             placeholder,
@@ -450,6 +466,7 @@ impl HistoryWindow {
     /// USER32 同步去通知另一个进程的窗口，那边慢一点整进程就冻住了。
     pub fn show(&mut self, entries: Vec<Entry>) {
         // 每次打开都是新的一轮：带着上次的搜索词打开会让人以为“记录都没了”。
+        self.opened_at = Instant::now();
         self.search.clear();
         self.refresh(entries);
         self.selected = 0;
@@ -601,6 +618,17 @@ impl HistoryWindow {
     ///
     /// 故意没有"先点一下输入框才能打字"这层状态：这个窗口的用途就是“翻找”，
     /// 打开就能直接敲字最省事，而 ↑↓/Enter/Delete 仍然管列表。
+    ///
+    /// 呼出快捷键是 `Ctrl+Alt+V`：那一下 V 的**抬起**以及输入法对它的提交可能落到刚
+    /// 开的窗口上，搜索框里就凭空多一个 `v`（用户实测："按快捷键的时候，搜索框自动
+    /// 带入了 v"）。按住 Ctrl/Alt 的组合键本来也不该产生文字，所以再加一条硬规则。
+    fn typing_grace(&self) -> bool {
+        !accepts_typing(
+            self.opened_at.elapsed(),
+            self.modifiers.control_key() || self.modifiers.alt_key(),
+        )
+    }
+
     fn search_key(&mut self, event: &KeyEvent) -> bool {
         match search_edit(
             &event.logical_key,
@@ -618,6 +646,9 @@ impl HistoryWindow {
                 }
             }
             SearchEdit::Backspace => {
+                if self.typing_grace() {
+                    return true;
+                }
                 if linefield::backspace(&mut self.search) {
                     self.after_query_change();
                 }
@@ -625,12 +656,18 @@ impl HistoryWindow {
                 true
             }
             SearchEdit::Append(text) => {
+                if self.typing_grace() || self.modifiers.control_key() || self.modifiers.alt_key() {
+                    return true;
+                }
                 linefield::insert(&mut self.search, &text);
                 self.search_focus = true;
                 self.after_query_change();
                 true
             }
             SearchEdit::Paste => {
+                if self.typing_grace() {
+                    return true;
+                }
                 // 粘进光标处（多行会被折成一行，单行框里塞 `\n` 会画到框外）。
                 self.search_focus = true;
                 if linefield::paste_clipboard(&mut self.search) {
@@ -849,6 +886,9 @@ impl HistoryWindow {
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
                 // 中文/日文输入法提交的整串字符走这里（走不了按键字符）。
+                if self.typing_grace() {
+                    return Vec::new();
+                }
                 let cleaned: String = text.chars().filter(|c| !c.is_control()).collect();
                 if !cleaned.is_empty() {
                     linefield::insert(&mut self.search, &cleaned);
@@ -1528,5 +1568,17 @@ mod tests {
         assert!(empty.x > box_.x + 20.0, "左边给放大镜让位");
         assert!(typed.right() < box_.right() - 20.0, "有字时右边给 × 让位");
         assert!(typed.w > 40.0, "别把自己挤没了");
+    }
+
+    #[test]
+    fn the_hotkey_does_not_leak_a_letter_into_the_search() {
+        // 开窗 0ms：呼出快捷键（Ctrl+Alt+V）的 V 正好在这时到，必须丢掉
+        assert!(!accepts_typing(Duration::ZERO, false));
+        assert!(!accepts_typing(Duration::from_millis(120), false));
+        // 过了宽限期就正常收字
+        assert!(accepts_typing(TYPING_GRACE, false));
+        assert!(accepts_typing(Duration::from_secs(1), false));
+        // 按住 Ctrl/Alt 的组合键任何时候都不算文字（哪怕窗口早开好了）
+        assert!(!accepts_typing(Duration::from_secs(5), true));
     }
 }

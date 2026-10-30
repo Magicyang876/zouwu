@@ -185,6 +185,8 @@
 | ADR-043 | **自绘输入框的选区模型**：`Editing` 加 `anchor`（`cursor != anchor` 即有选区）；光标由真实文字度量反算、严格走字符边界；`text_inner()` 让布局/命中/绘制共用一份几何；按下记锚点、移动改光标实现拖选（移出框也继续）；点同一个框只挪光标、点另一个框一次点击完成「提交上一个 + 接续编辑」；Shift/Home/End/Ctrl+A 与「选中即替换」齐全；长行左移保证光标可见；每次按下重置 `drag_text` |
 | ADR-044 | **输入框补齐系统常识**：剪贴板 `copy_selection`/`cut_selection`/`paste`（无选区复制整段、无选区剪切不碰剪贴板、单行清洗：回车丢/换行与制表符换空格）；双击按路径词法选词、三击全选、连击 400ms+4px 计数且上限 3；`Editing.offset` 驱动水平滚动条（宽度与 DPI 由窗口层 `sync_edit_viewport` 喂入，未量视口退化成 no-op），拖 thumb 不动光标、滚轮在溢出框上横滚，滚动条画在框内下沿 5px/命中 9px |
 | ADR-046 | **牌子不画连线、窗口几何以「小兽屏幕中心」为不变量**：去掉每帧填三块大三角形的光条（只留文字牌，牌子从球心滑出自己的位置）；撑大/收回窗口改用 `GetWindowRect` 读真实矩形再 `SetWindowPos`（不再二次 `set_outer_position`），牌子开着时整段跳过 3 秒一次的显示器巡检 —— 修掉"点完子项小兽在屏幕上跳一下"  · **已移除，见 ADR-047** |
+| ADR-055 | **拖走的最大化窗口还原回拖到的地方**：`SW_RESTORE` 回的是 `rcNormalPosition`，而它只记得"当年最大化那一刻"；松手时把当前左上角写回 placement，宽高不动（最大化时 `GetWindowRect` 是整屏），且只在 `IsZoomed` 时写 |
+| ADR-054 | **呼出快捷键的字母不漏进搜索框**：`TYPING_GRACE = 250ms` + 按住 Ctrl/Alt 的组合键一律不算文字（`accepts_typing()` 纯函数可单测）；Esc 与 `Ctrl+V` 不受影响 |
 | ADR-053 | **搜索框支持鼠标选用**：单行编辑抽成 `linefield`（`trait LineField`，设置面板 `Editing` 与剪贴板 `Search` 各实现一次），几何/度量/选词/剪贴板/横向滚动共用一套；点定位、拖选、双击按路径分隔符切词、三击全选、Shift+方向、Ctrl+A/C/X/V；`draw_contents()` 一处画内容+选区+光标+滚动条；`search_focus` 显式，空框也画光标，Esc 不抢 |
 | ADR-052 | **剪贴板历史加搜索**：搜索框常驻、打开即打字（没有"先点一下"的焦点状态），空格分隔多关键词取与、大小写不敏感子串；`selected`/`scroll` 是筛后行号，映射回 `entries` 走 `selected_entry()`、`Delete` 报条目下标（报行号会删错条目）；Esc 两级；`set_ime_allowed` + `Ime::Commit` + `set_ime_cursor_area` 让中文输入法候选窗贴在框下，`Ctrl+V` 粘第一行；按键解释抽成纯函数 `search_edit()` 便于单测；打开时清空搜索词 |
 | ADR-051 | **子窗口图标与剪贴板历史滚轮**：三个真窗口（设置 / 剪贴板历史 / 二维码结果）用 `assets/zouwu-icon.png`（与 `zouwu.ico` 同源、由 `make_icon` 一起生成）做任务栏与标题栏图标，必要时把 tiny-skia 的预乘像素除回直通 alpha；剪贴板历史补上滚轮（`WHEEL_ROWS=3`，只滚视口不动选中项，触摸板细微滑动按一格算，像素级按 44px 行高折算） |
@@ -272,7 +274,7 @@
 **可复现的验收方式**：
 
 ```bash
-cargo test --workspace                     # 251 个单测：几何 / 弹簧 / 布局 / 屏边避让 / 配置 / 主题 / 皮肤 / 皮肤包 / 字体包 / 日志 / 面板 / 文本 / i18n / 二维码 / 结果窗 / 剪贴板历史 / 护眼
+cargo test --workspace                     # 261 个单测：几何 / 弹簧 / 布局 / 屏边避让 / 配置 / 主题 / 皮肤 / 皮肤包 / 字体包 / 日志 / 面板 / 文本 / i18n / 二维码 / 结果窗 / 剪贴板历史 / 护眼
 cargo run -p zouwu-ui --example offscreen  # 离屏渲染 → target/zouwu-offscreen/*.png，直接看图
 cargo run -p zouwu-ui --example settings_shot   # 设置面板 4 个分页 → target/zouwu-settings/*.png（2×）
 cargo run -p zouwu-ui --example bench      # 单帧成本模型（release）
