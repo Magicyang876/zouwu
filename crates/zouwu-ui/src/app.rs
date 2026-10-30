@@ -1659,9 +1659,10 @@ impl App {
         if let Some(hwnd) = self.hwnd() {
             zouwu_platform::layer::set_bounds(hwnd, x, y, phys, phys);
         }
-        // 把 winit 的缓存对齐到刚设的位置，否则它下一次自己 `SetWindowPos` 时
-        // 会把窗口拽回旧地方。
-        let _ = window.set_outer_position(PhysicalPosition::new(x, y));
+        // **不要**再补一次 `set_outer_position`：它也是一次 `SetWindowPos`，和上面
+        // 那次谁后落地不确定，实测偶尔把窗口按 winit 的旧位置挪回去（就是"点完子项
+        // 本体现在屏幕上跳一下"）。直接把几何改到位的 `SetWindowPos` 发 WM_MOVE 事件，
+        // winit 自己会把位置缓存更新回来。
         log::debug!("window extent {cur} -> {want} at {x},{y} (buddy stays put)");
         self.dirty = true;
     }
@@ -2914,12 +2915,16 @@ impl ApplicationHandler for App {
             if now.duration_since(self.last_monitor_check) >= MONITOR_CHECK {
                 self.last_monitor_check = now;
                 if let Some(window) = self.window_arc() {
-                    // 激光条把窗口撑大的时候别做"只露出一半就搬家"的判定：
-                    // 撑大的窗口天生会伸出屏幕，按它搬家会把小兽拽走。
-                    let had_position = self.state_pos.is_some() && self.open_children.is_none();
-                    if self.ensure_visible_on(event_loop, &window, had_position) {
-                        self.dirty = true;
-                        window.request_redraw();
+                    // 激光条把窗口撑大了就别查位置：撑大的窗口天生伸出屏幕，
+                    // 按它算"露出多少"会把本体重摆一遍（实测每 3 秒的这只闹钟
+                    // 会在牌子开着时把本体拽走 20~80px，而且看运气——取决于点开
+                    // 牌子离下一次闹钟多近）。
+                    if self.open_children.is_none() {
+                        let had_position = self.state_pos.is_some();
+                        if self.ensure_visible_on(event_loop, &window, had_position) {
+                            self.dirty = true;
+                            window.request_redraw();
+                        }
                     }
                 }
                 // 遮罩盖的是整个虚拟桌面：换了分辨率/插拔了屏，几何得重贴一次。
