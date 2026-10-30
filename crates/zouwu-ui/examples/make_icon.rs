@@ -1,4 +1,4 @@
-//! 生成 Windows 图标 `assets/zouwu.ico`（小兽头像 + 多尺寸）。
+//! 生成 Windows 图标 `assets/zouwu.ico`（默认应用图标：暖色方底 + 兽首 + 多尺寸）。
 //!
 //! ```bash
 //! cargo run --release -p zouwu-ui --example make_icon
@@ -33,58 +33,107 @@ fn out_path() -> PathBuf {
     path
 }
 
-/// 画一枚头像：暖橙身体 + 两只眼睛 + 深色鬃毛。
+/// 一枚应用图标：暖色圆角方块 + 深色兽首（两只尖耳、两只眼、一个小鼻子）。
 ///
-/// 和主窗口的 `paint::draw_buddy` 是**两套代码**（那边要动画/投影/表情，
-/// 这边要在 16px 下还能认出来），但配色取自同一个 `Theme`，所以看起来是一家人。
+/// 和主窗口的 `paint::draw_buddy` 是**两套代码**（那边要动画/投影/表情，这边要在
+/// 16px 下还能认出来），但配色取自同一个 `Theme`，所以看起来是一家人。
+///
+/// 三条硬约束（吃过亏）：
+/// 1. **方形底 + 圆角**：纯透明底的头像放进任务栏/开始菜单会和背景糊成一片；
+///    一块暖色底把对比度钉死，任何壁纸/主题下都认得出。
+/// 2. **耳朵要压在圆头上**：先画耳、再把头盖上去，耳根就不会出现接缝。
+/// 3. **每个"细节"都得有下限尺寸**：16px 里眼睛只剩 0.9px，再小就等于没有。
 fn draw(size: u32) -> Pixmap {
     let mut pm = Pixmap::new(size, size).expect("pixmap");
     let s = size as f32;
 
-    let body = Color::from_rgba8(0xE8, 0x7A, 0x4A, 0xFF);
-    let shade = Color::from_rgba8(0xC9, 0x5C, 0x33, 0xFF);
-    let eye = Color::from_rgba8(0x2A, 0x1A, 0x14, 0xFF);
+    let warm = Color::from_rgba8(0xE8, 0x7A, 0x4A, 0xFF);
+    let ink = Color::from_rgba8(0x2A, 0x1A, 0x14, 0xFF);
+    let cream = Color::from_rgba8(0xF6, 0xE9, 0xDC, 0xFF);
 
     let mut paint = Paint {
         anti_alias: true,
         ..Paint::default()
     };
 
-    // 小尺寸下必须留边：贴边的圆在 16px 里会被切成方块。
-    let r = s * 0.42;
-    let (cx, cy) = (s * 0.5, s * 0.54);
-
-    // 鬃毛：一圈稍大的暗色圆，只在左上露出一弧（图标不是插画，要一眼看懂）。
-    paint.set_color(shade);
-    if let Some(p) = PathBuilder::from_circle(cx - r * 0.18, cy - r * 0.10, r * 1.02) {
-        pm.fill_path(&p, &paint, FillRule::Winding, Default::default(), None);
+    // 底：圆角方块，留 5% 边（贴边的圆角在 16px 里会被切成方角）。
+    let pad = s * 0.05;
+    let (bx, bw) = (pad, s - pad * 2.0);
+    let br = bw * 0.26;
+    let mut pb = PathBuilder::new();
+    pb.move_to(bx + br, bx);
+    pb.line_to(bx + bw - br, bx);
+    pb.quad_to(bx + bw, bx, bx + bw, bx + br);
+    pb.line_to(bx + bw, bx + bw - br);
+    pb.quad_to(bx + bw, bx + bw, bx + bw - br, bx + bw);
+    pb.line_to(bx + br, bx + bw);
+    pb.quad_to(bx, bx + bw, bx, bx + bw - br);
+    pb.line_to(bx, bx + br);
+    pb.quad_to(bx, bx, bx + br, bx);
+    pb.close();
+    if let Some(path) = pb.finish() {
+        paint.set_color(warm);
+        pm.fill_path(&path, &paint, FillRule::Winding, Default::default(), None);
     }
-    paint.set_color(body);
-    if let Some(p) = PathBuilder::from_circle(cx, cy, r) {
-        pm.fill_path(&p, &paint, FillRule::Winding, Default::default(), None);
-    }
 
-    // 耳朵
-    paint.set_color(body);
+    let (cx, cy) = (s * 0.5, s * 0.52);
+    let r = s * 0.30;
+
+    // 耳朵：耳根压在头顶两侧，头圆盖上去正好把接缝糊住；耳尖向外上方挑。
+    paint.set_color(ink);
     for side in [-1.0f32, 1.0] {
         let mut pb = PathBuilder::new();
-        let (ex, ey) = (cx + side * r * 0.52, cy - r * 0.62);
-        pb.move_to(ex, ey);
-        pb.line_to(ex + side * r * 0.30, ey + r * 0.42);
-        pb.line_to(ex - side * r * 0.10, ey + r * 0.36);
+        pb.move_to(cx + side * r * 0.30, cy - r * 0.78);
+        pb.line_to(cx + side * r * 0.88, cy - r * 0.60);
+        pb.line_to(cx + side * r * 0.66, cy - r * 1.12);
         pb.close();
-        if let Some(p) = pb.finish() {
-            pm.fill_path(&p, &paint, FillRule::Winding, Default::default(), None);
+        if let Some(path) = pb.finish() {
+            pm.fill_path(&path, &paint, FillRule::Winding, Default::default(), None);
         }
     }
 
-    // 眼睛：16px 时半径只剩 0.9px，所以给个下限，保证"有瞳孔"。
-    paint.set_color(eye);
-    let eye_r = (r * 0.13).max(0.9);
-    for side in [-1.0f32, 1.0] {
-        if let Some(p) = PathBuilder::from_circle(cx + side * r * 0.34, cy - r * 0.06, eye_r) {
-            pm.fill_path(&p, &paint, FillRule::Winding, Default::default(), None);
+    // 头：略扁的圆（正圆看着像"球"，扁一点才像"脸"）。
+    let mut pb = PathBuilder::new();
+    let steps = 64;
+    for i in 0..steps {
+        let t = i as f32 / steps as f32 * std::f32::consts::TAU;
+        let (x, y) = (cx + r * t.cos(), cy + r * 0.94 * t.sin());
+        if i == 0 {
+            pb.move_to(x, y);
+        } else {
+            pb.line_to(x, y);
         }
+    }
+    pb.close();
+    if let Some(path) = pb.finish() {
+        pm.fill_path(&path, &paint, FillRule::Winding, Default::default(), None);
+    }
+
+    // 眼睛：16px 时半径只剩 0.9px，给下限保证"有瞳孔"。
+    paint.set_color(cream);
+    let eye_r = (r * 0.15).max(0.9);
+    for side in [-1.0f32, 1.0] {
+        if let Some(path) = PathBuilder::from_circle(cx + side * r * 0.38, cy - r * 0.07, eye_r) {
+            pm.fill_path(&path, &paint, FillRule::Winding, Default::default(), None);
+        }
+    }
+
+    // 鼻子：比眼睛小一号，16px 下基本糊掉，但不影响识别。
+    let mut pb = PathBuilder::new();
+    let (nx, ny) = (cx, cy + r * 0.40);
+    let (nrx, nry) = (r * 0.16, r * 0.12);
+    for i in 0..steps {
+        let t = i as f32 / steps as f32 * std::f32::consts::TAU;
+        let (x, y) = (nx + nrx * t.cos(), ny + nry * t.sin());
+        if i == 0 {
+            pb.move_to(x, y);
+        } else {
+            pb.line_to(x, y);
+        }
+    }
+    pb.close();
+    if let Some(path) = pb.finish() {
+        pm.fill_path(&path, &paint, FillRule::Winding, Default::default(), None);
     }
     pm
 }
