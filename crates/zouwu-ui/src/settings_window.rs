@@ -74,7 +74,8 @@ impl SettingsWindow {
             .with_inner_size(LogicalSize::new(w, h))
             .with_min_inner_size(LogicalSize::new(settings::MIN_SIZE.0, settings::MIN_SIZE.1))
             .with_resizable(true)
-            .with_visible(true);
+            // 先不显示，等画完第一帧再 `frame::show`（见 `frame::settle`）。
+            .with_visible(false);
 
         let window = Arc::new(
             event_loop
@@ -82,7 +83,7 @@ impl SettingsWindow {
                 .map_err(|e| format!("create settings window: {e}"))?,
         );
 
-        let physical = window.inner_size();
+        let physical = crate::frame::settle(&window, LogicalSize::new(w, h), None);
         let presenter = create_soft(window.clone(), physical.width, physical.height)?;
 
         let paths = Paths {
@@ -96,7 +97,6 @@ impl SettingsWindow {
         // 面板是暗色的，白标题栏很扎眼：让 DWM 一起变暗（失败也无所谓）。
         crate::frame::apply(&window, &model.theme());
         crate::frame::life("settings", "created", &window);
-        window.focus_window();
 
         let mut this = Self {
             window,
@@ -116,6 +116,9 @@ impl SettingsWindow {
             click_count: 0,
         };
         this.rebuild_layout();
+        // 先上屏再画（隐藏时画会被丢掉，见 `frame::settle`），上屏后立刻同步画一帧。
+        crate::frame::show(&this.window);
+        this.redraw();
         this.request_redraw();
         log::info!("settings panel opened");
         Ok(this)

@@ -10,6 +10,7 @@
 //! 才变黑"。所以除了创建时调，还要在首次重绘（那时窗口一定上屏了）、
 //! 尺寸变化、重新获得焦点时各补一次。
 
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
 
@@ -33,6 +34,35 @@ pub fn life(kind: &str, phase: &str, window: &Window) {
             _ => None,
         });
     log::info!("window {kind}: {phase} hwnd={hwnd:?}");
+}
+
+/// 建窗时**先别显示**，用这个把尺寸与位置补齐，再画第一帧，最后 [`show`]。
+///
+/// 为什么不能直接 `with_visible(true)` + `with_inner_size` + `with_position`：
+/// winit 在 Windows 上并**不**把这两项放进 `CreateWindowExW`，而是建完再用
+/// `SetWindowPos` 补——可窗口在 `CreateWindowExW` 那一刻就已经可见了。实测形象菜单
+/// 的日志是 `Resized(1434x813)` → `Resized(1440x847)` → `Resized(270x205)`：用户看到的
+/// 正是"先弹出一个占了小半个屏幕的白框，再缩成菜单"（约 5ms，但足够看清一帧）。
+/// 设置/历史/结果三个面板是同一个毛病，只是尺寸差得没那么夸张。
+///
+/// 返回补齐之后的**真实**像素尺寸：`inner_size()` 在此刻已经是最终值，
+/// 呈现层要按它分配，别拿建窗参数去猜。
+pub fn settle(
+    window: &Window,
+    size: LogicalSize<f32>,
+    at: Option<PhysicalPosition<i32>>,
+) -> PhysicalSize<u32> {
+    if let Some(pos) = at {
+        window.set_outer_position(pos);
+    }
+    let _ = window.request_inner_size(size);
+    window.inner_size()
+}
+
+/// 画完第一帧之后再调它：先上屏再画会白闪一下。
+pub fn show(window: &Window) {
+    window.set_visible(true);
+    window.focus_window();
 }
 
 /// 把窗口标题栏刷成当前主题的颜色。幂等，失败只记一次日志。

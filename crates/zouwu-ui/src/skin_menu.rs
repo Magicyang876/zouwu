@@ -117,17 +117,24 @@ impl SkinMenuWindow {
             // 小兽是分层**置顶**窗口：菜单不置顶就会被压在它下面（实测菜单左上角
             // 被小兽的耳朵盖住）。菜单比小兽晚建，同层级里就在上面。
             .with_window_level(WindowLevel::AlwaysOnTop)
-            .with_visible(true);
+            // **不要**在这里 visible：建窗属性里的尺寸/位置是延后应用的，
+            // 那一刻窗口会以系统默认尺寸（实测 1440x847）先闪一帧出来。
+            // 见 `frame::settle` / `frame::show`。
+            .with_visible(false);
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
                 .map_err(|e| format!("create skin menu: {e}"))?,
         );
-        let physical = window.inner_size();
+        // 窗口此刻还不可见：把位置与尺寸补到位，`inner_size()` 已经是最终值。
+        let physical = crate::frame::settle(
+            &window,
+            LogicalSize::new(layout.size.0, layout.size.1),
+            Some(PhysicalPosition::new(x, y)),
+        );
         let presenter = create_soft(window.clone(), physical.width, physical.height)?;
         crate::frame::apply(&window, &theme);
         crate::frame::life("skin-menu", "created", &window);
-        window.focus_window();
         let mut this = Self {
             window,
             presenter,
@@ -142,6 +149,10 @@ impl SkinMenuWindow {
             frame_dark: false,
             opened_at: Instant::now(),
         };
+        // 先上屏再画：窗口隐藏时 `BitBlt` 的像素会被丢掉（历史窗实测开出来是
+        // 一片空底），而且 show 之后系统还会排一次 `WM_PAINT`。这个窗口又收不到
+        // `RedrawRequested`，所以上屏后必须**立刻同步画**，不能挂 `request_redraw`。
+        crate::frame::show(&this.window);
         this.repaint();
         Ok(this)
     }

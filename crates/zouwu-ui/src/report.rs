@@ -248,18 +248,22 @@ impl ReportWindow {
             .with_inner_size(LogicalSize::new(layout.size.0, layout.size.1))
             .with_min_inner_size(LogicalSize::new(360.0, 160.0))
             .with_resizable(false)
-            .with_visible(true);
+            // 先不显示，等画完第一帧再 `frame::show`（见 `frame::settle`）。
+            .with_visible(false);
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
                 .map_err(|e| format!("create report window: {e}"))?,
         );
-        let physical = window.inner_size();
+        let physical = crate::frame::settle(
+            &window,
+            LogicalSize::new(layout.size.0, layout.size.1),
+            None,
+        );
         let presenter = create_soft(window.clone(), physical.width, physical.height)?;
         crate::frame::apply(&window, &theme);
         crate::frame::life("report", "created", &window);
-        window.focus_window();
-        let this = Self {
+        let mut this = Self {
             window,
             presenter,
             pixmap: None,
@@ -271,6 +275,9 @@ impl ReportWindow {
             frame_dark: false,
             footer_copied,
         };
+        // 先上屏再画（隐藏时画会被丢掉，见 `frame::settle`）。
+        crate::frame::show(&this.window);
+        this.redraw();
         this.request_redraw();
         Ok(this)
     }

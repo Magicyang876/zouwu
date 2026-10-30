@@ -389,20 +389,24 @@ impl HistoryWindow {
             .with_window_icon(crate::icon::app_icon())
             .with_inner_size(LogicalSize::new(layout.size.0, layout.size.1))
             .with_resizable(false)
-            .with_visible(true);
+            // 先不显示，等画完第一帧再 `frame::show`（见 `frame::settle`）。
+            .with_visible(false);
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
                 .map_err(|e| format!("create history window: {e}"))?,
         );
-        let physical = window.inner_size();
+        let physical = crate::frame::settle(
+            &window,
+            LogicalSize::new(layout.size.0, layout.size.1),
+            None,
+        );
         let presenter = create_soft(window.clone(), physical.width, physical.height)?;
         crate::frame::apply(&window, &theme);
         crate::frame::life("history", "created", &window);
-        window.focus_window();
         // 搜索要能输中文：开会话 IME，候选窗随后由 `update_ime_area()` 贴到搜索框。
         window.set_ime_allowed(true);
-        let this = Self {
+        let mut this = Self {
             window,
             presenter,
             pixmap: None,
@@ -428,6 +432,11 @@ impl HistoryWindow {
             frame_dark: false,
         };
         this.update_ime_area();
+        // 先上屏再画：窗口隐藏时 `BitBlt` 的像素会被丢掉（实测开出来是一片空底），
+        // 系统在 show 之后还会排一次 `WM_PAINT`。所以上屏后立刻同步画一帧，
+        // 再挂一个 `request_redraw` 兜底。
+        crate::frame::show(&this.window);
+        this.redraw();
         this.window.request_redraw();
         Ok(this)
     }
