@@ -9,6 +9,11 @@
 //! （拷个 exe 就能用），而"装一下"只是同一份文件的另一种调用方式。
 //! 两个 exe 意味着两套签名、两份更新、两种报错。
 
+// 常驻小工具**不该跳黑窗**，所以整个 exe 是 `WINDOWS` 子系统。
+// 代价是命令行模式默认没有 stdout —— 那一段由 `zouwu_platform::console`
+// 在需要时把输出接回调用者的终端（见那里的模块注释与 ADR-060）。
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use std::process::ExitCode;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -22,6 +27,9 @@ fn main() -> ExitCode {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     if !args.is_empty() {
+        // 命令行动作：先把 stdout 接回调用者的终端（GUI 子系统默认没有）。
+        // 必须在第一条 `println!` 之前，否则那几行就丢到空句柄里了。
+        zouwu_platform::console::attach_parent();
         return command(&args);
     }
 

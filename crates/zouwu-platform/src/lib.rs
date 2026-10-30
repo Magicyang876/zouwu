@@ -11,6 +11,12 @@ pub mod clipboard;
 #[cfg(not(target_os = "windows"))]
 #[path = "clipboard_stub.rs"]
 pub mod clipboard;
+/// 控制台：GUI 子系统的 exe 怎么才能「恰好」在终端里打印。
+#[cfg(target_os = "windows")]
+pub mod console;
+#[cfg(not(target_os = "windows"))]
+#[path = "console_stub.rs"]
+pub mod console;
 /// 字体文件的 `name` 表解析（纯 Rust，可测）。
 pub mod fontfile;
 pub mod fontpack;

@@ -229,6 +229,11 @@ Four decisions explain most of the codebase:
 4. **Poll the cursor instead of trusting hit-testing.** Layered windows do not reliably
    receive mouse messages, so input is sampled on a 16 ms (inside) / 100 ms (outside) beat.
 
+Each of those started as a wrong assumption, and each has an ADR in
+[`docs/decisions.md`](docs/decisions.md) (60 of them) that records what was measured, what it
+costs, and what went wrong on the way. [`docs/architecture.md`](docs/architecture.md) has the
+layer diagram if you would rather start with the map than the history.
+
 ---
 
 ## Contributing

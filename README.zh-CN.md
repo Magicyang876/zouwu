@@ -219,6 +219,10 @@ crates/iconres         构建期生成 COFF 资源对象，让 exe 自己带图�
 4. **轮询光标，不信命中测试。** 分层窗口收不到可靠的鼠标消息，所以按 16 ms（窗口内）/
    100 ms（窗口外）的节拍主动采样。
 
+这四条起初都是错的判断，每一条在 [`docs/decisions.md`](docs/decisions.md) 里都有一篇 ADR
+（共 60 篇），记着当时量到了什么、付了什么代价、以及中间踩过哪些坑。想先看地图而不是历史，
+[`docs/architecture.md`](docs/architecture.md) 有分层图。
+
 ---
 
 ## 参与
