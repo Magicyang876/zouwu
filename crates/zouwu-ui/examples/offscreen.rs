@@ -101,6 +101,38 @@ fn shoot(name: &str, logical: f32, scale: f32, openness: f32, theme: &Theme) {
     );
 }
 
+/// 右键形象菜单（真窗口里由 softbuffer 画，这里验证排布与配色）。
+fn skin_menu_shot(name: &str, scale: f32, theme: &Theme) {
+    let choices = vec![
+        ("procedural".to_string(), "驺吾 · 代码绘制".to_string()),
+        ("zouwu-ink".to_string(), "水墨驺吾".to_string()),
+        ("zouwu-paper".to_string(), "折纸驺吾".to_string()),
+    ];
+    let l = zouwu_ui::skin_menu::layout(choices.len());
+    let (w, h) = (
+        (l.size.0 * scale).ceil() as u32,
+        (l.size.1 * scale).ceil() as u32,
+    );
+    let mut pixmap = Pixmap::new(w, h).expect("pixmap");
+    // 铺一层桌面色：菜单是圆角面板，四角应当透出底色而不是黑边。
+    pixmap.fill(Color::from_rgba8(30, 26, 24, 255));
+    zouwu_ui::skin_menu::draw(
+        &mut pixmap,
+        &l,
+        theme,
+        &zouwu_ui::skin_menu::View {
+            choices: &choices,
+            current: "zouwu-ink",
+            hover: Some(2),
+            title: "形象",
+        },
+        scale,
+    );
+    let path = out_dir().join(format!("{name}.png"));
+    pixmap.save_png(&path).expect("save png");
+    println!("{:<14} {}x{}  ->  {}", name, w, h, path.display());
+}
+
 fn main() {
     let warm = Theme::by_name("zouwu-warm");
     let dark = Theme::by_name("zouwu-dark");
@@ -110,5 +142,7 @@ fn main() {
     shoot("expanded-dark", 340.0, 1.0, 1.0, &dark);
     shoot("expanded-os", 340.0, 1.0, -0.08, &warm); // 负值 = 收起过冲的一瞬间
     shoot("hover-hi", 340.0, 1.25, 1.0, &warm);
+    skin_menu_shot("skin-menu", 1.0, &warm);
+    skin_menu_shot("skin-menu-hi", 1.25, &dark);
     println!("\n用任意看图工具打开上面的 PNG 即可检查皮肤与布局。");
 }

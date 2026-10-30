@@ -1,0 +1,20 @@
+# 折纸驺吾 —— 官方第三套皮肤
+id = "zouwu-paper"
+name = "折纸驺吾"
+author = "zouwu"
+version = "1.0.0"
+
+[geometry]
+radius = 56.0
+breath_amount = 0.03
+
+# 主体在 256 画布里占 0.6（半径 0.30），所以放大 1/0.6 ≈ 1.67 倍，`radius` 才
+# 仍然表示"桌面上的主体半径"。这个数由 make_skin_paper.rs 按实测占比反推。
+[[layers]]
+image = "body.png"
+scale = 1.67
+
+[[layers]]
+image = "blink.png"
+role = "blink"
+scale = 1.67

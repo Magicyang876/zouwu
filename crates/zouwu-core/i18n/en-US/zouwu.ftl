@@ -186,6 +186,8 @@ settings-clipboard-clear-hint = Only deletes the record; the system clipboard is
 settings-clipboard-clear-button = Clear...
 settings-clipboard-clear-confirm = Clear the whole clipboard history? This cannot be undone.
 tray-clipboard = Clipboard history
+skin-menu-title = Appearance
+
 history-title = Clipboard history
 history-footer = ↑↓ select · Enter copy and close · type to search · Delete remove · Esc close
 history-footer-empty = Nothing yet; copy something and it shows up here

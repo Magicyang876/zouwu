@@ -187,6 +187,8 @@ settings-clipboard-clear-hint = 只删记录，不动系统剪贴板里的东西
 settings-clipboard-clear-button = 清空…
 settings-clipboard-clear-confirm = 确定清空全部剪贴板历史吗？这一步无法撤销。
 tray-clipboard = 剪贴板历史
+skin-menu-title = 形象
+
 history-title = 剪贴板历史
 history-footer = ↑↓ 选择 · Enter 复制并关闭 · 输入即搜索 · Delete 删除 · Esc 关闭
 history-footer-empty = 还没有记录，复制点什么就会出现在这里

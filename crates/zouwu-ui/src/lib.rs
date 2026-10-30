@@ -17,6 +17,7 @@ pub mod report;
 pub mod settings;
 pub mod settings_window;
 pub mod skin;
+pub mod skin_menu;
 pub mod text;
 pub mod thumb;
 pub mod watchdog;

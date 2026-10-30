@@ -1,315 +1,252 @@
-# Zouwu（驺吾）· 桌面小工具构想
+# Zouwu 驺吾
 
-> 驺吾，出自《山海经·海内北经》：「林氏国有珍兽，大若虎，五采毕具，尾长于身，名曰驺吾，乘之日行千里。」
-> 取其「五彩、善行、日行千里」之意：一个常驻桌面、五彩可换肤、一点即达的极速快捷入口。
+> **English** | [简体中文](README.zh-CN.md)
 
----
+A tiny mythical beast that lives in the corner of your desktop. Hover it and it unfolds a
+ring of bubbles — QR scanner, clipboard history, whatever commands you wire onto it.
+Idle cost is **0.3% of one core and ~17 MB RSS**, because there is no webview and no
+GPU: just a layered Win32 window painted with a CPU rasterizer.
 
-## 1. 一句话定位
+<p align="center">
+  <img src="assets/screenshots/ring-light.png" width="300" alt="Zouwu with its bubble ring open (light theme)">
+  <img src="assets/screenshots/ring-dark.png" width="300" alt="Zouwu with its bubble ring open (dark theme)">
+</p>
 
-一只常驻桌面的「驺吾」小兽：**点它、摸它、用它**——把截图、翻译、二维码识别等常用能力收进一圈可自定义的功能气泡，同时作为外部软件和脚本的统一快捷入口。
+<p align="center">
+  <a href="https://github.com/yourname/zouwu/releases"><img alt="Platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4"></a>
+  <img alt="Rust" src="https://img.shields.io/badge/rust-1.80%2B-dea584">
+  <img alt="License" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue">
+  <img alt="No webview" src="https://img.shields.io/badge/webview-none-success">
+</p>
 
----
-
-## 2. 核心体验（用户视角）
-
-1. **它一直在**：平时是一只小兽趴在桌面角落，可拖拽、可吸附边缘；不想要了就退回系统托盘，需要时一个快捷键呼出。
-2. **它会「醒过来」**：鼠标移上去，小兽有呼吸、眨眼、耳朵抖动等微动效；这是唯一一个常驻却"不烦人"的关键。
-3. **它会展形**：悬停 **150ms** 后，小兽身边弹出一圈**功能气泡**（"变身"）：每颗气泡独立以弹簧曲线错峰弹出，缓慢环绕浮动；指针靠近即放大高亮，移开后反向收拢。小兽本体不位移。
-4. **它能换皮**：默认皮肤是山海经驺吾的卡通形象，支持自定义主题（配色/形态/动画资源包）。
-5. **它说你的语言**：中 / 英 / 日… 运行时切换，无需重启。
-6. **它能接入一切**：每一个内置功能都能单独开关；外部程序、脚本、URL、快捷方式都能注册成环上的一项。
-
----
-
-## 3. 功能清单（分层拆分）
-
-### 3.1 P0 · 骨架与形态
-
-| 编号 | 功能 | 说明 |
-|---|---|---|
-| F-01 | 常驻桌面悬浮窗 | 无边框、透明背景、置顶（可配置）、不进任务栏（可选）、可拖拽、记忆位置。**v1 仅 Windows**，平台层抽象预留 |
-| F-02 | 托盘常驻 | 托盘图标 + 右键菜单（显示/隐藏、设置、开机自启、退出） |
-| F-03 | 全局快捷键呼出 | 可自定义，冲突检测；呼出时以光标位置或上次位置为中心 |
-| F-04 | 气泡环菜单（变身） | 悬停 150ms 展开；6~12 颗独立气泡环绕，支持径向选中、滚轮切换、键盘数字键/方向键、贴边自动偏转 |
-| F-05 | 多语言 | 中/英起步，可扩展；跟随系统 + 手动覆盖 |
-| F-06 | 主题与皮肤 | 内置默认皮肤；支持皮肤包（资源 + 清单）导入导出 |
-| F-07 | 设置面板 | 独立窗口或环内二级面板；所有功能开关、快捷键、语言、主题、启动项 |
-| F-08 | 开机自启 | Windows 注册表/启动项、macOS LaunchAgent、Linux autostart |
-
-### 3.2 P1 · 内置能力（环上的第一圈按钮）
-
-| 编号 | 功能 | 实现要点 |
-|---|---|---|
-| F-10 | 截图 / 区域截图 / 标注 | 全屏遮罩选区 + 简易标注（矩形、箭头、马赛克、文字）→ 剪贴板 / 存盘 / OCR |
-| F-11 | 翻译 | 选中文本翻译（读剪贴板）、截图 OCR 后翻译；引擎可插拔（本地模型 / 在线 API） |
-| F-12 | 二维码识别与生成 | 屏幕区域识别、图片文件识别；反向生成二维码/短链 |
-| F-13 | 剪贴板历史 | ✔ 文本历史（去重/超限丢旧/一键回贴）；↑↓ / Home / End / PgUp / PgDn / **滚轮**都能翻；**输入即搜索**（空格分隔多关键词、Ctrl+V 粘一行、Esc 先清搜索）支持中文输入法；搜索框可用鼠标点选/拖选/双击选词（ADR-052 / ADR-053）；图片、收藏未做 |
-| F-14 | 快捷启动 / 命令面板 | 输入即搜：应用、文件、内置动作、自定义命令 |
-| F-15 | 颜色拾取 / 取色器 | 屏幕取色，复制 HEX/RGB/HSL |
-| F-16 | 番茄钟 / 提醒 | 与"小兽状态"绑定（专注时小兽进入打盹/专注形态） |
-| F-17 | 护眼（蓝光过滤） | ✔ 全屏暖色遮罩（点穿透、不抢焦点），强度 0~100 可调，默认关（ADR-040） |
-| F-18 | 窗口拖动 / 快捷键控制 | ✔ 按住 Alt 拖窗口；Alt+双击 = 最大化/还原；Alt+滚轮上 = 最大化、下 = 最小化，可用开关关掉（ADR-041） |
-| F-19 | 环上气泡球可配置 | ✔ 配几个功能就几颗球、按配置顺序均匀展开；每颗球可单独绑热键；可加「运行命令 / 打开程序」的自定义球（ADR-042）；环的几何全在设置面板「交互 → 气泡环」里调：离主体的距离、第一颗球的角度、气泡大小、一圈几颗、外圈间距（ADR-048） |
-| F-20 | 输入框像真输入框 | ✔ 名称/命令框支持单击定位光标、拖拽选区、Shift+方向键与 Ctrl+A、选中即替换（ADR-043）；再加 Ctrl+C/X/V 剪贴板、双击选词 / 三击全选、溢出时的水平滚动条与滚轮横滚（ADR-044） |
-| F-21 | 一球挂多个子项 | ✘ 已移除（ADR-047）：点球直接执行命令，不再有子项文字牌；`[[ring.items.children]]` 会被忽略 |
-| F-22 | 呼出即展开 | ✔ `interaction.expand_on_summon`（设置面板「交互」页可勾）：呼出后气泡环一直摆着，点小兽本体或右键才收起（ADR-045） |
-
-### 3.3 P2 · 扩展与生态
-
-| 编号 | 功能 | 说明 |
-|---|---|---|
-| F-20 | 功能插件化 | 每个内置功能即一个"插件"，可禁用、可排序、可替换 |
-| F-21 | 一球挂多个子项 | ✘ 已移除（ADR-047）：点球直接执行命令，不再有子项文字牌；`[[ring.items.children]]` 会被忽略 |
-| F-22 | 环菜单自定义 | 拖拽排序、分组、二级环、快捷手势（滚轮/右键 = 第二圈） |
-| F-23 | 脚本动作 | 用户写一小段脚本作为按钮行为（Rhai / JS / WASM，见架构文档） |
-| F-24 | 皮肤商店 / 分享 | 皮肤包与配置的导入导出（本地文件起步，后续可做在线） |
-| F-25 | 自动更新 | 签名校验的增量更新通道 |
+Zouwu (驺吾) is a beast from the *Classic of Mountains and Seas* (《山海经》): "a rare
+creature, big as a tiger, five-colored, its tail longer than its body; ride it and you
+travel a thousand li a day." This app borrows the shape, not the theology: a small
+five-colored creature sitting on your desktop, one hover away from the things you do
+a hundred times a day.
 
 ---
 
-## 4. 非功能性要求（比功能更重要）
+## Features
 
-- **空闲零开销**：静置时 CPU ≈ 0%。渲染采用「脏标记 + deadline 调度 + 自适应帧率」，无动画时**一帧都不画**，而非固定 60fps 空转。
-  > M0 实测（release）：空闲 **0.2~0.6% of one core**（60s 采样典型 0.31%）、常驻帧率 3.4~5fps（只有眨眼/呼吸）、交互时 60fps、RSS **~16 MB**。
-  > M1 追加：**隐藏到托盘后 15s 内 CPU 0 ms（真零）**；可见空闲 0.31~0.63%、RSS 17.7 MB。
-- **动画优雅但克制**：统一动效曲线（弹簧 / 缓动），展开收起 180~260ms，落点精准；支持"减少动效"无障碍设置与低性能降级（关闭毛玻璃/粒子）。
-- **内存目标**：常驻 < 60MB（视皮肤资源而定）。
-- **冷启动**：托盘常驻，唤出响应 < 50ms（纯本地绘制，不创建 webview）。
-- **可观测性**：内置帧耗时/掉帧统计，方便持续优化。
-- **安全**：外部脚本与命令执行需显式授权；配置与皮肤包做 schema 校验；更新包签名。
+Everything below is implemented and wired in the current build — no placeholder bubbles
+that only write a log line (that was a deliberate cull, see [ADR-042](docs/decisions.md)).
 
----
+**The widget**
 
-## 5. 技术选型结论
-
-### 5.1 推荐方案（结论）
-
-> **纯 Rust 原生渲染：`winit`(或 `tao`) + `wgpu` + `skia-safe`（2D 矢量/动画），配 `tray-icon` + `global-hotkey` + `muda`，i18n 用 `fluent`，配置用 `serde` + TOML。**
->
-> 用 Tauri 的**底层组件**（tao/tray-icon/global-hotkey 正是 Tauri 2 的底座），但**不要 webview**——因为这个应用 90% 的价值在「小窗口 + 高帧率矢量动效 + 极低空闲开销」，而 webview 恰好在这三点上最吃亏。
-
-理由：
-
-| 关注点 | 纯 Rust 原生 | Tauri 2（WebView） |
-|---|---|---|
-| 空闲开销 / 常驻内存 | 低（无 JS 引擎、无 DOM） | 每个窗口一个 webview，常驻内存高（Win 上 WebView2 多进程） |
-| 矢量动效 / 60~120fps | wgpu + Skia 直绘，可控到帧 | CSS 动效够用，但透明窗 + 复杂滤镜易掉帧 |
-| 窗口透明 / 异形 / 点击穿透 | 完全可控（分层窗口、逐像素 alpha） | 依赖各平台 webview 透明实现，坑多 |
-| 开发效率 / UI 生态 | 需自己搭 UI（本项目 UI 简单，全是自绘，反而合适） | 高（HTML/CSS 快速迭代） |
-| 体积 | ~10-20MB | ~5MB + WebView2 运行时 |
-| 团队门槛 | 高（Rust + 图形） | 低 |
-
-**混合备选**：用 Tauri 2 做 v0 原型（1~2 周验证交互与皮肤），确认形态后把渲染层换成原生。设置面板这类"表单密集"的界面，甚至可以长期保留 webview 或改用 `slint`。
-
-### 5.2 各层备选与取舍
-
-| 层 | 首选 | 备选 | 备注 |
-|---|---|---|---|
-| 窗口/事件 | `winit` + 平台适配层 | `tao`、`baseview` | 异形窗、点击穿透需平台特定代码（Win32 / Cocoa / X11+Layer Shell） |
-| 渲染 | `skia-safe`（矢量路径、渐变、滤镜、文字排版成熟） | `wgpu` + `lyon` + `glyphon`（更轻、更底层）；`vello`（GPU 矢量，仍在演进）；`femtovg` | 若皮肤用 Lottie，Skia 生态配合最好；若要极致体积选 wgpu+lyon |
-| 动画 | 自研 spring/tween 驱动 + 脏重绘 | `bevy` 动效库、`kiss3d`（过重，不推荐） | 关键是把动画状态作为唯一的重绘触发器 |
-| 皮肤动画资源 | Lottie (`.json`/`.lottie`) 经 `rlottie` 或自研渲染；或 WebP/APNG 序列帧；或 Spine | 纯代码程序化动画（骨骼少时最省） | 建议双轨：**骨架变形用代码**（形变/弹性），**角色表情用 Lottie**（设计师可交付） |
-| 托盘 | `tray-icon` | 各平台原生 API | 与 Tauri 同源，成熟 |
-| 全局热键 | `global-hotkey` | Win32 `RegisterHotKey` / Carbon / portal | Linux Wayland 无原生全局热键，需 `xdg-desktop-portal` 的 GlobalShortcuts |
-| i18n | `fluent` + `fluent-bundle`（支持复数、性别、变量） | `rust-i18n`（YAML/TOML，更简单） | 若只要"中英日"简单键值，`rust-i18n` 更省事 |
-| 配置 | `serde` + `toml`（版本号 + 迁移）；热重载靠**已有轮询节拍 + metadata**，不引 `notify` | `confy`、`ron` | 见 ADR-012：变更要按 `ChangeKind` 分类热应用，坏配置不能打断运行 |
-| 插件脚本 | 内置动作直接用 Rust trait；用户脚本用 `rhai`（轻、易嵌） | `wasmtime`（沙箱强、体积大）、`mlua` | 先支持"命令/HTTP/Shell"三类声明式动作，脚本作为 P2 |
-| 异步/任务 | `tokio`（网络、OCR、翻译等外部调用） | `smol` | 渲染线程与任务线程严格分离 |
-| 日志/诊断 | `tracing` + `tracing-appender` | | |
-
-### 5.3 关键技术风险
-
-1. **透明 + 异形 + 点击穿透**：三个平台实现方式差异大。Windows 用 `WS_EX_LAYERED`/DirectComposition + `WS_EX_NOREDIRECTIONBITMAP`；macOS 用无边框 `NSPanel`（`nonactivatingPanel` + `NSVisualEffectView`）；Linux Wayland 建议用 `wlr-layer-shell`，否则退化为普通窗口。**建议先只做 Windows，把抽象层留好。**
-2. **气泡环的命中测试与"回缩不死锁"**：鼠标从图标快速划向外圈时容易误触收起。需要"滞回区域"（hysteresis）+ 悬停判定延时 + 离开死区（死区半径 < 内圈半径）。
-3. **多显示器 / DPI 变化**：坐标需全程用逻辑像素 + 每显示器 DPI 缩放，拖拽跨屏时重建 surface。
-4. **皮肤资源的安全与性能**：皮肤包可含脚本会带来风险 → 皮肤只允许"数据 + 图片/Lottie"，不允许代码。
-5. **全屏应用与游戏**：置顶窗在全屏程序上会抢占焦点 → 检测全屏/独占全屏时自动隐藏。
-
----
-
-## 6. 里程碑（建议节奏）
-
-| 阶段 | 目标 | 产出 |
-|---|---|---|
-| M0 · 探针（3~5 天） | 验证最大风险：透明异形窗 + 气泡环自绘 + 空闲 0 CPU | 一个能拖动的圆窗，悬停 150ms 弹出 6 颗气泡 |
-| ↑ **M0 已完成** | 透明异形窗 ✔ / 气泡环 ✔ / 空闲开销 ✔ / 悬停·点击链路 ✔ | 见 7.5「当前进度」 |
-| M1 · 骨架（2 周） | 托盘、全局热键、位置记忆、配置、i18n、主题加载 | 可日常挂着用的"壳" |
-| ↑ **M1 已完成** | 托盘 ✔ / 热键 ✔ / 单实例 ✔ / 配置热重载 ✔ / 主题+皮肤 ✔ / 设置面板 ✔ / 日志落盘 ✔ | 见 7.5 |
-| M2 · 变身（2 周） | 气泡环完整体验、动效打磨、选中/键盘/滚轮、贴边避让、子气泡 | 核心交互定稿 |
-| M3 · 首批能力（3 周） | 截图、翻译、剪贴板历史 ✔、二维码 ✔ | 有实际生产力的 MVP |
-| M4 · 可扩展（3 周） | 插件清单、外部程序接入、菜单自定义、设置面板 | 用户可自行编排 |
-| M5 · 打磨发布（2 周） | 皮肤包、安装包、自动更新、性能基线测试 | v1.0 |
-
-（并行建议：M1 期间就让设计出第一版驺吾皮肤与动效规范。）
-
----
-
-## 7. 已定决策（详见 [`docs/decisions.md`](docs/decisions.md)）
-
-| # | 决策 |
+| | |
 |---|---|
-| ADR-001 | **平台：Windows 优先**，v1 只发 Windows；平台差异全部封在 `zouwu-platform` 的 trait 后，逻辑层不出现 `cfg(windows)`，为后续 macOS/Linux 留路 |
-| ADR-002 | **触发：悬停 150ms 后展开**；点击立即展开（熟练用户快通道）；热键呼出直接呈展开态；收起有 250ms 滞回 |
-| ADR-003 | **形态：气泡环**——每个功能是一颗独立圆形气泡，等角环绕小兽，弹簧错峰弹出 + 极低幅轨道浮动；屏边自动整体偏转 |
-| ADR-004 | **不做文本命令面板**，v1 纯视觉环；`launcher` 仅作为未来的一颗气泡（独立窗口） |
-| ADR-005 | ~~渲染：winit + wgpu + skia-safe~~（被 ADR-006 取代） |
-| ADR-006 | **呈现：CPU 光栅（tiny-skia）+ Windows 分层窗口**（`UpdateLayeredWindow`）；GPU 后端宣告失败 |
-| ADR-007 | **工具链：`x86_64-pc-windows-gnu` + `rust-lld`**（本机无 MSVC 的约束，不影响产品） |
-| ADR-008 | **帧调度：事件驱动 deadline + 自适应帧率**（交互 60fps / 空闲 20fps；眨眼呼吸的占空比就是常驻开销） |
-| ADR-009 | **输入：分层窗口命中不可靠 → 主动轮询光标**（窗口内 16ms、窗口外 100ms；间隔过大会漏点击） |
-| ADR-010 | **常驻形态：托盘 + 全局热键 + 单实例**；关窗 = 缩进托盘，退出只走托盘菜单 |
-| ADR-011 | **i18n：Fluent 内嵌资源**，BCP-47 标签，键名 `.` → `-` 归一 |
-| ADR-012 | **配置热重载：借输入轮询节拍做 metadata 轮询**，`ChangeKind` 分类热应用，坏配置不回退 |
-| ADR-013 | **拖动：屏幕物理坐标 + 4px 阈值**（判定做成纯函数，只靠单测验证） |
-| ADR-014 | **日志落盘：自研 `log::Log`**（按大小轮转）；`env_logger` 会抢注，必须首行 init。stderr 双写已取消，见 ADR-037 |
-| ADR-015 | **设置面板 = 第二个真窗口 + `softbuffer`**（分层窗口拿不到焦点/命中）；无"保存"按钮，改动即时落盘 |
-| ADR-016 | **文本用系统 GDI，不引字体库**（`fontdue` 解析 CJK 一个字面 175MB → 面板 RSS 879MB → 23MB） |
-| ADR-017 | **主题：TOML 增量覆盖**（`base` + `palette` 14 个令牌）；拼错字段报 `palette.<field>` |
-| ADR-018 | **皮肤加载器：目录即身份、图层即职责**（`body`/`blink`/`overlay`，长边等比归一；实测位图只比过程化快 1.5×） |
-| ADR-019 | **皮肤包 `.zwskin`：自定义单文件容器**（不引 zip；先验后读三条校验；导入不覆盖；失败弹窗） |
-| ADR-020 | **官方第二套皮肤由代码生成**（生成器与产物都进仓库；断言可见像素下限防「图塌了」） |
-| ADR-021 | **皮肤页复用主渲染管线出缩略图**（画什么就是什么；缓存键懒加载） |
-| ADR-023 | **设置面板第 5 页**：缩略图墙 + 皮肤包操作，点击即换、删除二次确认 |
-| ADR-024 | **「覆盖已安装」是勾选框**（每会话复位、勾了再确认、整目录重建、托盘不覆盖） |
-| ADR-026 | **位置安全**：面积比例判可见（≥50% 才算活着）、启动/运行期/托盘三处归位 |
-| ADR-027 | **内置素材带版本戳**：`.zouwu-builtin` + `BUILTIN_ASSET_REVISION`，改素材必须 +1 |
-| ADR-028 | **行高按字体度量算；皮肤 `scale` 由素材占比反推**（不手调，否则口径漂移） |
-| ADR-033 | **二维码：整块虚拟桌面截图 + 降采样先扫 + 独立结果窗**（`rqrr`；截图 41ms / 扫描 26ms） |
-| ADR-035 | **子窗口只隐藏不销毁**：析构持有焦点的窗口会让 USER32 同步通知别的进程，把整个进程冻住；改为复用（`show`/`reload`）|
-| ADR-036 | **关窗之前先把前台交还给自己**：隐藏持焦窗口同样会让 USER32 同步转交前台；看门狗改用不分配内存的独立日志（`logs/watchdog.log`）|
-| ADR-034 | **剪贴板历史：轮询 `GetClipboardSequenceNumber`、`history.toml` 为唯一真相、只存文本**（250ms 一次，空闲零成本） |
-| ADR-040 | **护眼：贴一整块半透明暖色遮罩，不动伽马表**（伽马是全局硬件状态，崩了就回不去；强度 = 遮罩不透明度；新置顶窗口靠 `SetWinEventHook` 毫秒级重抬遮罩） |
-| ADR-041 | **Alt 拖动窗口：低层钩子装在独立线程、自己 `SetWindowPos` 搬窗口**（不走 `WM_NCLBUTTONDOWN` 模态拖动，否则拖动期间收不到事件；`stop()` 必须 join 线程，否则连点两下会装出双钩子；**只能吞按下/抬起，绝不能吞 `WM_MOUSEMOVE`**——吞了光标自己就停了，窗口一步都挪不动；拖动基准点用按下那一刻的坐标；滚轮固定"上=最大化"不跟系统反向；忽略注入事件） |
-| ADR-042 | **气泡球由配置驱动**：唯一真相是 `[[ring.items]]` 有序列表，`resolve()` 现算（关掉的球不上环但留在配置里）；均匀分布靠既有的按数量均分；每颗球自带热键（`Slot::RingItem(i)`，单颗失败只 warn、同组合不许重复）；`schema 8` 把旧的 `qr_hotkey` / `clipboard_hotkey` 迁进对应球；自定义球命令一律 `launch::run()`（三路 `Stdio::null()`，失败开报告窗）；图标只存文件名；`hit()` 必须区分「行下标」与「配置下标」 |
-| ADR-043 | **自绘输入框的选区模型**：`Editing` 加 `anchor`（`cursor != anchor` 即有选区）；光标由真实文字度量反算、严格走字符边界；`text_inner()` 让布局/命中/绘制共用一份几何；按下记锚点、移动改光标实现拖选（移出框也继续）；点同一个框只挪光标、点另一个框一次点击完成「提交上一个 + 接续编辑」；Shift/Home/End/Ctrl+A 与「选中即替换」齐全；长行左移保证光标可见；每次按下重置 `drag_text` |
-| ADR-044 | **输入框补齐系统常识**：剪贴板 `copy_selection`/`cut_selection`/`paste`（无选区复制整段、无选区剪切不碰剪贴板、单行清洗：回车丢/换行与制表符换空格）；双击按路径词法选词、三击全选、连击 400ms+4px 计数且上限 3；`Editing.offset` 驱动水平滚动条（宽度与 DPI 由窗口层 `sync_edit_viewport` 喂入，未量视口退化成 no-op），拖 thumb 不动光标、滚轮在溢出框上横滚，滚动条画在框内下沿 5px/命中 9px |
-| ADR-046 | **牌子不画连线、窗口几何以「小兽屏幕中心」为不变量**：去掉每帧填三块大三角形的光条（只留文字牌，牌子从球心滑出自己的位置）；撑大/收回窗口改用 `GetWindowRect` 读真实矩形再 `SetWindowPos`（不再二次 `set_outer_position`），牌子开着时整段跳过 3 秒一次的显示器巡检 —— 修掉"点完子项小兽在屏幕上跳一下"  · **已移除，见 ADR-047** |
-| ADR-055 | **拖走的最大化窗口还原回拖到的地方**：`SW_RESTORE` 回的是 `rcNormalPosition`，而它只记得"当年最大化那一刻"；松手时把当前左上角写回 placement，宽高不动（最大化时 `GetWindowRect` 是整屏），且只在 `IsZoomed` 时写 |
-| ADR-054 | **呼出快捷键的字母不漏进搜索框**：`TYPING_GRACE = 250ms` + 按住 Ctrl/Alt 的组合键一律不算文字（`accepts_typing()` 纯函数可单测）；Esc 与 `Ctrl+V` 不受影响 |
-| ADR-053 | **搜索框支持鼠标选用**：单行编辑抽成 `linefield`（`trait LineField`，设置面板 `Editing` 与剪贴板 `Search` 各实现一次），几何/度量/选词/剪贴板/横向滚动共用一套；点定位、拖选、双击按路径分隔符切词、三击全选、Shift+方向、Ctrl+A/C/X/V；`draw_contents()` 一处画内容+选区+光标+滚动条；`search_focus` 显式，空框也画光标，Esc 不抢 |
-| ADR-052 | **剪贴板历史加搜索**：搜索框常驻、打开即打字（没有"先点一下"的焦点状态），空格分隔多关键词取与、大小写不敏感子串；`selected`/`scroll` 是筛后行号，映射回 `entries` 走 `selected_entry()`、`Delete` 报条目下标（报行号会删错条目）；Esc 两级；`set_ime_allowed` + `Ime::Commit` + `set_ime_cursor_area` 让中文输入法候选窗贴在框下，`Ctrl+V` 粘第一行；按键解释抽成纯函数 `search_edit()` 便于单测；打开时清空搜索词 |
-| ADR-051 | **子窗口图标与剪贴板历史滚轮**：三个真窗口（设置 / 剪贴板历史 / 二维码结果）用 `assets/zouwu-icon.png`（与 `zouwu.ico` 同源、由 `make_icon` 一起生成）做任务栏与标题栏图标，必要时把 tiny-skia 的预乘像素除回直通 alpha；剪贴板历史补上滚轮（`WHEEL_ROWS=3`，只滚视口不动选中项，触摸板细微滑动按一格算，像素级按 44px 行高折算） |
-| ADR-050 | **gnu 目标的 exe 也带上图标：自己造 COFF 资源对象**：`crates/iconres` 把 `.ico` 解析成 `IMAGE_RESOURCE_DIRECTORY` 树（只用数字 ID：`NumberOfNamedEntries=0`）、再包成单段 COFF（每个数据项的 RVA 字段配一条 `ADDR32NB` 重定位，字段里写段内偏移），`build.rs` 只负责落盘 + `link-arg`；msvc 仍走 `llvm-rc`（还带版本信息），gnu 路径放弃版本信息——手写的 `VS_VERSIONINFO` 结构对但 Explorer 不显示，正文记了为什么不再试 |
-| ADR-049 | **默认应用图标：暖色方底 + 兽首（gnu 目标如何嵌进 exe 见 ADR-050）**：`examples/make_icon.rs` 里重画——圆角方底（留 5% 边，16px 不会被切成方角）+ 深色兽首（耳朵先画、头圆盖上去糊住接缝；眼睛半径有 0.9px 下限；鼻子比眼睛小一号）+ 奶油色五官；仍是自写 ICO 容器（≤128 DIB / 256 PNG），一眼能在浅色与深色任务栏上认出来 |
-| ADR-048 | **环的几何参数全部进面板**：`[ring]` 里的 `radius` / `orbit_start_deg` / `bubble_radius` / `max_per_ring` / `ring_gap` 都有步进控件（角度 `±180°/15°`、一圈 `3~16` 颗、外圈间距 `0~200px`），中文把 `radius` 改叫「气泡环离主体的距离」；新增 `Unit::Deg`（直接显示 `°`）与 `Unit::Bubbles`（显示「8 颗」，不借用剪贴板的「条」） |
-| ADR-047 | **砍掉子项（激光条）**：功能整个删除——`beam` 模块、`RingChild`/`children`、`Scene.beams`/`BeamPaint`、`App` 的 `open_children`/`beams`/`hovered_child`/`pending_child`/`relayout_beams`/`close_children`/`beam_hit`、设置页的指路行全部移除，点球恢复「直接执行」；`schema_version` 仍是 9（老配置里的 `[[ring.items.children]]` 被 serde 忽略）；保留 `expand_on_summon`/`pinned` 与「窗口只向右下长大」「呼出时才查位置」这些修好的窗口几何不变量 |
-| ADR-045 | **子项展开成激光条**：点一下球向外射光、光的尽头挂横排文字牌（子项名字按真字宽排版，张角 45°/条上限 135°，撞车先径向外推、再顺切线摊开、最后错行保底）；窗口按需长大且先排理想大窗口再撑、小兽位置不动；`interaction.expand_on_summon` 呼出即展开并钉住气泡环  · **已移除，见 ADR-047** |
-| ADR-032 | **长说明"点开才展开"**：换行在 `layout()` 里算（行高依赖换行）、行距用固定常量、折行留 4% 余量 + 行首禁则 |
-| ADR-031 | **字体包：读字体自己的 `name` 表，`AddFontResourceEx(FR_PRIVATE)` 进程私有注册**；配置 schema 4，空串 = 系统字体 |
-| ADR-030 | **面板文字被遮挡的四个成因**：半行、section 贴线、经验式基线、GDI 不选字体 |
-| ADR-029 | **贴图路径必须乘 DPI 缩放**：只有非 100% DPI 才复现，离屏验证全在 1.0 下跑 |
-| ADR-025 | **分发：便携 zip + 自带安装**（`--install`/`--uninstall`；`%LOCALAPPDATA%`；卸载用 `Wait-Process` 等进程退出，不靠 sleep） |
+| Always-on-top layered window | Borderless, transparent, per-pixel alpha, not in the taskbar, click-through outside the beast |
+| Blink & breathe | Idle animation on a deadline scheduler; **no frame is drawn when nothing moves** |
+| Bubble ring | 150 ms hover (or a click) unfolds N bubbles with a spring curve, 24 ms stagger, slow orbital float |
+| Drag & remember | Drag anywhere; position survives restarts; if the screen layout changes and the beast ends up off-screen, it walks back by itself (ADR-026) |
+| Tray + hotkey + single instance | `Alt+Space` summons it; closing the window only hides it; a second launch wakes the first one |
+
+**Built-in actions**
+
+- **QR scan** (`Ctrl+Alt+Q`) — grabs the whole virtual desktop (multi-monitor), scans it,
+  shows every code found in its own window; click a row to copy.
+- **Clipboard history** (`Ctrl+Alt+V`) — text only, persisted to disk, deduplicated,
+  capped at 100 entries. Type to search (space = AND, IME-friendly), `↑`/`↓`/`PgUp`/`PgDn`/wheel
+  to navigate, `Enter` to paste, `Delete` to remove.
+- **Custom command bubbles** — add a bubble that runs any program/command; per-bubble global
+  hotkeys; reorder and disable items independently.
+
+**Desktop quality of life**
+
+- **Eye care** — an amber overlay across the whole virtual desktop; click-through, never
+  steals focus, re-raised whenever a new top-most window appears.
+- **Alt-drag windows** — hold `Alt` and drag any window; `Alt`+double-click toggles maximize;
+  `Alt`+wheel up/down maximizes/minimizes. Can be switched off.
+
+**Looks and language**
+
+- Themes as TOML overlays (built-in warm and night), skins as directories of PNG layers,
+  `.zwskin` single-file skin packages with strict validation, import/export from the tray.
+- Two official skins shipped: the procedural one and 折纸驺吾 (folded-paper, pure flat facets,
+  no gradients). **Right-click the pet** for a quick skin list; the current one is outlined.
+- Chinese / English with Fluent, switchable at runtime; `language = "auto"` follows the system.
+
+### Not there yet
+
+Screenshot & annotation, translation, OCR, color picker, pomodoro, a text launcher,
+scriptable plugins and auto-update are **planned, not shipped**. The ring only ever contains
+features that actually work.
 
 ---
 
-## 7.4 怎么装（给用户看的）
+## Install
+
+Download `zouwu-<version>-win64.zip` from [Releases](https://github.com/yourname/zouwu/releases)
+(~1.9 MB) and unzip. Double-click `zouwu.exe` — that's it.
 
 ```powershell
-# 便携：解压即用，双击 zouwu.exe
-# 想要开始菜单入口：
+# Optional: start-menu entry + "Apps & features" uninstall entry
 .\zouwu.exe --install
 
-# 卸载（保留配置）
+# Uninstall (keeps your config)
 .\zouwu.exe --uninstall
-# 卸载并清空配置/皮肤/日志
+
+# Uninstall and wipe config / skins / logs
 .\zouwu.exe --uninstall --purge
 ```
 
-发布物是 `dist/zouwu-<version>-win64.zip`（约 1.9 MB），由
-`powershell -File packaging/package.ps1` 生成，同时打印 sha256。
-产物落两处（内容一致）：`dist/`（面向人）与 `target/dist/`（编辑器默认看得到，
-因为新建的 `dist/` 常要重开工作区才出现在文件树里）。
+There is no MSI, no installer wizard and no admin prompt — the portable zip and the
+`--install` flag cover everything an installer would do, and one less installer is one
+less binary to sign ([ADR-025](docs/decisions.md)).
 
-为什么不是 MSI / 安装向导：见 [ADR-025](docs/decisions.md)。一句话——
-三种"安装才能做的事"（开始菜单、可卸载项、静默部署）都不需要安装器框架，
-而少一个安装器就少一份要签名的东西。
+**Requires** Windows 10/11 x64. There is **no code signature**, so SmartScreen may say
+"unknown publisher" — check the SHA-256 printed next to the release.
 
-> 已知：当前包**没有代码签名**，Windows 可能提示"未知发布者"；
-> exe 本身也不带图标资源（gnu 工具链限制），安装后快捷方式的图标由
-> 安装目录里的 `zouwu.ico` 提供。
+Your data:
 
----
-
-## 7.5 当前进度（M0 / M1 完成）
-
-代码在 `crates/`（`zouwu-core` / `zouwu-platform` / `zouwu-ui` / `zouwu-app`），
-`cargo run --release -p zouwu-app` 就能跑出一只常驻屏幕角落的驺吾。
-
-| 能力 | 状态 |
-|---|---|
-| 透明异形常驻窗 | ✔ 分层窗口（无边框、不抢焦点、不占任务栏） |
-| 默认皮肤（驺吾卡通形象） | ✔ 程序化绘制：身体/鬃毛/耳朵/尾巴/胡须 + 眨眼 + 呼吸起伏 |
-| 悬停变形（气泡环） | ✔ 悬停 150ms 展开 8 颗气泡，弹簧错峰 24ms + 轨道浮动，选中态发光 |
-| 点击 / 右键 | ✔ 左键点气泡 → 动作入口；左键点本体 → 立即展开/收起；右键 → 收起 |
-| 输入保底 | ✔ 全局光标轮询（本机分层窗口收不到鼠标消息，见 ADR-009） |
-| 主题 | ✔ `themes/<id>.toml`：`base` + 增量调色板；内置暖橙 / 夜行两套；托盘与设置面板切换即时生效（ADR-017） |
-| 皮肤加载器 | ✔ `skins/<id>/skin.toml` + PNG 图层（body/blink/overlay）；目录名须等于 id；解码失败保留当前皮肤（ADR-018） |
-| 官方第二套皮肤 | ✔ 「水墨驺吾」——由 `examples/make_skins.rs` 代码生成（含 blink/overlay 两个角色），内嵌进二进制，首启落地到磁盘；重心断言 + 左右对称，改版靠 `BUILTIN_ASSET_REVISION` 推送到老用户（ADR-020、ADR-027） |
-| 皮肤包导入导出 | ✔ `.zwskin` 单文件容器（自定格式，不引 zip）：托盘菜单 → 系统文件对话框 → 校验 → 落地；路径穿越/超长/重复/覆盖全部拒绝（ADR-019） |
-| 皮肤页 | ✔ 设置面板第 5 页：缩略图墙（复用主渲染管线，画什么就是什么）、导入/导出/删除/打开目录；点击即换、删除需确认且默认「否」（ADR-021） |
-| 自定义字体包 | ✔ 设置面板「外观」→「字体」：导入 `.ttf/.otf/.ttc`，家族名从字体自身读出，进程私有注册；缺中文字形会提示 |
-| 设置面板 | ✔ 独立窗口 + `softbuffer` 呈现，5 个分页 / 8 种控件 / 键盘可达 / 热键录制；**无保存按钮，改动即时生效并写盘**（ADR-015） |
-| 日志 | ✔ `%APPDATA%\zouwu\logs\zouwu.log`，按大小轮转（2MB×3）；级别可运行时改；panic 也落盘（ADR-014） |
-| 文本渲染 | ✔ 系统 GDI 栅格化（中文/符号 fallback 免费，常驻增量≈0），面板 RSS 879MB → 23MB（ADR-016） |
-| **二维码扫描** | ✔ `Ctrl+Alt+Q` / 托盘 / 气泡 → 截整个虚拟桌面（多屏）→ 找码 → 结果窗：点一行复制、Esc 关闭；一个码都没找到或扫描失败同样弹窗说明（ADR-033） |
-| **剪贴板历史** | ✔ `Ctrl+Alt+V` / 托盘 / 气泡 → 历史窗：↑↓ 选择、Enter 复制并关窗、Delete 删一条、点击即复制、滚轮翻页、**输入即搜索**（中文可用）；同内容不重复占行、超容量丢最旧、多行内容保留（ADR-034 / ADR-051 / ADR-052 / ADR-053） |
-| **护眼（蓝光过滤）** | ✔ 整个虚拟桌面盖一层琥珀色分层窗（点穿透 / 不抢焦点 / 不进 Alt+Tab）；设置面板「通用 → 护眼」开关 + 强度 0~100 步进 5，默认关；新开窗口（含自建置顶的悬浮窗）毫秒级被遮，启动、显示器变化、退出都跟到底（ADR-040） |
-| **窗口拖动 / Alt 控制** | ✔ 低层鼠标钩子（独立线程 + 消息循环）：按住 Alt 拖光标下的窗口、Alt+双击最大化/还原、Alt+滚轮上滚最大化 / 下滚最小化（120ms 防抖）；不接管本进程窗口与桌面壳窗口，忽略脚本注入的鼠标动作；设置面板「通用 → 窗口拖动」可关，默认开（ADR-041） |
-| **气泡球可配置** | ✔ 环上放几颗球由配置决定：`[[ring.items]]` 一条一颗（顺序即展开顺序、`enabled = false` 就不上环），按启用数量均匀均分；每颗球可单独绑热键（留空 = 没有）；可新增「运行命令 / 打开程序」的自定义球（名字 + 命令 + 图标）；设置面板「气泡球」页上下调序、逐颗配热键（ADR-042） |
-| **输入框可选中** | ✔ 气泡球的名称/命令框：单击把光标放到鼠标处、按住拖选、Shift+←/→/Home/End 拉选区、Ctrl+A 全选，选中后打字或退格 = 替换/删除选区；从名字框直接点命令框会提交名字并接着编辑命令（ADR-043）。Ctrl+C/X/V 走系统剪贴板、粘多行自动压成一行；双击选一个路径词、三击全选；长命令溢出时框底出现滚动条，可以直接拖、也可以在框上滚轮横滚（ADR-044） |
-| **子项激光条** | ✘ 已移除（ADR-047）：改回「点球直接执行」，不再摆文字牌；「呼出即展开」保留（设置→交互→「呼出即展开气泡环」，配 `interaction.expand_on_summon`） |
-| 托盘常驻 | ✔ 左键切显隐，右键菜单（显示/隐藏、扫描二维码、剪贴板历史、回到主屏、配置文件…、开机自启、语言、退出） |
-| 位置安全 | ✔ 启动与运行期（每 3s）都校验「还有多少面积在真实屏幕上」，不足 50% 自动搬回宠物位；托盘可强制归位（ADR-026） |
-| 全局热键 | ✔ 默认 `Alt+Space`，可在 `config.toml` 改；解析失败回退默认 |
-| 单实例 | ✔ 命名内核事件：第二次启动把已有窗口叫出来，然后自己退出 |
-| 关窗语义 | ✔ 关窗 / Esc = 缩进托盘（**不是退出**），退出只走托盘菜单 |
-| 开机自启 | ✔ `HKCU\...\Run` 单值，写后读回校验，托盘可勾选 |
-| 多语言 | ✔ Fluent 中/英，托盘内即时切换，`language = "auto"` 跟随系统 |
-| 配置热重载 | ✔ 改 `config.toml` 保存即生效（语言/主题/热键/自启/环/尺寸/置顶/日志），坏配置跳过并保留现状（ADR-012） |
-| 安装 / 卸载 | ✔ 便携 zip + `zouwu --install`（复制到 `%LOCALAPPDATA%\Programs\zouwu`、开始菜单快捷方式、设置→应用里的卸载项、`--uninstall --purge` 清用户数据）；不做安装器框架（ADR-025） |
-| exe 图标 | ◐ 默认图标 = 暖色圆角方底 + 深色兽首（两只尖耳、两眼、小鼻子），`examples/make_icon.rs` 用 tiny-skia 画完自己拼 ICO（16/20/24/32/48/64/128/256，≤128 用 DIB、256 用 PNG）；gnu 工具链没有 `windres`，由 `crates/iconres` 现场把资源树拼成 COFF 对象再交给链接器，所以 **exe 自己也带图标**；安装时另把 `zouwu.ico` 落到安装目录供快捷方式引用；设置/剪贴板历史/二维码三个真窗口的标题栏与任务栏图标用同源的 `assets/zouwu-icon.png`（ADR-025 / ADR-049 / ADR-050 / ADR-051） |
-| 矢量图标字体 | ✖ 8 个 glyph 先程序化绘制，M2 换图标字体 |
-
-**可复现的验收方式**：
-
-```bash
-cargo test --workspace                     # 261 个单测：几何 / 弹簧 / 布局 / 屏边避让 / 配置 / 主题 / 皮肤 / 皮肤包 / 字体包 / 日志 / 面板 / 文本 / i18n / 二维码 / 结果窗 / 剪贴板历史 / 护眼
-cargo run -p zouwu-ui --example offscreen  # 离屏渲染 → target/zouwu-offscreen/*.png，直接看图
-cargo run -p zouwu-ui --example settings_shot   # 设置面板 4 个分页 → target/zouwu-settings/*.png（2×）
-cargo run -p zouwu-ui --example bench      # 单帧成本模型（release）
-cargo run --release -p zouwu-ui --example skin_demo            # 造一份皮肤 → 走真实解码 → 导出 4 张图 + 三种路径耗时
-cargo run --release -p zouwu-ui --example skin_demo -- --install  # 真的装进 %APPDATA%/zouwu/skins/，托盘里就能选
-cargo run --release -p zouwu-ui --example skin_demo -- --preview assets/skins/zouwu-ink  # 预览某个皮肤目录（改图即看）
-cargo run --release -p zouwu-ui --example make_skins              # 重新生成官方第二套皮肤（assets/skins/zouwu-ink/，产物要提交）
-cargo run -p zouwu-platform --example skinpack_tool -- list       # 皮肤包：list / export <id> [dest] / import <file>（无 GUI，可脚本化）
-ZOUWU_PERF=1 cargo run --release -p zouwu-app   # 每 60 帧报一次实际帧率
-ZOUWU_SETTINGS=1 cargo run --release -p zouwu-app   # 启动即开设置面板（托盘菜单没法脚本化）
-cargo run -p zouwu-platform --example autostart_check -- status   # 开机自启读写（有副作用，故不做成单测）
-powershell -File packaging/package.ps1     # 打包 → dist/ 与 target/dist/ 各一份 zip + sha256（约 1.9 MB）
-powershell -File packaging/publish.ps1     # 打包 + 发布：替换 C:\X\Zouwu\dist\zouwu-0.1.0\zouwu.exe 并重启（校验字节）
-target/release/zouwu.exe --install         # 装到 %LOCALAPPDATA%\Programs\zouwu（退出码 0/1，可脚本化）
-target/release/zouwu.exe --uninstall --purge   # 卸载，连配置/皮肤/日志一起删
+```
+%APPDATA%\zouwu\config.toml      settings (saved and applied on write, no restart)
+%APPDATA%\zouwu\skins\           skins (imported .zwskin files unpack here)
+%APPDATA%\zouwu\themes\          custom color themes
+%APPDATA%\zouwu\history.toml     clipboard history
+%APPDATA%\zouwu\logs\zouwu.log   log (rotating, 2 MB x 3) — look here first
 ```
 
 ---
 
-## 8. 仍待定
+## Build from source
 
-| # | 问题 | 何时必须定 |
-|---|---|---|
-| O1 | OCR / 翻译：本地模型 vs 在线 API（体积 vs 隐私 vs 成本） | M3 前 |
-| O2 | 皮肤可视化编辑器 / 分享社区 | M5 前 |
-| O3 | 用户脚本动作：Rhai vs wasmtime | M4 前 |
-| O4 | 开源协议（建议 MIT+Apache-2.0，素材单独 CC-BY） | 公开发布前 |
-| O5 | 驺吾插画来源与授权（原创 / 约稿 / 素材） | M1 前 |
-| O6 | 精灵图缓存 —— 实测后不急（位图皮肤已给 1.56×） | M5 若仍嫌慢 |
-| O7 | 动画占空比是否再压（现 20fps / 呼吸占 10% 时间） | M2 动效定稿 |
+The project is pinned to `stable-x86_64-pc-windows-gnu` (see `rust-toolchain.toml`) and
+uses `rust-lld`, so it builds without a Visual Studio installation. MSVC works too — the
+only difference is how the icon resource gets linked ([ADR-050](docs/decisions.md)).
+
+```bash
+cargo run --release -p zouwu-app        # run the widget
+cargo test --workspace                  # 266 unit tests, zero external fixtures
+cargo fmt --all --check
+```
+
+Handy while iterating (no desktop needed — these render offscreen to PNG):
+
+```bash
+cargo run -p zouwu-ui --example offscreen        # collapsed / expanded / hi-DPI frames
+cargo run -p zouwu-ui --example settings_shot    # all settings pages, 1x and 2x
+cargo run --release -p zouwu-ui --example bench  # per-frame cost model
+ZOUWU_PERF=1 cargo run --release -p zouwu-app    # report actual FPS every 60 frames
+```
+
+Package a release zip (also prints its SHA-256):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File packaging/package.ps1
+```
 
 ---
 
-## 9. 文档索引
+## Configuration
 
-- [`docs/decisions.md`](docs/decisions.md) — **已定稿决策（ADR）**：平台、触发方式、气泡环形态、渲染栈
-- [`docs/architecture.md`](docs/architecture.md) — 架构、窗口行为、渲染与动画、插件与皮肤格式
-- [`docs/roadmap.md`](docs/roadmap.md) — 里程碑任务拆解与验收标准
+Everything lives in `%APPDATA%\zouwu\config.toml` and hot-reloads on save — a broken file is
+reported and skipped, never applied ([ADR-012](docs/decisions.md)). Roughly:
+
+```toml
+schema_version = 9
+
+[general]
+language = "auto"          # "zh-CN" | "en-US" | "auto"
+hotkey = "Alt+Space"
+start_on_boot = false
+
+[appearance]
+theme = "zouwu-warm"
+skin = "zouwu-ink"
+
+[eye_care]
+enabled = false
+strength = 35              # 0..100
+
+[alt_drag]
+enabled = true
+
+[clipboard]
+enabled = true
+limit = 100
+
+[interaction]
+hover_delay_ms = 150
+collapse_delay_ms = 250
+expand_on_summon = false
+
+[ring]
+radius = 112.0             # distance from the beast to the bubble centers
+bubble_radius = 24.0
+max_per_ring = 8
+orbit_start_deg = -90.0
+
+# One entry = one bubble, in ring order.
+[[ring.items]]
+id = "builtin.qrcode"
+enabled = true
+hotkey = "Ctrl+Alt+Q"
+
+[[ring.items]]
+id = "custom.1"
+enabled = true
+hotkey = "Ctrl+Alt+E"
+label = "Editor"
+command = "notepad.exe"
+```
+
+Most of this also has a UI: the settings panel is a second real window (five pages:
+General / Interaction / Appearance / Skins / About) with **no save button** — changes apply
+and are written immediately.
+
+---
+
+## How it works
+
+```
+crates/zouwu-core      domain: geometry, spring animation, ring layout, config schema,
+                       themes, skins, i18n, clipboard model, QR glue
+crates/zouwu-platform  Win32: layered window, tray, global hotkeys, clipboard, autostart,
+                       GDI text, single instance, Alt-drag hook, install, rotating log
+crates/zouwu-ui        rasterization (tiny-skia), scene painting, settings panel,
+                       clipboard / QR / skin-picker windows
+crates/zouwu-app       assembly, main loop, CLI (--install / --uninstall / --version)
+crates/iconres         build-time COFF resource object so the exe carries its icon
+```
+
+Four decisions explain most of the codebase:
+
+1. **No webview, no GPU.** A transparent, click-through, non-activating window with
+   per-pixel alpha is exactly what `UpdateLayeredWindow` + a CPU rasterizer does well, and
+   what a webview does badly ([ADR-006](docs/decisions.md)). Release exe: ~7 MB, no runtime
+   to install.
+2. **Event-driven frames.** Rendering is scheduled by deadline with an adaptive frame rate:
+   20 fps when breathing, 60 fps while you interact, **0 frames when idle**
+   ([ADR-008](docs/decisions.md)). Measured idle: 0.31% of one core, 3.4–5 fps,
+   ~17.7 MB RSS — and 0 ms of CPU in the 15 s after hiding to the tray.
+3. **The system font stack, not a font library.** Parsing CJK fonts in-process cost 879 MB
+   RSS; GDI text brings it to 23 MB ([ADR-016](docs/decisions.md)).
+4. **Poll the cursor instead of trusting hit-testing.** Layered windows do not reliably
+   receive mouse messages, so input is sampled on a 16 ms (inside) / 100 ms (outside) beat
+   ([ADR-009](docs/decisions.md)).
+
+More in [`docs/`](docs): [decisions](docs/decisions.md) (55 ADRs, each with the cost it
+accepted), [architecture](docs/architecture.md), [roadmap](docs/roadmap.md).
+
+---
+
+## Contributing
+
+Issues and PRs are welcome. Before sending a patch:
+
+```bash
+cargo test --workspace && cargo fmt --all --check
+```
+
+If the change alters behavior, add an ADR entry to `docs/decisions.md` — the file is the
+project's memory, and "why" ages better than "what". Windows-only code belongs in
+`zouwu-platform` behind a trait; `zouwu-core` and `zouwu-ui` must stay platform-neutral so a
+macOS/Linux port stays possible.
+
+## License
+
+Code is dual-licensed under either of [MIT](LICENSE-MIT) or
+[Apache-2.0](LICENSE-APACHE), at your option. Artwork and skins under `assets/` are
+CC BY 4.0 unless noted otherwise.

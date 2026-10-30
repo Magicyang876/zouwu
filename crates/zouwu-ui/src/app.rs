@@ -36,6 +36,7 @@ use zouwu_core::skin::PROCEDURAL_SKIN_ID;
 use crate::history::{HistoryWindow, Outcome as HistoryOutcome};
 use crate::settings_window::{Outcome as SettingsOutcome, SettingsWindow};
 use crate::skin::Skin;
+use crate::skin_menu::{Outcome as SkinMenuOutcome, SkinMenuWindow};
 use zouwu_core::theme::Theme;
 
 use zouwu_platform::autostart;
@@ -253,10 +254,14 @@ struct App {
     /// 不直接在 `on_click` 里执行：有些动作要建窗口，而建窗口需要
     /// `&ActiveEventLoop`，那个引用只在 `about_to_wait` / `window_event` 里拿得到。
     pending_action: Option<String>,
+    /// 右键要开形象菜单：这里只记一笔，真正建窗口在 `about_to_wait`。
+    pending_skin_menu: bool,
     /// 结果小窗（二维码扫描结果等）。
     report: Option<ReportWindow>,
     /// 剪贴板历史窗。
     history_window: Option<HistoryWindow>,
+    /// 右键呼出的形象列表（真窗口，见 `skin_menu.rs`）。
+    skin_menu: Option<SkinMenuWindow>,
     /// 剪贴板历史数据。
     history: History,
     /// 上一次看到的剪贴板序号（`None` = 还没有基线）。
@@ -381,8 +386,10 @@ impl App {
             tray: None,
             hotkeys: None,
             pending_action: None,
+            pending_skin_menu: false,
             report: None,
             history_window: None,
+            skin_menu: None,
             history,
             // 启动时**只记基线**，不把当前剪贴板内容当成"刚复制"。
             clipboard_seq: zouwu_platform::clipboard::sequence(),
@@ -1196,6 +1203,9 @@ impl App {
             tray.apply_theme(&id);
         }
         self.refresh_tray_icon();
+        if let Some(menu) = self.skin_menu.as_mut() {
+            menu.set_theme(self.theme.clone());
+        }
         self.save_config();
         self.last_frame = now;
         self.dirty = true;
@@ -2109,6 +2119,69 @@ impl App {
         }
     }
 
+    /// 打开/关闭右键形象菜单。
+    ///
+    /// 已经开着就关掉：右键是开关，不是"叠加打开"——不然连点两下会叠出两个窗。
+    fn open_skin_menu(&mut self, event_loop: &ActiveEventLoop, now: Instant) {
+        if self.skin_menu.is_some() {
+            self.close_skin_menu(now);
+            return;
+        }
+        let choices = zouwu_platform::assets::skin_choices(&self.i18n);
+        if choices.is_empty() {
+            log::warn!("skin menu: no skins to show");
+            return;
+        }
+        let Some((x, y)) = zouwu_platform::layer::cursor_position() else {
+            log::warn!("skin menu: no cursor position");
+            return;
+        };
+        let current = self.config.appearance.skin.clone();
+        let title = self.i18n.t("skin.menu.title");
+        match SkinMenuWindow::new(
+            event_loop,
+            choices,
+            current,
+            self.theme.clone(),
+            title,
+            (x, y),
+        ) {
+            Ok(window) => self.skin_menu = Some(window),
+            Err(err) => log::error!("skin menu: {err}"),
+        }
+    }
+
+    fn skin_menu_event(&mut self, event: WindowEvent) {
+        crate::watchdog::enter(crate::watchdog::stage::HISTORY_EVENT);
+        let mut outcomes = Vec::new();
+        if let Some(menu) = self.skin_menu.as_mut() {
+            outcomes = menu.window_event(&event);
+        }
+        for outcome in outcomes {
+            match outcome {
+                SkinMenuOutcome::Close => self.close_skin_menu(Instant::now()),
+                SkinMenuOutcome::Pick(id) => {
+                    let now = Instant::now();
+                    self.close_skin_menu(now);
+                    self.set_skin(id, now);
+                }
+            }
+        }
+    }
+
+    /// 关菜单，并把按键基线对齐：菜单里那次点击的按下/抬起不能被当成"点小兽"。
+    fn close_skin_menu(&mut self, now: Instant) {
+        if let Some(menu) = self.skin_menu.take() {
+            menu.close();
+        }
+        self.last_child_closed_at = now;
+        self.buttons_down = (
+            zouwu_platform::layer::left_button_down(),
+            zouwu_platform::layer::right_button_down(),
+        );
+        self.next_poll = now;
+    }
+
     fn history_event(&mut self, event: WindowEvent) {
         crate::watchdog::enter(crate::watchdog::stage::HISTORY_EVENT);
         log::trace!("app: history event {event:?}");
@@ -2367,9 +2440,11 @@ impl App {
                 }
             }
             MouseButton::Right => {
-                // M1 换成托盘友好的上下文菜单；M0 先收起
+                // 右键 = 快速换形象。先收起气泡环，再把菜单挂到光标旁边。
+                // 建窗口要 `&ActiveEventLoop`（`on_click` 拿不到），所以只记一笔。
                 self.pinned = false;
                 self.set_expanded(false, now);
+                self.pending_skin_menu = true;
             }
             _ => {}
         }
@@ -2642,6 +2717,11 @@ impl ApplicationHandler for App {
             self.history_event(event);
             return;
         }
+        // 形象菜单同理。
+        if self.skin_menu.as_ref().is_some_and(|m| m.id() == id) {
+            self.skin_menu_event(event);
+            return;
+        }
         let now = Instant::now();
         match event {
             WindowEvent::RedrawRequested => {
@@ -2815,6 +2895,10 @@ impl ApplicationHandler for App {
                 self.dirty = true;
                 window.request_redraw();
             }
+        }
+
+        if std::mem::take(&mut self.pending_skin_menu) {
+            self.open_skin_menu(event_loop, now);
         }
 
         // 气泡/热键记下的动作在这里执行：建窗口要 `&ActiveEventLoop`，
