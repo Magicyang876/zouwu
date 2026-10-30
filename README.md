@@ -231,7 +231,7 @@ Four decisions explain most of the codebase:
    receive mouse messages, so input is sampled on a 16 ms (inside) / 100 ms (outside) beat
    ([ADR-009](docs/decisions.md)).
 
-More in [`docs/`](docs): [decisions](docs/decisions.md) (58 ADRs, each with the cost it
+More in [`docs/`](docs): [decisions](docs/decisions.md) (59 ADRs, each with the cost it
 accepted), [architecture](docs/architecture.md), [roadmap](docs/roadmap.md).
 
 ---

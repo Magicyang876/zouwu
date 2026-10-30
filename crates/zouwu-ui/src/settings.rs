@@ -64,6 +64,15 @@ const SECTION_TOP_GAP: f32 = 10.0;
 const SECTION_RULE_INSET: f32 = 8.0;
 const TEXT_ROW_H: f32 = 34.0;
 const CONTROL_W: f32 = 210.0;
+/// 只显示值的行（文件路径、版本号）用更宽的控件区。
+///
+/// `C:\Users\…\AppData\Roaming\zouwu\logs\zouwu.log` 塞进 210px 只能截成
+/// `…ta\Roaming\zouwu\logs\zouwu.log`（用户报的就是这个），而这些行右侧
+/// 没有开关也没有箭头，宽度完全是浪费的。显示时长路径已经折成
+/// `%APPDATA%\zouwu\logs\zouwu.log`（见 `shorten_path`），再给宽一点就整条看得见。
+const VALUE_W: f32 = 320.0;
+/// 值列放宽后留给标签的最小宽度：再窄的名字（如「配置文件」）也不会被截。
+const VALUE_LABEL_MIN: f32 = 190.0;
 const BUTTON_W: f32 = 170.0;
 
 // 气泡球行里复合子控件的宽度（从右往左：开关 / 热键框 / ↓ / ↑）。
@@ -738,6 +747,50 @@ pub struct Paths {
     pub log: String,
 }
 
+/// 把路径前缀换回 `%APPDATA%` 这类变量名（**只用于显示**）。
+///
+/// `C:\Users\admin\AppData\Roaming\zouwu\logs\zouwu.log` 有 58 个字符，
+/// 值列再宽也放不下；换成 `%APPDATA%\zouwu\logs\zouwu.log` 就只剩 29 个。
+/// 变量名还有额外好处：用户拿这条路径去问人、贴到 issue 里时不会泄露用户名。
+///
+/// 注意只换 `\` 边界上的整段前缀：`C:\Users\adm` 不能吃掉 `C:\Users\admin\…`。
+pub fn shorten_path(path: &str) -> String {
+    let roots: Vec<(String, String)> = ["LOCALAPPDATA", "APPDATA", "USERPROFILE"]
+        .into_iter()
+        .filter_map(|var| {
+            let root = std::env::var(var).ok()?;
+            (!root.is_empty()).then(|| (format!("%{var}%"), root))
+        })
+        .collect();
+    shorten_with(path, &roots)
+}
+
+/// `shorten_path` 的实现（根目录作为参数传进来，测试就不用摆弄环境变量）。
+///
+/// 顺序要紧：`LOCALAPPDATA` / `APPDATA` 都落在 `USERPROFILE` 下面，
+/// 先试长的，否则 `C:\Users\admin\…` 会被 `%USERPROFILE%` 抢先吃掉。
+fn shorten_with(path: &str, roots: &[(String, String)]) -> String {
+    // 统一成反斜杠再比：配置里往往存的是正斜杠（`~/.config/...` 风格）。
+    let norm = path.replace('/', "\\");
+    let lower = norm.to_ascii_lowercase();
+    for (label, root) in roots {
+        let root = root.replace('/', "\\");
+        let root = root.trim_end_matches('\\');
+        if root.is_empty() {
+            continue;
+        }
+        let r = root.to_ascii_lowercase();
+        if lower.starts_with(&r) {
+            let rest = &norm[r.len()..];
+            // 整段目录才换：`C:\Users\adm` 不能吃掉 `C:\Users\admin\…`。
+            if rest.is_empty() || rest.starts_with('\\') {
+                return format!("{label}{rest}");
+            }
+        }
+    }
+    norm
+}
+
 impl Model {
     pub fn new(
         config: Config,
@@ -1236,7 +1289,7 @@ pub fn build_rows(model: &Model) -> Vec<Row> {
                 label: i18n.t("settings.log.file"),
                 hint: None,
                 control: Control::Value {
-                    text: model.cwd_paths.log.clone(),
+                    text: shorten_path(&model.cwd_paths.log),
                 },
             });
             rows.push(Row {
@@ -1268,7 +1321,7 @@ pub fn build_rows(model: &Model) -> Vec<Row> {
                 label: i18n.t("settings.about.config"),
                 hint: None,
                 control: Control::Value {
-                    text: model.cwd_paths.config.clone(),
+                    text: shorten_path(&model.cwd_paths.config),
                 },
             });
             rows.push(Row {
@@ -1699,6 +1752,12 @@ pub fn layout(model: &Model, w: f32, h: f32) -> Layout {
                 let tw = (rect.w * 0.52).clamp(160.0, 360.0);
                 let box_rect = Rect::new(rect.right() - tw, y + (rh - 30.0) * 0.5, tw, 30.0);
                 (box_rect, none, none, none, box_rect)
+            }
+            // 值列：比默认宽，且不挤掉标签。
+            Control::Value { .. } => {
+                let w = (rect.w - VALUE_LABEL_MIN).clamp(CONTROL_W, VALUE_W);
+                let c = Rect::new(rect.right() - w, y + (rh - 30.0) * 0.5, w, 30.0);
+                (c, none, none, none, none)
             }
             _ => (control, none, none, none, control),
         };
@@ -3357,6 +3416,89 @@ mod tests {
             assert!(!l.rows.is_empty());
             assert!(l.rows_h > 0.0);
         }
+    }
+
+    #[test]
+    fn shorten_path_uses_env_var_names() {
+        let roots = vec![
+            (
+                "%APPDATA%".to_string(),
+                "C:\\Users\\a\\AppData\\Roaming".to_string(),
+            ),
+            (
+                "%LOCALAPPDATA%".to_string(),
+                "C:\\Users\\a\\AppData\\Local".to_string(),
+            ),
+            ("%USERPROFILE%".to_string(), "C:\\Users\\a".to_string()),
+        ];
+        assert_eq!(
+            shorten_with(
+                "C:\\Users\\a\\AppData\\Roaming\\zouwu\\logs\\zouwu.log",
+                &roots
+            ),
+            "%APPDATA%\\zouwu\\logs\\zouwu.log"
+        );
+        assert_eq!(
+            shorten_with("C:\\Users\\a\\AppData\\Local\\Temp\\x.log", &roots),
+            "%LOCALAPPDATA%\\Temp\\x.log"
+        );
+        // 只在 `USERPROFILE` 下、不在 AppData 里。
+        assert_eq!(
+            shorten_with("C:\\Users\\a\\zouwu\\config.toml", &roots),
+            "%USERPROFILE%\\zouwu\\config.toml"
+        );
+        // 正斜杠也要认（老配置里存的是 `C:/Users/...`）。
+        assert_eq!(
+            shorten_with("C:/Users/a/AppData/Roaming/zouwu/config.toml", &roots),
+            "%APPDATA%\\zouwu\\config.toml"
+        );
+        // 只是字符串前缀、不是整段目录：不能吃。
+        assert_eq!(
+            shorten_with("C:\\Users\\admin\\x.log", &roots),
+            "C:\\Users\\admin\\x.log"
+        );
+        // 根目录本身（没有后半截）换成变量名，别降级成 `%USERPROFILE%\AppData…`。
+        assert_eq!(
+            shorten_with("C:\\Users\\a\\AppData\\Roaming", &roots),
+            "%APPDATA%"
+        );
+        // 完全不相干的路径原样返回。
+        assert_eq!(shorten_with("D:\\x\\zouwu.log", &roots), "D:\\x\\zouwu.log");
+    }
+
+    #[test]
+    fn value_rows_leave_room_for_the_label() {
+        // 显示值的行现在比默认控件宽（路径要看得全），但不能把标签挤到看不见。
+        let mut m = model();
+        m.set_tab(Tab::About);
+        for width in [MIN_SIZE.0, 760.0, 1200.0] {
+            let l = layout(&m, width, 600.0);
+            for (row, rl) in &l.rows {
+                if !matches!(row.control, Control::Value { .. }) {
+                    continue;
+                }
+                assert!(
+                    rl.control.w >= CONTROL_W - 0.5,
+                    "值列不该比默认控件窄: {}",
+                    rl.control.w
+                );
+                assert!(
+                    rl.control.x - rl.rect.x >= VALUE_LABEL_MIN,
+                    "标签区被挤到 {} 逻辑像素（宽 {width}）",
+                    rl.control.x - rl.rect.x
+                );
+                assert!(rl.control.right() <= rl.rect.right() + 0.5);
+            }
+        }
+        // 默认宽度下确实是放宽过的，而不是原地不动。
+        let l = layout(&m, 760.0, 600.0);
+        let widest = l
+            .rows
+            .iter()
+            .filter(|(row, _)| matches!(row.control, Control::Value { .. }))
+            .map(|(_, rl)| rl.control.w)
+            .fold(0.0f32, f32::max);
+        assert!(widest > CONTROL_W, "值列没变宽: {widest}");
     }
 
     #[test]
