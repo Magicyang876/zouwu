@@ -18,7 +18,7 @@ use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{Window, WindowId};
+use winit::window::{Window, WindowId, WindowLevel};
 use zouwu_core::geom::Point;
 use zouwu_core::theme::Theme;
 
@@ -99,13 +99,14 @@ impl SkinMenuWindow {
         theme: Theme,
         title: String,
         at: (i32, i32),
+        pad: f32,
     ) -> Result<Self, String> {
         let layout = layout(choices.len());
         let scale = event_loop
             .primary_monitor()
             .map(|m| m.scale_factor())
             .unwrap_or(1.0);
-        let (x, y) = place(event_loop, layout.size, at, scale);
+        let (x, y) = place(event_loop, layout.size, at, scale, pad);
         let attrs = Window::default_attributes()
             .with_title(&title)
             .with_window_icon(crate::icon::app_icon())
@@ -113,6 +114,9 @@ impl SkinMenuWindow {
             .with_position(PhysicalPosition::new(x, y))
             .with_decorations(false)
             .with_resizable(false)
+            // 小兽是分层**置顶**窗口：菜单不置顶就会被压在它下面（实测菜单左上角
+            // 被小兽的耳朵盖住）。菜单比小兽晚建，同层级里就在上面。
+            .with_window_level(WindowLevel::AlwaysOnTop)
             .with_visible(true);
         let window = Arc::new(
             event_loop
@@ -124,7 +128,7 @@ impl SkinMenuWindow {
         crate::frame::apply(&window, &theme);
         crate::frame::life("skin-menu", "created", &window);
         window.focus_window();
-        let this = Self {
+        let mut this = Self {
             window,
             presenter,
             pixmap: None,
@@ -138,7 +142,7 @@ impl SkinMenuWindow {
             frame_dark: false,
             opened_at: Instant::now(),
         };
-        this.request_redraw();
+        this.repaint();
         Ok(this)
     }
 
@@ -150,6 +154,17 @@ impl SkinMenuWindow {
         self.window.request_redraw();
     }
 
+    /// 立刻画一帧，不走 `RedrawRequested`。
+    ///
+    /// 实测这个窗口**收不到** `RedrawRequested`（同样的写法在设置/历史/结果窗上都正常）：
+    /// 表现是菜单开出来之后是一整块纯色底，一个字都没有。菜单只有几行字、画一次不到 1ms，
+    /// 索性所有状态变化都同步画，不依赖事件循环的时序。
+    fn repaint(&mut self) {
+        if let Err(err) = self.redraw() {
+            log::warn!("skin menu paint failed: {err}");
+        }
+    }
+
     pub fn close(&self) {
         crate::frame::life("skin-menu", "hidden", &self.window);
         self.window.set_visible(false);
@@ -157,8 +172,9 @@ impl SkinMenuWindow {
 
     pub fn set_theme(&mut self, theme: Theme) {
         self.theme = theme;
-        crate::frame::apply(&self.window, &self.theme);
-        self.request_redraw();
+        self.frame_dark = false;
+        self.pixmap = None;
+        self.repaint();
     }
 
     /// 换一份列表（导入/删除皮肤之后）。
@@ -167,10 +183,11 @@ impl SkinMenuWindow {
         self.choices = choices;
         self.current = current;
         self.hover = None;
+        self.pixmap = None;
         let _ = self
             .window
             .request_inner_size(LogicalSize::new(self.layout.size.0, self.layout.size.1));
-        self.request_redraw();
+        self.repaint();
     }
 
     pub fn window_event(&mut self, event: &WindowEvent) -> Vec<Outcome> {
@@ -178,17 +195,27 @@ impl SkinMenuWindow {
         let scale = self.window.scale_factor() as f32;
         match event {
             WindowEvent::CloseRequested => return vec![Outcome::Close],
+            // 窗口尺寸变了（首次显示、缩放、DPI 变化）必须把 softbuffer 的
+            // surface 一起 resize：否则 present() 的参数与窗口对不上，
+            // 表现是**整块窗口一片纯色**——菜单里一个字都看不到。
+            WindowEvent::Resized(size) => {
+                crate::frame::apply(&self.window, &self.theme);
+                self.presenter.resize(size.width.max(1), size.height.max(1));
+                self.pixmap = None;
+                self.repaint();
+                return Vec::new();
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = Point::new(position.x as f32 / scale, position.y as f32 / scale);
                 let hover = row_at(&self.layout, self.cursor);
                 if hover != self.hover {
                     self.hover = hover;
-                    self.request_redraw();
+                    self.repaint();
                 }
             }
             WindowEvent::CursorLeft { .. } => {
                 if self.hover.take().is_some() {
-                    self.request_redraw();
+                    self.repaint();
                 }
             }
             WindowEvent::MouseInput {
@@ -221,11 +248,8 @@ impl SkinMenuWindow {
                     return vec![Outcome::Close];
                 }
             }
-            WindowEvent::RedrawRequested => {
-                if let Err(err) = self.redraw() {
-                    log::error!("skin menu redraw failed: {err}");
-                }
-            }
+            // 理论上用不到（内容变化都已经同步画过），留着兜底。
+            WindowEvent::RedrawRequested => self.repaint(),
             _ => {}
         }
         Vec::new()
@@ -239,7 +263,11 @@ impl SkinMenuWindow {
         }
         let mut pixmap = match self.pixmap.take() {
             Some(p) if p.width() == size.width && p.height() == size.height => p,
-            _ => Pixmap::new(size.width, size.height).ok_or("pixmap")?,
+            _ => {
+                // 尺寸变了：surface 也要跟上，别让 present() 拿旧尺寸凑合。
+                self.presenter.resize(size.width, size.height);
+                Pixmap::new(size.width, size.height).ok_or("pixmap")?
+            }
         };
         draw(
             &mut pixmap,
@@ -331,12 +359,19 @@ pub fn draw(pixmap: &mut Pixmap, layout: &Layout, theme: &Theme, view: &View<'_>
 /// 把菜单摆到光标旁边，并夹进屏幕里。
 ///
 /// 优先放到光标右下（鼠标惯用方向），右边/下边放不下就翻到左上。
-fn place(event_loop: &ActiveEventLoop, size: (f32, f32), at: (i32, i32), scale: f64) -> (i32, i32) {
+fn place(
+    event_loop: &ActiveEventLoop,
+    size: (f32, f32),
+    at: (i32, i32),
+    scale: f64,
+    pad: f32,
+) -> (i32, i32) {
     let (w, h) = (
         (size.0 * scale as f32) as i32,
         (size.1 * scale as f32) as i32,
     );
-    let gap = (8.0 * scale) as i32;
+    // `pad` 是小兽的视觉半径：菜单不能从兽脸上长出来。
+    let gap = (8.0 * scale) as i32 + pad.max(0.0) as i32;
     let mut candidate: Option<(i32, i32, i32, i32)> = None;
     let mut monitors: Vec<_> = event_loop.available_monitors().collect();
     // 光标所在的那块屏优先。

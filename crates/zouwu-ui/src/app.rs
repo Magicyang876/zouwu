@@ -177,6 +177,12 @@ struct App {
     cursor: Option<Point>,
     /// 光标进入小工具的时刻（悬停计时起点）
     hover_since: Option<Instant>,
+    /// 右键/点收起之后的"别再自动弹回来"锁。
+    ///
+    /// 只靠 `hover_since` 清空是不行的：右键那一刻光标**就停在**本体上，
+    /// 下一帧悬停判定又会命中，150ms 后环自己又张开了——用户看到的就是
+    /// "右键没关掉"。所以锁要求"光标真的离开悬停热区"才解。
+    hover_locked: bool,
     /// 光标「离开环带」的起始时刻。收起不是瞬时的：要连续远离 `collapse_delay_ms`
     /// 才真的收，否则手从本体划向气泡的半路上就会被判死亡。
     far_since: Option<Instant>,
@@ -406,6 +412,7 @@ impl App {
             pixmap: None,
             cursor: None,
             hover_since: None,
+            hover_locked: false,
             far_since: None,
             expanded: false,
             expand_started: None,
@@ -1116,6 +1123,7 @@ impl App {
                 zouwu_platform::layer::right_button_down(),
             );
             self.next_poll = now;
+            self.hover_locked = false;
             if let Some(hwnd) = self.hwnd() {
                 zouwu_platform::layer::set_visible(hwnd, true);
                 if self.config.general.bring_to_front {
@@ -1619,10 +1627,13 @@ impl App {
 
         self.relayout();
 
-        // 1) 悬停 → 展开
-        if let (Some(since), Some(_)) = (self.hover_since, self.cursor) {
-            if !self.expanded && since.elapsed() >= self.hover_delay() {
-                self.set_expanded(true, now);
+        // 1) 悬停 → 展开（右键/点击刚收起时上锁，见 `hover_locked`）
+        // MSRV 落在 2021 edition 里，`&& let` 不可用，所以分两层写。
+        if !self.hover_locked {
+            if let (Some(since), Some(_)) = (self.hover_since, self.cursor) {
+                if !self.expanded && since.elapsed() >= self.hover_delay() {
+                    self.set_expanded(true, now);
+                }
             }
         }
 
@@ -1966,9 +1977,13 @@ impl App {
                 self.blink_start = Some(now);
                 self.dirty = true;
             }
-        } else if self.hover_since.is_some() && !self.expanded {
-            self.hover_since = None;
-            self.dirty = true;
+        } else {
+            // 光标真的离开了本体的悬停热区：解除"别再自动弹回来"的锁。
+            self.hover_locked = false;
+            if self.hover_since.is_some() && !self.expanded {
+                self.hover_since = None;
+                self.dirty = true;
+            }
         }
     }
 
@@ -2138,6 +2153,13 @@ impl App {
         };
         let current = self.config.appearance.skin.clone();
         let title = self.i18n.t("skin.menu.title");
+        // 菜单要贴着火圈外面长出来，所以把本体的视觉半径一起传进去。
+        let scale = self
+            .window
+            .as_ref()
+            .map(|w| w.scale_factor() as f32)
+            .unwrap_or(1.0);
+        let pad = self.config.buddy.radius * scale;
         match SkinMenuWindow::new(
             event_loop,
             choices,
@@ -2145,6 +2167,7 @@ impl App {
             self.theme.clone(),
             title,
             (x, y),
+            pad,
         ) {
             Ok(window) => self.skin_menu = Some(window),
             Err(err) => log::error!("skin menu: {err}"),
@@ -2383,6 +2406,13 @@ impl App {
 
     /// 按住本体：记下起点，等后续轮询判断是「点击」还是「拖动」。
     fn begin_drag(&mut self) {
+        // 收起与上锁放在取窗口**之前**：没有窗口（离屏测试）时这个语义也成立。
+        // 握住它的那一刻先把圈收起来，否则气泡会追着窗口跑，看着很脏。
+        self.pinned = false;
+        self.set_expanded(false, Instant::now());
+        self.hover_since = None;
+        self.hover_locked = true;
+
         let (Some((sx, sy)), Some(window)) = (
             zouwu_platform::layer::cursor_position(),
             self.window.clone(),
@@ -2391,8 +2421,7 @@ impl App {
         };
         let origin = window.outer_position().unwrap_or_default();
         self.drag = Some(Drag::begin((sx, sy), (origin.x, origin.y)));
-        // 手动介入 = 解除钉住：拖动时环会收起来（见下），之后照常自动收起。
-        self.pinned = false;
+        // 手动介入 = 解除钉住：拖动时环会收起来（见上），之后照常自动收起。
         log::debug!(
             "drag start: cursor {sx},{sy} window {}x{} at {},{} scale {}",
             window.inner_size().width,
@@ -2401,9 +2430,6 @@ impl App {
             origin.y,
             window.scale_factor()
         );
-        // 握住它的那一刻先把圈收起来，否则气泡会追着窗口跑，看着很脏。
-        self.set_expanded(false, Instant::now());
-        self.hover_since = None;
     }
 
     /// 一次真正的点击（按下与松开之间没有越过拖动阈值）。
@@ -2417,6 +2443,8 @@ impl App {
         self.set_expanded(!self.expanded, now);
         // 重置计时：刚收起时不该因为光标还停在那里又立刻展开。
         self.hover_since = Some(now);
+        // 收起之后要等光标离开再回来才恢复悬停展开；展开则不需要锁。
+        self.hover_locked = !self.expanded;
         log::debug!("click: expanded -> {}", self.expanded);
     }
 
@@ -2444,6 +2472,7 @@ impl App {
                 // 建窗口要 `&ActiveEventLoop`（`on_click` 拿不到），所以只记一笔。
                 self.pinned = false;
                 self.set_expanded(false, now);
+                self.hover_locked = true;
                 self.pending_skin_menu = true;
             }
             _ => {}
@@ -3103,6 +3132,78 @@ mod ring_tests {
         app.cursor = Some(app.center());
         app.toggle_from_click(now);
         assert!(!app.expanded && !app.pinned);
+    }
+
+    /// 右键收起气泡环；光标还停在本体上时不许它自己弹回来。
+    #[test]
+    fn right_click_collapses_the_ring_and_keeps_it_closed() {
+        let mut config = Config::default();
+        config.general.show_on_start = false;
+        config.ring.items = vec![custom_one()];
+        let mut app = app_from(config);
+        let now = Instant::now();
+
+        app.set_visible(true, now);
+        app.on_cursor_moved(app.center(), now);
+        app.set_expanded(true, now);
+        assert!(app.expanded);
+
+        app.on_click(MouseButton::Right, now);
+        assert!(!app.expanded, "右键必须收起气泡环");
+
+        // 光标原地不动、悬停计时早就过了：也不许再张开。
+        app.hover_since = Some(now - Duration::from_secs(1));
+        app.update(now);
+        assert!(!app.expanded, "右键收起后光标没离开，不该自己弹回来");
+    }
+
+    /// 上锁只是"这一次"，光标离开再回来，悬停展开照常工作。
+    #[test]
+    fn the_right_click_lock_releases_once_the_pointer_leaves() {
+        let mut config = Config::default();
+        config.general.show_on_start = false;
+        config.ring.items = vec![custom_one()];
+        let mut app = app_from(config);
+        let now = Instant::now();
+
+        app.set_visible(true, now);
+        app.on_cursor_moved(app.center(), now);
+        app.set_expanded(true, now);
+        app.on_click(MouseButton::Right, now);
+        assert!(!app.expanded);
+
+        // 鼠标去点菜单 → 离开本体
+        let left = now - Duration::from_millis(400);
+        app.on_cursor_moved(Point::new(4000.0, 4000.0), left);
+        assert!(!app.hover_locked, "光标离开后锁必须解开");
+        // 再回来，悬停延时早该到点（`update` 里比的是真实时钟，所以给过去的时间）
+        app.on_cursor_moved(app.center(), now - Duration::from_millis(300));
+        app.update(now);
+        assert!(app.expanded, "离开再回来，悬停展开要恢复");
+    }
+
+    /// 拖完之后也不该立刻把圈弹出来（手还在本体上）。
+    #[test]
+    fn dragging_keeps_the_ring_closed_until_the_pointer_leaves() {
+        let mut config = Config::default();
+        config.general.show_on_start = false;
+        config.ring.items = vec![custom_one()];
+        let mut app = app_from(config);
+        let now = Instant::now();
+
+        app.set_visible(true, now);
+        app.on_cursor_moved(app.center(), now);
+        app.set_expanded(true, now);
+
+        app.begin_drag();
+        assert!(!app.expanded && app.hover_locked);
+
+        app.on_cursor_moved(app.center(), now - Duration::from_millis(500));
+        app.update(now);
+        assert!(!app.expanded, "拖动后光标还在本体上，不该自动展开");
+
+        app.on_cursor_moved(Point::new(4000.0, 4000.0), now - Duration::from_millis(400));
+        assert!(!app.hover_locked);
     }
 
     /// 默认（`expand_on_summon = false`）呼出不展开，行为与以前一致。
