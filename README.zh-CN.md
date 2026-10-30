@@ -237,7 +237,15 @@ cargo test --workspace && cargo fmt --all --check
 「为什么」比「是什么」更耐放。平台相关的代码一律放在 `zouwu-platform` 的 trait 后面，
 `zouwu-core` 与 `zouwu-ui` 必须保持平台无关，这样将来移植 macOS / Linux 才有路。
 
+## 关注
+
+更新、每个 ADR 背后踩过的坑，以及还没写进代码的想法，会先发在公众号上。扫码即可：
+
+<p align="center">
+  <img src="assets/wechat.png" width="220" alt="微信公众号二维码">
+</p>
+
 ## 许可
 
 代码采用 [MIT](LICENSE-MIT) 或 [Apache-2.0](LICENSE-APACHE) 双许可，任选其一。
-`assets/` 下的美术资源与皮肤为 CC BY 4.0，另有说明者除外。
+`assets/` 下的美术资源与皮肤为 CC BY 4.0，另有说明者除外。`assets/wechat.png` 是作者公众号的二维码，不属于这批美术资源。

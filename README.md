@@ -249,8 +249,18 @@ the reasoning is what future readers need, and "why" ages better than "what". Wi
 code belongs in `zouwu-platform` behind a trait; `zouwu-core` and `zouwu-ui` must stay
 platform-neutral so a macOS/Linux port stays possible.
 
+## Follow along
+
+What breaks, what it costs, and what is coming next — the material that ends up in the
+ADRs, plus the screenshots that never made it in. It goes out on WeChat (Chinese):
+
+<p align="center">
+  <img src="assets/wechat.png" width="220" alt="WeChat official account QR code">
+</p>
+
 ## License
 
 Code is dual-licensed under either of [MIT](LICENSE-MIT) or
 [Apache-2.0](LICENSE-APACHE), at your option. Artwork and skins under `assets/` are
-CC BY 4.0 unless noted otherwise.
+CC BY 4.0 unless noted otherwise. The QR code in `assets/wechat.png` points at the author's
+WeChat account and is not part of the licensed artwork.
