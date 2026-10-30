@@ -210,6 +210,7 @@ fn shoot(name: &str, skin: &Skin, openness: f32, blink: f32, breath: f32) {
         breath,
         theme: &theme,
         bubbles: &demo_bubbles(openness),
+        beams: &[],
         skin: Some(skin),
     };
     render(&scene, &mut pixmap);
@@ -274,7 +275,7 @@ fn bench(scaled: &Skin, native: &Skin) {
 
     for _ in 0..ROUNDS {
         for (idx, (_label, skin)) in variants.iter().enumerate() {
-            let scene = scene_for(&theme, &bubbles, *skin, size);
+            let scene = scene_for(&theme, &bubbles, &[], *skin, size);
             // 每轮先热身 10 帧，避免把首次 page fault 算进去。
             for _ in 0..10 {
                 render(&scene, &mut pixmap);
@@ -307,6 +308,7 @@ cost per frame (340² canvas, release, best of {ROUNDS}×{FRAMES}):"
 fn scene_for<'a>(
     theme: &'a Theme,
     bubbles: &'a [zouwu_ui::paint::BubblePaint<'a>],
+    beams: &'a [zouwu_ui::paint::BeamPaint<'a>],
     skin: Option<&'a Skin>,
     size: u32,
 ) -> Scene<'a> {
@@ -322,6 +324,7 @@ fn scene_for<'a>(
         breath: 0.0,
         theme,
         bubbles,
+        beams,
         skin,
     }
 }

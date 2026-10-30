@@ -74,6 +74,7 @@ fn main() {
             label: "记事本".into(),
             command: "notepad.exe".into(),
             icon: String::new(),
+            children: Vec::new(),
         },
         RingItem {
             id: "custom.2".into(),
@@ -82,6 +83,7 @@ fn main() {
             label: String::new(),
             command: String::new(),
             icon: String::new(),
+            children: Vec::new(),
         },
     ];
 
@@ -217,6 +219,7 @@ fn main() {
             label: format!("{n}"),
             command: String::new(),
             icon: String::new(),
+            children: Vec::new(),
         });
     }
     let theme = zouwu_core::theme::Theme::builtin("zouwu-warm").expect("theme");
@@ -259,6 +262,7 @@ fn main() {
             breath: 0.0,
             theme,
             bubbles: &paints,
+            beams: &[],
             skin: None,
         };
         zouwu_ui::paint::render(&scene, &mut pm);

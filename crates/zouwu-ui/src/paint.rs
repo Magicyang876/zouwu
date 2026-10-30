@@ -13,6 +13,7 @@ use zouwu_core::skin::LayerRole;
 use zouwu_core::theme::{Rgba, Theme};
 
 use crate::skin::Skin;
+use crate::widget::{Painter, Weight};
 
 /// 代码绘制小兽的呼吸幅度（±3%）。位图皮肤用它自己的 `geometry.breath_amount`。
 pub const DEFAULT_BREATH_AMOUNT: f32 = 0.03;
@@ -27,6 +28,21 @@ pub struct BubblePaint<'a> {
     /// 自定义图标（PNG 位图）；有它就不画字形。
     pub icon: Option<&'a Pixmap>,
     pub selected: bool,
+}
+
+/// 一条子项激光条（`open_children` 展开时才有）。
+pub struct BeamPaint<'a> {
+    /// 起点：父球外沿
+    pub base: Point,
+    /// 终点：文字牌中心
+    pub tip: Point,
+    /// 生长进度 0..1（弹簧值，用来做"射出去"的动画）
+    pub progress: f32,
+    /// 文字牌（逻辑坐标）
+    pub chip: zouwu_core::geom::Rect,
+    pub label: &'a str,
+    /// 鼠标停在这条牌子上
+    pub hovered: bool,
 }
 
 pub struct Scene<'a> {
@@ -48,6 +64,8 @@ pub struct Scene<'a> {
     pub bubbles: &'a [BubblePaint<'a>],
     /// 位图皮肤；`None` 或 `procedural` → 走代码绘制。
     pub skin: Option<&'a Skin>,
+    /// 子项激光条（画在气泡之上）
+    pub beams: &'a [BeamPaint<'a>],
 }
 
 impl Scene<'_> {
@@ -270,7 +288,113 @@ pub fn render(scene: &Scene<'_>, pixmap: &mut Pixmap) {
 
     draw_skin_or_buddy(&mut ctx, scene);
     draw_bubbles(&mut ctx, scene, theme);
+    draw_beams(&mut ctx, scene, theme);
 }
+
+/// 子项激光条 + 文字牌（ADR-045）。
+///
+/// 光条画三层（外晕 / 中亮 / 芯），一层比一层细、一层比一层亮，看起来才像
+/// "射出去的光"而不是一条直线。文字牌最后画，盖住光条的尾巴。
+fn draw_beams(ctx: &mut Ctx<'_>, scene: &Scene<'_>, theme: &Theme) {
+    if scene.beams.is_empty() {
+        return;
+    }
+    let scale = ctx.s;
+    for beam in scene.beams {
+        let p = beam.progress.clamp(0.0, 1.2);
+        if p <= 0.01 {
+            continue;
+        }
+        // 光条长度跟着进度长出去，略微过冲（弹簧给的值常常 >1）。
+        let tip = Point::new(
+            beam.base.x + (beam.tip.x - beam.base.x) * p,
+            beam.base.y + (beam.tip.y - beam.base.y) * p,
+        );
+        let dx = tip.x - beam.base.x;
+        let dy = tip.y - beam.base.y;
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 0.5 {
+            continue;
+        }
+        // 垂直方向单位向量：光条是从 `base` 到 `tip` 的锥形四边形。
+        let (nx, ny) = (-dy / len, dx / len);
+        let (w0, w1) = (2.4, 0.9);
+        for (w_mul, alpha, color) in [
+            (3.2, 0.10, theme.glow),
+            (1.7, 0.34, theme.glow),
+            (1.0, 0.92, theme.accent),
+        ] {
+            let (a0, a1) = (w0 * w_mul, w1 * w_mul);
+            let mut pb = PathBuilder::new();
+            pb.move_to(
+                beam.base.x * scale + nx * a0 * scale,
+                beam.base.y * scale + ny * a0 * scale,
+            );
+            pb.line_to(
+                tip.x * scale + nx * a1 * scale,
+                tip.y * scale + ny * a1 * scale,
+            );
+            pb.line_to(
+                tip.x * scale - nx * a1 * scale,
+                tip.y * scale - ny * a1 * scale,
+            );
+            pb.line_to(
+                beam.base.x * scale - nx * a0 * scale,
+                beam.base.y * scale - ny * a0 * scale,
+            );
+            pb.close();
+            if let Some(path) = pb.finish() {
+                let mut paint = Paint::default();
+                paint.set_color(col(color, alpha));
+                paint.anti_alias = true;
+                ctx.pixmap.fill_path(
+                    &path,
+                    &paint,
+                    FillRule::Winding,
+                    Transform::identity(),
+                    None,
+                );
+            }
+        }
+
+        // 牌子在光条长到一半之后淡入：先看到光射出去，再读到字。
+        let fade = ((p - 0.5) / 0.5).clamp(0.0, 1.0);
+        if fade <= 0.01 {
+            continue;
+        }
+        let chip = crate::widget::Rect::new(beam.chip.x, beam.chip.y, beam.chip.w, beam.chip.h);
+        let bg = if beam.hovered {
+            theme.bubble_bg_active
+        } else {
+            theme.bubble_bg
+        };
+        let edge = if beam.hovered {
+            theme.bubble_edge_active
+        } else {
+            theme.bubble_edge
+        };
+        let mut painter = Painter::new(ctx.pixmap, scale);
+        painter.fill(chip, 7.0, bg.with_alpha(0.94 * fade));
+        painter.stroke(chip, 7.0, 1.0, edge.with_alpha(fade));
+        let text_color = if beam.hovered {
+            theme.glyph_active
+        } else {
+            theme.glyph
+        };
+        let textc = text_color.with_alpha(fade);
+        let label = painter.truncate(beam.label, CHIP_FONT, chip.w - 12.0);
+        painter.text_in(
+            &label,
+            crate::widget::Rect::new(chip.x, chip.y, chip.w, chip.h),
+            CHIP_FONT,
+            textc,
+            Weight::Regular,
+        );
+    }
+}
+
+/// 文字牌字号（逻辑像素）。与 `app.rs` 里量文字用的字号必须一致。
+pub const CHIP_FONT: f32 = 11.0;
 
 /// 本体：有位图皮肤就贴图层，否则代码绘制。
 fn draw_skin_or_buddy(ctx: &mut Ctx<'_>, scene: &Scene<'_>) {
@@ -426,6 +550,7 @@ pub fn tray_icon(theme: &Theme, skin: Option<&Skin>, size: u32) -> (Vec<u8>, u32
         breath: 0.0,
         theme,
         bubbles: &[],
+        beams: &[],
         skin,
     };
     render(&scene, &mut pixmap);
@@ -854,6 +979,7 @@ mod tests {
                 breath: 0.5,
                 theme: &Theme::fallback(),
                 bubbles: &[],
+                beams: &[],
                 skin: Some(&skin),
             };
             render(&scene, &mut pm);

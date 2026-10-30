@@ -15,10 +15,12 @@ use std::path::PathBuf;
 
 use tiny_skia::{Color, Pixmap};
 use zouwu_core::action::ActionItem;
+use zouwu_core::beam::{self, BeamInput};
+use zouwu_core::config::RingChild;
 use zouwu_core::geom::{Point, Rect};
 use zouwu_core::ring::{solve_rotation, RingConfig};
 use zouwu_core::theme::Theme;
-use zouwu_ui::paint::{render, BubblePaint, Scene};
+use zouwu_ui::paint::{render, BeamPaint, BubblePaint, Scene, CHIP_FONT};
 
 fn out_dir() -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -81,6 +83,7 @@ fn shoot(name: &str, logical: f32, scale: f32, openness: f32, theme: &Theme) {
         breath: 0.0,
         theme,
         bubbles: &bubbles,
+        beams: &[],
         skin: None,
     };
     render(&scene, &mut pixmap);
@@ -101,6 +104,92 @@ fn shoot(name: &str, logical: f32, scale: f32, openness: f32, theme: &Theme) {
     );
 }
 
+/// 「激光条」子项展开态：第一颗球带三个子项，牌子上是有长有短的真文字。
+///
+/// 专门画这一张，是因为激光条的毛病（牌子互相压住、跑出窗口、文字截断得难看）
+/// 全都只在像素里看得出来，单测只能保证几何不相交。
+fn shoot_beams(name: &str, logical: f32, scale: f32, hovered: Option<usize>, theme: &Theme) {
+    let mut items = zouwu_core::action::resolve(
+        &zouwu_core::config::RingCfg::default().items,
+        &zouwu_core::i18n::I18n::new("zh-CN"),
+    );
+    let children = vec![
+        RingChild {
+            label: "开 IDE".to_string(),
+            command: "code .".to_string(),
+        },
+        RingChild {
+            label: "跑一下测试".to_string(),
+            command: "cargo test".to_string(),
+        },
+        RingChild {
+            label: "很长很长的一个子项名字用来验截断".to_string(),
+            command: "echo".to_string(),
+        },
+    ];
+    items[0].children = children.clone();
+
+    let ring = RingConfig::default();
+    let px = (logical * scale).round() as u32;
+    let mut pixmap = Pixmap::new(px, px).expect("pixmap");
+    pixmap.fill(Color::TRANSPARENT);
+
+    let center = Point::new(logical * 0.5, logical * 0.5);
+    let view = Rect::new(0.0, 0.0, logical, logical);
+    let bubbles = bubble_paints(&items, &ring, center, view, 1.0);
+
+    let labels: Vec<String> = children
+        .iter()
+        .map(|c| c.display_name().to_string())
+        .collect();
+    let parent = bubbles[0].center;
+    let beams = beam::layout(
+        &BeamInput {
+            parent,
+            parent_radius: bubbles[0].radius,
+            center,
+            viewport: view,
+            labels: &labels,
+        },
+        &mut |text| {
+            // 与 app.rs 一样：GDI 量出来的是物理像素，除回 scale 才是逻辑宽。
+            zouwu_ui::text::TextEngine::with(|e| e.measure(text, CHIP_FONT * scale, false)) / scale
+        },
+    );
+    let paints: Vec<BeamPaint<'_>> = beams
+        .iter()
+        .map(|b| BeamPaint {
+            base: b.base,
+            tip: b.tip,
+            progress: 1.0,
+            chip: b.chip,
+            label: &labels[b.index],
+            hovered: hovered == Some(b.index),
+        })
+        .collect();
+
+    let scene = Scene {
+        width: logical,
+        height: logical,
+        scale,
+        buddy_center: center,
+        buddy_radius: 56.0,
+        buddy_scale: 1.06,
+        buddy_alpha: 1.0,
+        blink: 0.0,
+        breath: 0.0,
+        theme,
+        bubbles: &bubbles,
+        beams: &paints,
+        skin: None,
+    };
+    render(&scene, &mut pixmap);
+
+    let path = out_dir().join(format!("{name}.png"));
+    pixmap.save_png(&path).expect("save png");
+    println!("beams {name:<10} -> {}", path.display());
+}
+
 fn main() {
     let warm = Theme::by_name("zouwu-warm");
     let dark = Theme::by_name("zouwu-dark");
@@ -110,5 +199,8 @@ fn main() {
     shoot("expanded-dark", 340.0, 1.0, 1.0, &dark);
     shoot("expanded-os", 340.0, 1.0, -0.08, &warm); // 负值 = 收起过冲的一瞬间
     shoot("hover-hi", 340.0, 1.25, 1.0, &warm);
+    shoot_beams("beams", 580.0, 1.0, None, &warm);
+    shoot_beams("beams-hover", 580.0, 1.0, Some(1), &dark);
+    shoot_beams("beams-hi", 580.0, 1.25, None, &warm);
     println!("\n用任意看图工具打开上面的 PNG 即可检查皮肤与布局。");
 }

@@ -92,6 +92,7 @@ fn main() {
             breath,
             theme: &theme,
             bubbles: &bubbles,
+            beams: &[],
             skin: None,
         };
 

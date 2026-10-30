@@ -6,7 +6,7 @@ use crate::action::{CLIPBOARD_ID, QRCODE_ID};
 use crate::ring::{RingConfig, DEG};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 9;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -76,6 +76,11 @@ pub struct Interaction {
     pub collapse_delay_ms: u64,
     /// 点击小兽是否立即展开（绕过延时）。
     pub expand_on_click: bool,
+    /// 呼出（Alt+Space / 托盘"显示"）之后**直接展开**气泡环，不用再悬停。
+    ///
+    /// 打开后是"钉住"的：不会因为鼠标离远而自动收起，要收起得点一下挂件
+    /// （或者右键、拖动它）。见 ADR-045。
+    pub expand_on_summon: bool,
     /// **悬停热区**：指针在"小兽半径 × 该系数"以内算"正摸着小兽"，
     /// 才开始累计 `hover_delay_ms`。只管"要不要展开"，与收起无关。
     pub hover_radius_factor: f32,
@@ -107,6 +112,7 @@ impl Default for Interaction {
             hover_delay_ms: 150,
             collapse_delay_ms: 250,
             expand_on_click: true,
+            expand_on_summon: false,
             hover_radius_factor: 1.1,
             collapse_radius_factor: 1.1,
             hit_tolerance: 1.15,
@@ -156,6 +162,32 @@ pub struct RingItem {
     pub command: String,
     /// 自定义球的图标（PNG/ICO 路径）；空 = 用内置的闪电简笔图标。
     pub icon: String,
+    /// 挂在这颗球下面的子项：点一下球会从它身上放射出「激光条」，每条一个子项。
+    ///
+    /// **只有自定义球认这个字段**（内置球没有可拆的动作）。见 ADR-045。
+    pub children: Vec<RingChild>,
+}
+
+/// 一颗球下面挂的子项。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RingChild {
+    /// 激光条上显示的文字；空 = 退回去用 `command`。
+    pub label: String,
+    /// 点下去要跑的命令，语义与 [`RingItem::command`] 完全一致。
+    pub command: String,
+}
+
+impl RingChild {
+    /// 激光条上写什么：写了 `label` 就用它，否则拿命令本身（截断由绘制层按宽度做）。
+    pub fn display_name(&self) -> &str {
+        let label = self.label.trim();
+        if label.is_empty() {
+            self.command.trim()
+        } else {
+            label
+        }
+    }
 }
 
 impl Default for RingItem {
@@ -168,6 +200,7 @@ impl Default for RingItem {
             label: String::new(),
             command: String::new(),
             icon: String::new(),
+            children: Vec::new(),
         }
     }
 }
@@ -244,6 +277,8 @@ impl RingCfg {
     /// 条目是用户手改 TOML 的入口，也是热键槽位与面板行的来源：重复 id 会让两颗球
     /// 共用一个动作，超过 16 个既放不进环也占满热键槽位，所以在唯一的入口处收九。
     pub const MAX_ITEMS: usize = 16;
+    /// 一颗球最多挂几条激光条。再多就排成扇形也挤，不如让用户拿一个子项去调脚本。
+    pub const MAX_CHILDREN: usize = 6;
 
     pub fn normalized(&self) -> Vec<RingItem> {
         let mut out: Vec<RingItem> = Vec::new();
@@ -259,6 +294,16 @@ impl RingCfg {
                 command: item.command.trim().to_string(),
                 icon: item.icon.trim().to_string(),
                 enabled: item.enabled,
+                children: item
+                    .children
+                    .iter()
+                    .filter(|c| !c.command.trim().is_empty())
+                    .take(Self::MAX_CHILDREN)
+                    .map(|c| RingChild {
+                        label: c.label.trim().to_string(),
+                        command: c.command.trim().to_string(),
+                    })
+                    .collect(),
             });
             if out.len() == Self::MAX_ITEMS {
                 break;
@@ -654,6 +699,10 @@ mod tests {
             label: "终端".to_string(),
             command: "C:\\Windows\\System32\\cmd.exe".to_string(),
             icon: String::new(),
+            children: vec![RingChild {
+                label: "长条".to_string(),
+                command: "cmd.exe /c echo hi".to_string(),
+            }],
         });
         let text = cfg.to_toml();
         assert!(
@@ -670,6 +719,67 @@ mod tests {
             !text.contains("qr_hotkey"),
             "旧热键字段不该再落盘：\n{text}"
         );
+    }
+
+    /// 子项（激光条）要能原样存取；命令为空的半成品条目在归一化时丢掉
+    /// ——空命令的牌子点下去什么也不会发生，留着只会让人以为是 bug。
+    #[test]
+    fn children_round_trip_and_drop_empty_commands() {
+        let mut cfg = Config::default();
+        let mut item = RingItem::custom("custom.2");
+        item.label = "工具".to_string();
+        item.command = "notepad.exe".to_string();
+        item.children = vec![
+            RingChild {
+                label: " 开终端 ".to_string(),
+                command: "  wt.exe  ".to_string(),
+            },
+            RingChild {
+                label: "没命令".to_string(),
+                command: "   ".to_string(),
+            },
+        ];
+        cfg.ring.items.push(item);
+
+        let text = cfg.to_toml();
+        assert!(
+            text.contains("[[ring.items.children]]"),
+            "子项得写成表数组：
+{text}"
+        );
+        let back = Config::from_toml(&text).expect("parse");
+        let child = back
+            .ring
+            .items
+            .iter()
+            .find(|i| i.id == "custom.2")
+            .and_then(|i| i.children.first())
+            .expect("子项应当还在");
+        // 解析只负责数据结构，去空白发生在 `normalized()`
+        assert_eq!(child.label, " 开终端 ");
+        let normalized = back.ring.normalized();
+        let item = normalized
+            .iter()
+            .find(|i| i.id == "custom.2")
+            .expect("归一化不该丢这颗球");
+        assert_eq!(item.children.len(), 1, "空命令的子项要被丢掉");
+        assert_eq!(item.children[0].label, "开终端", "两头空白要去掉");
+        assert_eq!(item.children[0].command, "wt.exe");
+    }
+
+    /// 呼出即展开默认关闭：不改配置的老用户行为不变。
+    #[test]
+    fn expand_on_summon_is_off_by_default_and_round_trips() {
+        let cfg = Config::default();
+        assert!(!cfg.interaction.expand_on_summon);
+        let text = cfg.to_toml();
+        let back = Config::from_toml(&text).expect("parse");
+        assert!(!back.interaction.expand_on_summon);
+
+        let mut on = Config::default();
+        on.interaction.expand_on_summon = true;
+        let back = Config::from_toml(&on.to_toml()).expect("parse");
+        assert!(back.interaction.expand_on_summon);
     }
 
     #[test]

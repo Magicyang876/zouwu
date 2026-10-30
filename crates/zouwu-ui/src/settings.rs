@@ -131,6 +131,7 @@ pub enum Field {
     HoverDelay,
     CollapseDelay,
     ExpandOnClick,
+    ExpandOnSummon,
     HoverFactor,
     CollapseFactor,
     HitTolerance,
@@ -181,6 +182,7 @@ impl Field {
             Field::HoverDelay => "settings.hover-delay",
             Field::CollapseDelay => "settings.collapse-delay",
             Field::ExpandOnClick => "settings.expand-on-click",
+            Field::ExpandOnSummon => "settings.expand-on-summon",
             Field::HoverFactor => "settings.hover-factor",
             Field::CollapseFactor => "settings.collapse-factor",
             Field::HitTolerance => "settings.hit-tolerance",
@@ -344,6 +346,7 @@ impl Field {
             Field::AlwaysOnTop => cfg.window.always_on_top,
             Field::AltDragEnabled => cfg.alt_drag.enabled,
             Field::ExpandOnClick => cfg.interaction.expand_on_click,
+            Field::ExpandOnSummon => cfg.interaction.expand_on_summon,
             Field::ClipboardEnabled => cfg.clipboard.enabled,
             Field::EyeCareEnabled => cfg.eye_care.enabled,
             Field::Breathe => cfg.buddy.breathe,
@@ -361,6 +364,7 @@ impl Field {
             Field::AlwaysOnTop => cfg.window.always_on_top = on,
             Field::AltDragEnabled => cfg.alt_drag.enabled = on,
             Field::ExpandOnClick => cfg.interaction.expand_on_click = on,
+            Field::ExpandOnSummon => cfg.interaction.expand_on_summon = on,
             Field::ClipboardEnabled => cfg.clipboard.enabled = on,
             Field::EyeCareEnabled => cfg.eye_care.enabled = on,
             Field::Breathe => cfg.buddy.breathe = on,
@@ -893,6 +897,16 @@ pub fn build_rows(model: &Model) -> Vec<Row> {
                     text: i18n.t("settings.bubbles.note"),
                 },
             });
+            // 子项只给自定义球、而且目前只在 config.toml 里配（编辑器的
+            // 嵌套列表还没做），所以这里只放一句指路，不放半成品控件。
+            rows.push(Row {
+                field: None,
+                label: String::new(),
+                hint: None,
+                control: Control::Note {
+                    text: i18n.t("settings.bubbles.children.note"),
+                },
+            });
             let items = &model.config.ring.items;
             if items.is_empty() {
                 rows.push(Row {
@@ -972,6 +986,14 @@ pub fn build_rows(model: &Model) -> Vec<Row> {
             rows.push(step_row(model, Field::HoverDelay));
             rows.push(step_row(model, Field::CollapseDelay));
             rows.push(toggle_row(model, Field::ExpandOnClick));
+            rows.push(Row {
+                field: Some(Field::ExpandOnSummon),
+                label: i18n.t(Field::ExpandOnSummon.label_key()),
+                hint: Some(i18n.t("settings.expand-on-summon.hint")),
+                control: Control::Toggle {
+                    on: model.config.interaction.expand_on_summon,
+                },
+            });
             rows.push(step_row(model, Field::HoverFactor));
             rows.push(step_row(model, Field::CollapseFactor));
             rows.push(step_row(model, Field::HitTolerance));

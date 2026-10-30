@@ -244,6 +244,7 @@ const HWND_NOTOPMOST: Hwnd = -2isize as Hwnd;
 const SWP_NOSIZE: u32 = 0x0001;
 const SWP_NOMOVE: u32 = 0x0002;
 const SWP_NOACTIVATE: u32 = 0x0010;
+const SWP_NOZORDER: u32 = 0x0004;
 
 /// 把窗口从任务栏/Alt-Tab 列表里摘掉，并声明"不抢焦点"。
 ///
@@ -373,7 +374,6 @@ pub fn set_title_colors(hwnd: isize, caption: u32, text: u32, border: u32) -> bo
 
 /// DWM 属性变更不会总是立即重绘非客户区，催一次。
 fn repaint_frame(hwnd: isize) {
-    const SWP_NOZORDER: u32 = 0x0004;
     const SWP_FRAMECHANGED: u32 = 0x0020;
     unsafe {
         SetWindowPos(
@@ -438,6 +438,28 @@ pub fn set_always_on_top(hwnd: isize, on_top: bool) {
             0,
             0,
             SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
+        );
+    }
+}
+
+/// 一次调用同时改位置与尺寸（物理像素）。
+///
+/// 为什么不用 winit 的 `request_inner_size` + `set_outer_position`：这两步是分开的
+/// 两次请求，实测在分层窗口上会互相覆盖——尺寸变了、位置那一半丢了，于是"挂着激光
+/// 条时把窗口撑大"会把小兽连带推走（实测偏了半个增量）。`SetWindowPos` 一次给出
+/// 全部几何，没有可以丢失的中间态。
+///
+/// `SWP_NOZORDER` 保持现有 Z 序不动，`SWP_NOACTIVATE` 不抢焦点。
+pub fn set_bounds(hwnd: isize, x: i32, y: i32, width: i32, height: i32) {
+    unsafe {
+        SetWindowPos(
+            hwnd as Hwnd,
+            std::ptr::null_mut(),
+            x,
+            y,
+            width.max(1),
+            height.max(1),
+            SWP_NOZORDER | SWP_NOACTIVATE,
         );
     }
 }
