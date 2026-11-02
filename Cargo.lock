@@ -1122,7 +1122,7 @@ checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
 
 [[package]]
 name = "iconres"
-version = "0.1.0"
+version = "1.0.0"
 
 [[package]]
 name = "image"
@@ -3738,7 +3738,7 @@ checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
 
 [[package]]
 name = "zouwu-app"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "iconres",
  "log",
@@ -3749,7 +3749,7 @@ dependencies = [
 
 [[package]]
 name = "zouwu-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "fluent",
  "log",
@@ -3763,7 +3763,7 @@ dependencies = [
 
 [[package]]
 name = "zouwu-platform"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "global-hotkey",
  "log",
@@ -3776,7 +3776,7 @@ dependencies = [
 
 [[package]]
 name = "zouwu-ui"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bytemuck",
  "log",

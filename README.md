@@ -232,7 +232,8 @@ Four decisions explain most of the codebase:
 Each of those started as a wrong assumption, and each has an ADR in
 [`docs/decisions.md`](docs/decisions.md) (60 of them) that records what was measured, what it
 costs, and what went wrong on the way. [`docs/architecture.md`](docs/architecture.md) has the
-layer diagram if you would rather start with the map than the history.
+layer diagram if you would rather start with the map than the history. Release notes are in
+[`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 

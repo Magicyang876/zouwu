@@ -221,7 +221,7 @@ crates/iconres         构建期生成 COFF 资源对象，让 exe 自己带图�
 
 这四条起初都是错的判断，每一条在 [`docs/decisions.md`](docs/decisions.md) 里都有一篇 ADR
 （共 60 篇），记着当时量到了什么、付了什么代价、以及中间踩过哪些坑。想先看地图而不是历史，
-[`docs/architecture.md`](docs/architecture.md) 有分层图。
+[`docs/architecture.md`](docs/architecture.md) 有分层图。发布记录在 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ---
 
