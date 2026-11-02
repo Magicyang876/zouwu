@@ -231,11 +231,11 @@ Four decisions explain most of the codebase:
 4. **Poll the cursor instead of trusting hit-testing.** Layered windows do not reliably
    receive mouse messages, so input is sampled on a 16 ms (inside) / 100 ms (outside) beat.
 
-Each of those started as a wrong assumption, and each has an ADR in
-[`docs/decisions.md`](docs/decisions.md) (61 of them) that records what was measured, what it
-costs, and what went wrong on the way. [`docs/architecture.md`](docs/architecture.md) has the
-layer diagram if you would rather start with the map than the history. Release notes are in
-[`CHANGELOG.md`](CHANGELOG.md).
+Each of those started as a wrong assumption. The author keeps 61 decision records alongside
+the code (context, decision, cost, and what was measured afterwards) — that log stays private.
+What is public is [`docs/architecture.md`](docs/architecture.md): the layer diagram, the life of
+a frame, the skin format, the performance numbers. Start there if you would rather have the map
+than the history. Release notes are in [`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 

@@ -10,5 +10,7 @@ README-dev.md
 config.toml.testbak
 
 # 本地设计笔记 / 打包脚本，不进公开仓库
-docs/
+# 例外：architecture.md 是给读仓库的人看的，公开。
+docs/*
+!docs/architecture.md
 packaging/
