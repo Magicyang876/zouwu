@@ -67,9 +67,11 @@ that only write a log line, that was a deliberate cull.
 
 - Themes as TOML overlays (built-in warm and night), skins as directories of PNG layers,
   `.zwskin` single-file skin packages with strict validation, import/export from the tray.
-- Three official skins shipped: the procedural one, 折纸驺吾 (one folded sheet — pure flat
-  facets, no gradients) and 折纸驺吾 2 (a sitting folded cat: pointed ears, cream muzzle, two
-  front paws, curled tail). **Right-click the pet** for a quick skin list; the current one is
+- Four official skins shipped: the procedural one, 折纸驺吾 (one folded sheet — pure flat
+  facets, no gradients), 折纸驺吾 2 (a sitting folded cat: pointed ears, cream muzzle, two
+  front paws, curled tail) and 大魔导 (a floating robed mage: hooded head with glowing slit
+  eyes, horns curving up from the temples, jewelled browband, staff with a gem, a few shards
+  hovering around him). **Right-click the pet** for a quick skin list; the current one is
   outlined.
 - Chinese / English with Fluent, switchable at runtime; `language = "auto"` follows the system.
 

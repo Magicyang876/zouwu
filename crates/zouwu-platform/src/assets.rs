@@ -218,6 +218,24 @@ const BUILTIN_SKINS: &[BuiltinSkin] = &[
             ),
         ],
     },
+    BuiltinSkin {
+        id: "zouwu-rubick",
+        manifest: include_str!("../../../assets/skins/zouwu-rubick/skin.toml"),
+        layers: &[
+            (
+                "body.png",
+                include_bytes!("../../../assets/skins/zouwu-rubick/body.png"),
+            ),
+            (
+                "blink.png",
+                include_bytes!("../../../assets/skins/zouwu-rubick/blink.png"),
+            ),
+            (
+                "overlay.png",
+                include_bytes!("../../../assets/skins/zouwu-rubick/overlay.png"),
+            ),
+        ],
+    },
 ];
 
 /// 官方皮肤 id 列表（托盘里可以标出来，未来也可做"修复"按钮）。
@@ -231,7 +249,7 @@ pub fn builtin_skin_ids() -> Vec<&'static str> {
 /// 否则老用户机器上那份永远不会被替换——我们改了构图，他们看到的还是旧的那只。
 /// 这条规则是踩出来的：水墨驺吾重新居中之后，本机的 `%APPDATA%` 里仍是旧图，
 /// 看起来像"根本没修好"。
-pub const BUILTIN_ASSET_REVISION: u32 = 5;
+pub const BUILTIN_ASSET_REVISION: u32 = 6;
 
 /// 版本戳文件名（写在每个内置皮肤目录里）。
 const STAMP_FILE: &str = ".zouwu-builtin";

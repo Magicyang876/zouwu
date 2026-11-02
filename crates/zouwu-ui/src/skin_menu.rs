@@ -465,13 +465,14 @@ mod tests {
 
     #[test]
     fn the_menu_paints_every_row() {
-        let l = layout(4);
+        let l = layout(5);
         let theme = Theme::builtin("zouwu-warm").expect("builtin theme");
         let choices = vec![
             ("procedural".to_string(), "驺吾 · 代码绘制".to_string()),
             ("zouwu-ink".to_string(), "水墨驺吾".to_string()),
             ("zouwu-paper".to_string(), "折纸驺吾".to_string()),
             ("zouwu-paper-2".to_string(), "折纸驺吾 2".to_string()),
+            ("zouwu-rubick".to_string(), "大魔导".to_string()),
         ];
         let scale = 1.0;
         let mut pm =
