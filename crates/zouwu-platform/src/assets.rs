@@ -204,6 +204,20 @@ const BUILTIN_SKINS: &[BuiltinSkin] = &[
             ),
         ],
     },
+    BuiltinSkin {
+        id: "zouwu-paper-2",
+        manifest: include_str!("../../../assets/skins/zouwu-paper-2/skin.toml"),
+        layers: &[
+            (
+                "body.png",
+                include_bytes!("../../../assets/skins/zouwu-paper-2/body.png"),
+            ),
+            (
+                "blink.png",
+                include_bytes!("../../../assets/skins/zouwu-paper-2/blink.png"),
+            ),
+        ],
+    },
 ];
 
 /// 官方皮肤 id 列表（托盘里可以标出来，未来也可做"修复"按钮）。
@@ -217,7 +231,7 @@ pub fn builtin_skin_ids() -> Vec<&'static str> {
 /// 否则老用户机器上那份永远不会被替换——我们改了构图，他们看到的还是旧的那只。
 /// 这条规则是踩出来的：水墨驺吾重新居中之后，本机的 `%APPDATA%` 里仍是旧图，
 /// 看起来像"根本没修好"。
-pub const BUILTIN_ASSET_REVISION: u32 = 4;
+pub const BUILTIN_ASSET_REVISION: u32 = 5;
 
 /// 版本戳文件名（写在每个内置皮肤目录里）。
 const STAMP_FILE: &str = ".zouwu-builtin";
@@ -444,6 +458,33 @@ pub fn skin_choices(i18n: &zouwu_core::i18n::I18n) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 内置皮肤最容易犯的错是"加了目录名忘了图层"或者"改了 id 忘了改目录"——
+    /// 编译期看不出来，运行时只表现为桌面上少了一只兽。
+    #[test]
+    fn every_builtin_skin_matches_its_manifest() {
+        const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        for skin in BUILTIN_SKINS {
+            let manifest = SkinManifest::parse(skin.manifest)
+                .unwrap_or_else(|err| panic!("{}: {err}", skin.id));
+            assert_eq!(manifest.id, skin.id, "目录名与 skin.toml 的 id 对不上");
+            assert!(!manifest.layers.is_empty(), "{} 没有图层", skin.id);
+            for layer in &manifest.layers {
+                let bytes = skin
+                    .layers
+                    .iter()
+                    .find(|(name, _)| name == &layer.image)
+                    .map(|(_, bytes)| *bytes)
+                    .unwrap_or_else(|| panic!("{}: 少了图层 {}", skin.id, layer.image));
+                assert!(
+                    bytes.starts_with(&PNG_SIGNATURE),
+                    "{}/{} 不是 PNG",
+                    skin.id,
+                    layer.image
+                );
+            }
+        }
+    }
 
     #[test]
     fn theme_lookup_falls_back() {

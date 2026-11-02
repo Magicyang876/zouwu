@@ -107,6 +107,7 @@ fn skin_menu_shot(name: &str, scale: f32, theme: &Theme) {
         ("procedural".to_string(), "驺吾 · 代码绘制".to_string()),
         ("zouwu-ink".to_string(), "水墨驺吾".to_string()),
         ("zouwu-paper".to_string(), "折纸驺吾".to_string()),
+        ("zouwu-paper-2".to_string(), "折纸驺吾 2".to_string()),
     ];
     let l = zouwu_ui::skin_menu::layout(choices.len());
     let (w, h) = (

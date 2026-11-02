@@ -67,8 +67,10 @@ that only write a log line, that was a deliberate cull.
 
 - Themes as TOML overlays (built-in warm and night), skins as directories of PNG layers,
   `.zwskin` single-file skin packages with strict validation, import/export from the tray.
-- Two official skins shipped: the procedural one and 折纸驺吾 (folded-paper, pure flat facets,
-  no gradients). **Right-click the pet** for a quick skin list; the current one is outlined.
+- Three official skins shipped: the procedural one, 折纸驺吾 (one folded sheet — pure flat
+  facets, no gradients) and 折纸驺吾 2 (a sitting folded cat: pointed ears, cream muzzle, two
+  front paws, curled tail). **Right-click the pet** for a quick skin list; the current one is
+  outlined.
 - Chinese / English with Fluent, switchable at runtime; `language = "auto"` follows the system.
 
 ### Not there yet
@@ -230,7 +232,7 @@ Four decisions explain most of the codebase:
    receive mouse messages, so input is sampled on a 16 ms (inside) / 100 ms (outside) beat.
 
 Each of those started as a wrong assumption, and each has an ADR in
-[`docs/decisions.md`](docs/decisions.md) (60 of them) that records what was measured, what it
+[`docs/decisions.md`](docs/decisions.md) (61 of them) that records what was measured, what it
 costs, and what went wrong on the way. [`docs/architecture.md`](docs/architecture.md) has the
 layer diagram if you would rather start with the map than the history. Release notes are in
 [`CHANGELOG.md`](CHANGELOG.md).
