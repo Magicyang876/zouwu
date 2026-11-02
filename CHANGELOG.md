@@ -1,7 +1,7 @@
 # 更新日志
 
-版本号只有一处真相：`Cargo.toml` 的 `[workspace.package] version`。`packaging/*.ps1` 从
-那里读，zip 名字跟着变；发版时打 `v<version>` 标签。
+版本号只有一处真相：`Cargo.toml` 的 `[workspace.package] version`。打包脚本（不随仓库发布）
+从那里读，zip 名字跟着变；发版时打 `v<version>` 标签。
 
 ## Unreleased
 
