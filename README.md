@@ -251,8 +251,8 @@ platform-neutral so a macOS/Linux port stays possible.
 
 ## Follow along
 
-What breaks, what it costs, and what is coming next — the material that ends up in the
-ADRs, plus the screenshots that never made it in. It goes out on WeChat (Chinese):
+The author also writes about other things on WeChat — notes, tools, small experiments.
+Nothing to do with this repository. Scan if you read Chinese:
 
 <p align="center">
   <img src="assets/wechat.png" width="220" alt="WeChat official account QR code">

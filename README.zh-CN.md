@@ -239,7 +239,7 @@ cargo test --workspace && cargo fmt --all --check
 
 ## 关注
 
-更新、每个 ADR 背后踩过的坑，以及还没写进代码的想法，会先发在公众号上。扫码即可：
+作者在公众号上写的是别的东西——技术随笔、顺手的工具、正在折腾的小玩意，与本仓库无关。有兴趣可以扫码：
 
 <p align="center">
   <img src="assets/wechat.png" width="220" alt="微信公众号二维码">
