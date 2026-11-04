@@ -1150,6 +1150,16 @@ impl App {
             // 先收起再躲起来，下次呼出时是"干净"的收起态。
             self.pinned = false;
             self.set_expanded(false, now);
+            // **必须 snap，不能只拨 target 等弹簧自己走回去。**
+            // 窗口一隐藏，`needs_render` 立刻返回 false，一帧都不再画，
+            // 弹簧就僵在张开值上（target 0 / value 1，`is_settled` 永远假）。
+            // 下次呼出把 target 拨回 1 —— 值本来就是 1，于是"呼出即展开"整圈
+            // 气泡一瞬间出现，没有出场动画；而鼠标停那条路是从 0 弹出去的。
+            // 这就是"热键呼出和鼠标呼出观感不一样"的根因。
+            for spring in &mut self.anims {
+                spring.snap(0.0);
+            }
+            self.buddy_scale.snap(1.0);
             self.on_cursor_left();
             self.buttons_down = (false, false);
             self.save_state();
@@ -3241,14 +3251,71 @@ mod ring_tests {
         let mut config = Config::default();
         config.general.show_on_start = false;
         config.interaction.expand_on_summon = true;
-        config.ring.items = vec![custom_one()];
+        config.ring.items = vec![custom_one(), custom_one()];
         let mut app = app_from(config);
         let now = Instant::now();
         app.set_visible(true, now);
         assert!(app.pinned, "呼出就钉住");
 
+        // 先让弹簧真的弹到 1.0，否则测不到"藏起来时僵在半路"。
+        for i in 1..=60u64 {
+            app.update(now + Duration::from_millis(16 * i));
+        }
+        assert!(
+            app.anims.iter().all(|s| s.value > 0.9),
+            "没跑起来就测不到回归（value={:?}）",
+            app.anims.iter().map(|s| s.value).collect::<Vec<_>>()
+        );
+
         app.set_visible(false, now);
         assert!(!app.visible && !app.expanded && !app.pinned);
+        // 窗口一藏就不再画帧，弹簧会僵在张开值上：下次呼出没有出场动画。
+        assert!(
+            app.anims.iter().all(|s| s.value == 0.0 && s.is_settled()),
+            "藏进托盘时气泡弹簧必须归零，否则下次呼出直接整圈出现"
+        );
+        assert_eq!(app.buddy_scale.value, 1.0);
+    }
+
+    /// 热键呼出和悬停展开必须看到同一段出场动画。
+    ///
+    /// 回归点：弹簧在隐藏期间不会走（`needs_render` 为假），如果藏着时不 snap，
+    /// 下次呼出就从 1.0 开始弹 —— 一圈气泡啪一下全出来，而鼠标停是逐个弹开。
+    #[test]
+    fn summon_animates_the_ring_from_closed_after_being_hidden() {
+        let mut config = Config::default();
+        config.general.show_on_start = false;
+        config.interaction.expand_on_summon = true;
+        config.ring.items = vec![custom_one()];
+        let mut app = app_from(config);
+        let now = Instant::now();
+
+        // 第一轮：呼出 → 弹到全开 → 再藏起来
+        app.set_visible(true, now);
+        for i in 1..=60u64 {
+            app.update(now + Duration::from_millis(16 * i));
+        }
+        assert!(app.anims[0].value > 0.9, "第一轮要真的张开");
+        app.set_visible(false, now);
+
+        // 第二轮：再呼出，第一帧必须还在近乎收起的位置
+        let t1 = now + Duration::from_secs(5);
+        app.set_visible(true, t1);
+        assert_eq!(app.anims[0].value, 0.0, "呼出瞬间还没开始弹");
+        app.update(t1);
+        assert!(
+            app.anims[0].value < 0.5,
+            "同一帧内不该已经弹出一半（value={}）",
+            app.anims[0].value
+        );
+        for i in 1..=60u64 {
+            app.update(t1 + Duration::from_millis(16 * i));
+        }
+        assert!(
+            app.anims[0].value > 0.9,
+            "动画要能跑完（value={}）",
+            app.anims[0].value
+        );
     }
 
     #[test]
