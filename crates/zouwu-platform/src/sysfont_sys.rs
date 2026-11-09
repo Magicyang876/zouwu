@@ -102,6 +102,26 @@ pub fn caption_metrics() -> Option<(i32, i32)> {
     read_metrics().map(|metrics| metrics.caption_pair())
 }
 
+/// 一行数字：`菜单/状态栏/消息框/调色板/图标/标题栏` 的字号 + `菜单高/小标题高/标题高`
+/// + `iPaddedBorderWidth`。只读，排错用（见 `sysfont::metrics_dump`）。
+pub(super) fn dump() -> Option<String> {
+    let metrics = read_metrics()?;
+    let icon = read_icon_font()?;
+    Some(format!(
+        "font menu={} status={} message={} palette={} icon={} caption={} | band menu={} smcaption={} caption={} | padded={}",
+        metrics.menu_font.height,
+        metrics.status_font.height,
+        metrics.message_font.height,
+        metrics.sm_caption_font.height,
+        icon.height,
+        metrics.caption_font.height,
+        metrics.menu_height,
+        metrics.sm_caption_height,
+        metrics.caption_height,
+        metrics.padded_border_width,
+    ))
+}
+
 /// 当前系统字体。拿不到就 `None`（界面显示"读不出来"，不瞎猜）。
 pub fn current() -> Option<Snapshot> {
     let metrics = read_metrics()?;
@@ -204,8 +224,8 @@ fn scale_factor() -> f32 {
 
 /// 真正写一次 `NONCLIENTMETRICS` + `ICONTITLELOGFONT`。
 ///
-/// `factor` 是这一步要先把**整块长度**乘上的系数（见 `scale_lengths`）：
-/// 第一遍给 1.0，第二遍给实测出来的 `written / got`。
+/// `factor` 是写之前先乘到**五个字号**上的系数（见 `scale_fonts`）：`AppliedDPI / 96`。
+/// 行高像素不乘——它们原样存，乘了就是每写一次长高一截。
 fn push(entries: &[(Target, Entry)], factor: f32) -> Result<(), String> {
     let mut metrics = read_metrics().ok_or("SPI_GETNONCLIENTMETRICS failed")?;
     let mut icon_font = read_icon_font().ok_or("SPI_GETICONTITLELOGFONT failed")?;
@@ -214,7 +234,7 @@ fn push(entries: &[(Target, Entry)], factor: f32) -> Result<(), String> {
     // **先把整块乘上系数，再改目标字段**。顺序很要紧：系数是把“读出来的值”换回
     // “写进去的值”的比例，目标字段自己已经由 `calibrate` 算过一遍，乘两次就写大了。
     // 读出来的图标字体同理。
-    metrics.scale_lengths(factor);
+    metrics.scale_fonts(factor);
     if (factor - 1.0).abs() >= 0.01 {
         icon_font.height = (icon_font.height as f32 * factor).round() as i32;
         icon_font.width = (icon_font.width as f32 * factor).round() as i32;

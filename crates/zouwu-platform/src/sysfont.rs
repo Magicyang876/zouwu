@@ -295,16 +295,16 @@ impl Default for NonClientMetricsW {
 }
 
 impl NonClientMetricsW {
-    /// 把所有「长度」字段乘同一个系数（`size` 不动）。
+    /// 只把**五个 `LOGFONT` 的字号**乘同一个系数（行高像素与 `size` 都不动）。
     ///
-    /// 为什么要整块缩：`SPI_SETNONCLIENTMETRICS` **按系统 DPI 把整块里的长度都除一遍
-    /// 才存**，而 `SPI_GETNONCLIENTMETRICS` 读回来的是存下的值（不再乘回去）。
-    /// 后果是“读出来再原样写回去”会让**每个没被显式校准的字段缩 1/1.25**：
-    /// 我拿着对拍的字段修了两遍没看出问题，标题栏字体却在四次写盘里从 -14 缩到了
-    /// -2，整条标题栏因此缩成 5 px——看起来就是“Windows 的标题栏消失了”。
+    /// 为什么只动字号：`SPI_SETNONCLIENTMETRICS` 写入时对 `lfHeight` 做了 DPI 换算
+    /// （本机 125 %：写 -14 读回 -11），但**`iMenuHeight` / `iCaptionHeight` 这些
+    /// 行高像素是原样存的**。把行高也乘上去，就会每写一次长高 25 %——实测把标题栏
+    /// 从 23 px 顶到 263 px，`SM_CYCAPTION` 264，屏幕上是一条半屏高的标题栏。
+    /// 字号不乘则是反过来的老毛病（ADR-066 前半段记的 -14 → -2）。
     ///
-    /// 系数由调用方**实测**得出（写一次、读回来、`written / got`），不猜 DPI。
-    pub(crate) fn scale_lengths(&mut self, factor: f32) {
+    /// 系数由调用方实测/推算得出（`scale_factor_from_dpi`），不在这里猜。
+    pub(crate) fn scale_fonts(&mut self, factor: f32) {
         if (factor - 1.0).abs() < 0.01 {
             return;
         }
@@ -313,16 +313,6 @@ impl NonClientMetricsW {
                 *value = ((*value as f32) * factor).round() as i32;
             }
         };
-        scale(&mut self.border_width);
-        scale(&mut self.scroll_width);
-        scale(&mut self.scroll_height);
-        scale(&mut self.caption_width);
-        scale(&mut self.caption_height);
-        scale(&mut self.sm_caption_width);
-        scale(&mut self.sm_caption_height);
-        scale(&mut self.menu_width);
-        scale(&mut self.menu_height);
-        scale(&mut self.padded_border_width);
         for font in [
             &mut self.caption_font,
             &mut self.sm_caption_font,
@@ -635,6 +625,31 @@ mod tests {
     }
 
     #[test]
+    fn scaling_touches_font_sizes_but_never_band_heights() {
+        let mut metrics = NonClientMetricsW::default();
+        metrics.menu_font.height = -14;
+        metrics.status_font.height = -14;
+        metrics.caption_font.height = -14;
+        metrics.sm_caption_height = 19;
+        metrics.caption_height = 19;
+        metrics.menu_height = 19;
+        metrics.border_width = 4;
+        let size = metrics.size;
+        metrics.scale_fonts(1.25);
+        // 字号要乘：系统写入时会按 DPI 除掉，不乘就是每写一次小一圈。
+        assert_eq!(metrics.menu_font.height, -18);
+        assert_eq!(metrics.status_font.height, -18);
+        assert_eq!(metrics.caption_font.height, -18);
+        // 行高像素**不能**乘：它们是原样存的，乘了就每写一次长高 25 %
+        // （实测把标题栏从 23 px 顶到 263 px）。
+        assert_eq!(metrics.menu_height, 19);
+        assert_eq!(metrics.sm_caption_height, 19);
+        assert_eq!(metrics.caption_height, 19);
+        assert_eq!(metrics.border_width, 4);
+        assert_eq!(metrics.size, size);
+    }
+
+    #[test]
     fn broken_captions_are_recognised() {
         // 实测的坏状态：字体 2 px、标题栏 3 px —— 就是“标题栏消失”那个样子。
         assert!(caption_is_broken(-2, -48, -14));
@@ -673,4 +688,12 @@ mod tests {
         assert_eq!(back.get(Target::Status), None);
         assert_eq!(back.faces().len(), 2);
     }
+}
+
+/// 一行数字，给人看/给日志用：六个字号 + 几个行高 + `iPaddedBorderWidth`。
+///
+/// 只读。排错时“到底哪个字段在变”比“读不出来”有用得多——标题栏那次事故里，
+/// 肉眼能看到的只有标题栏变矮，实际在变的是 `lfCaptionFont.lfHeight`。
+pub fn metrics_dump() -> Option<String> {
+    sys::dump()
 }

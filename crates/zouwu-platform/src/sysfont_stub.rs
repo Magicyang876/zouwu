@@ -34,3 +34,8 @@ pub fn is_admin() -> bool {
 pub fn caption_metrics() -> Option<(i32, i32)> {
     None
 }
+
+/// `sysfont::metrics_dump` 的替身：非 Windows 没有这套字面量。
+pub(super) fn dump() -> Option<String> {
+    None
+}

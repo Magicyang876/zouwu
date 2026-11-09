@@ -28,6 +28,10 @@
   整个消失**。现在缩放系数直接取注册表里的 `AppliedDPI`（`dpi / 96`，第一次写就带上），
   整块字段一起乘；另外每次写盘前多一道护栏：标题栏字体/栏高不成样子（或比状态栏字体小一截）
   就按默认关系修回来并记 `warn`。字体本身也改成一次写成，不再靠“读回比例”二次猜。
+- **每点一次「应用」标题栏就长高一截**：缩放系数当初乘到了整块 metrics 上，而行高像素
+  （`iMenuHeight` / `iCaptionHeight` …）是原样存的、不按 DPI 缩放，于是每写一次就 ×1.25
+  （实测标题栏被顶到 263 px）。现在只把系数乘到五个 `LOGFONT` 的字号上，行高与边框宽度不碰；
+  回归测试 `scaling_touches_font_sizes_but_never_band_heights` 守着这条。
 - **改桌面图标字体时把鼠标左右键对调了**：`SPI_SETICONTITLELOGFONT` 写成了 `0x0021`
   （那是 `SPI_SETMOUSEBUTTONSWAP`，参数是 `sizeof(LOGFONT)` = 92，非 0 即交换）。
   常量已改回 `0x0022`，并加了一个把 `SPI_*` 数字钉死的测试；两侧都返回成功、

@@ -73,6 +73,15 @@ fn main() -> Result<(), String> {
     // 真的通（不改变任何可见效果，所以可以随便跑）。真正的"换个字体"由用户点按钮完成。
     // `ZOUWU_SYSFONT_RESTORE=<备份文件>`：从指定快照还原。窗口里的「还原上次」用的是
     // 最新那份；这个开关是给"摸规则时留下的中间状态"收尾用的。
+    // 只读：把 `NONCLIENTMETRICS` 里我们关心的字段打印一行。排"哪个字段在变"用。
+    if std::env::var_os("ZOUWU_SYSFONT_DUMP").is_some() {
+        eprintln!(
+            "{}",
+            zouwu_platform::sysfont::metrics_dump().unwrap_or_else(|| "cannot read".into())
+        );
+        return Ok(());
+    }
+
     if let Ok(path) = std::env::var("ZOUWU_SYSFONT_RESTORE") {
         let snapshot = zouwu_platform::sysfont::read_snapshot(std::path::Path::new(path.trim()))
             .ok_or_else(|| format!("cannot read {}", path.trim()))?;
