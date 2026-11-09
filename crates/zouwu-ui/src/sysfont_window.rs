@@ -258,6 +258,20 @@ pub fn hit(layout: &Layout, scroll: usize, p: Point) -> Option<Hit> {
     None
 }
 
+/// 一次左键按下应该落在哪个控件上。
+///
+/// 两个来源，按可信度排：指针位置（`CursorMoved` 存的最后位置，最准）→ `hover`
+/// （上一次移动时算的，可能已经过期，也可能还没有——窗口刚显示、鼠标没动过就点的话
+/// 它就是 `None`）。只认 `hover` 会让“移进来就点”整个落空。
+pub fn click_target(
+    pointer: Option<Point>,
+    hover: Option<Hit>,
+    layout: &Layout,
+    scroll: usize,
+) -> Option<Hit> {
+    pointer.and_then(|p| hit(layout, scroll, p)).or(hover)
+}
+
 // ---------------------------------------------------------------- 绘制
 
 #[derive(Clone, Copy)]
@@ -632,6 +646,9 @@ pub struct SysFontWindow {
     i18n: I18n,
     pub state: State,
     hover: Option<Hit>,
+    /// 最后一次看到的指针位置（文档坐标）。点击时用它重新命中一次——只靠 `hover` 的话，
+    /// "移进来就点"在 CursorMoved 之前发生的点击会被整个吃掉（Close 按钮没反应就是这么来的）。
+    pointer: Option<Point>,
     dragging_scroll: bool,
     frame_dark: bool,
 }
@@ -670,6 +687,7 @@ impl SysFontWindow {
             i18n: I18n::new(language),
             state: State::new(),
             hover: None,
+            pointer: None,
             dragging_scroll: false,
             frame_dark: false,
         };
@@ -743,7 +761,9 @@ impl SysFontWindow {
     }
 
     /// 点一下某个东西之后做的事。抽出来是因为测试要能直接调它。
-    fn activate(&mut self, hit: Hit) {
+    ///
+    /// 返回要交给主循环的 `Outcome`：只有"关闭"需要往外传，其余都是就地处理。
+    fn activate(&mut self, hit: Hit) -> Vec<Outcome> {
         match hit {
             Hit::Face(index) => {
                 self.state.selected = index.min(self.state.faces.len().saturating_sub(1));
@@ -761,8 +781,13 @@ impl SysFontWindow {
             Hit::Restore => self.restore(),
             Hit::Export => self.export(),
             Hit::Substitute => self.toggle_substitute(),
-            Hit::Close => {}
+            Hit::Close => {
+                // 隐藏窗口 + 告诉主循环（它负责复位拖动/轮询状态）。
+                self.close();
+                return vec![Outcome::Close];
+            }
         }
+        Vec::new()
     }
 
     fn apply(&mut self) {
@@ -911,6 +936,7 @@ impl SysFontWindow {
                     position.x as f32 / scale.max(0.01),
                     position.y as f32 / scale.max(0.01),
                 );
+                self.pointer = Some(p);
                 let layout = layout(self.state.scroll, self.state.faces.len());
                 let next = hit(&layout, self.state.scroll, p);
                 let cursor = if next.is_some() {
@@ -937,11 +963,16 @@ impl SysFontWindow {
                     self.dragging_scroll = false;
                     return Vec::new();
                 }
-                if let Some(hit) = self.hover {
-                    self.activate(hit);
-                    self.request_redraw();
-                }
-                Vec::new()
+                // 先用指针的实际位置重算一次（`hover` 可能是上一次移动时的旧值，
+                // 也可能还没有——窗口刚显示、鼠标没动过就点的话它是 `None`）。
+                let layout = layout(self.state.scroll, self.state.faces.len());
+                let Some(hit) = click_target(self.pointer, self.hover, &layout, self.state.scroll)
+                else {
+                    return Vec::new();
+                };
+                let outcomes = self.activate(hit);
+                self.request_redraw();
+                outcomes
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let steps = match delta {
@@ -1108,5 +1139,36 @@ mod tests {
         let layout = layout(0, 3);
         let below = Point::new(layout.list.x + 4.0, layout.list.y + ROW_H * 5.0);
         assert_eq!(hit(&layout, 0, below), None);
+    }
+
+    #[test]
+    fn the_close_button_is_hittable() {
+        // 回归：`Close` 曾经在 `activate` 里是空实现，而且点击只认 `hover`——
+        // 窗口刚出来、鼠标没动过（`hover` 为 `None`）时点关闭按钮什么都不发生。
+        let layout = layout(0, 10);
+        let close = layout
+            .buttons
+            .iter()
+            .find(|(_, action)| *action == Hit::Close)
+            .map(|(rect, _)| rect.center())
+            .expect("关闭按钮要在按钮表里");
+        assert_eq!(hit(&layout, 0, close), Some(Hit::Close));
+        // 指针位置在就是它说了算，`hover` 没有也能点中
+        assert_eq!(
+            click_target(Some(close), None, &layout, 0),
+            Some(Hit::Close)
+        );
+        // 指针位置与 `hover` 冲突时以指针为准（`hover` 可能是上一帧的旧值）
+        assert_eq!(
+            click_target(Some(close), Some(Hit::Apply), &layout, 0),
+            Some(Hit::Close)
+        );
+        // 指针落在空白处时回退到 `hover`
+        let blank = layout.header.center();
+        assert_eq!(hit(&layout, 0, blank), None);
+        assert_eq!(
+            click_target(Some(blank), Some(Hit::Apply), &layout, 0),
+            Some(Hit::Apply)
+        );
     }
 }

@@ -36,6 +36,10 @@
   （那是 `SPI_SETMOUSEBUTTONSWAP`，参数是 `sizeof(LOGFONT)` = 92，非 0 即交换）。
   常量已改回 `0x0022`，并加了一个把 `SPI_*` 数字钉死的测试；两侧都返回成功、
   没有任何报错，只有 `SM_SWAPBUTTON` 悄悄变成 1。
+- **「系统字体」窗的关闭按钮点了没反应**：`Hit::Close` 分支是空实现，而点击又只认
+  `hover` 缓存（窗口刚显示、鼠标没动过时它是 `None`，整下点击被吃掉）。现在点击时用
+  指针位置重算命中（`pointer` → `hit()`，失败才回退 `hover`，抽成纯函数 `click_target`），
+  关闭按钮真的关窗并通知主循环；`the_close_button_is_hittable` 守着（ADR-067）。
 
 ## 1.0.4 · 2026-11-09
 
