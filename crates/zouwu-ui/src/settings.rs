@@ -157,6 +157,8 @@ pub enum Field {
     Theme,
     Skin,
     FontPack,
+    /// 跟随 Windows 的界面字体（与字体包互斥）。
+    OsFont,
     ClipboardEnabled,
     ClipboardLimit,
     EyeCareEnabled,
@@ -215,6 +217,7 @@ impl Field {
             Field::Theme => "settings.theme",
             Field::Skin => "settings.skin",
             Field::FontPack => "settings.font",
+            Field::OsFont => "settings.font.os",
             Field::ClipboardEnabled => "settings.clipboard",
             Field::ClipboardLimit => "settings.clipboard.limit",
             Field::EyeCareEnabled => "settings.eye-care",
@@ -394,6 +397,7 @@ impl Field {
             Field::ClipboardEnabled => cfg.clipboard.enabled,
             Field::EyeCareEnabled => cfg.eye_care.enabled,
             Field::Breathe => cfg.buddy.breathe,
+            Field::OsFont => cfg.appearance.os_font,
             Field::LogToFile => cfg.log.to_file,
             _ => return None,
         };
@@ -412,6 +416,13 @@ impl Field {
             Field::ClipboardEnabled => cfg.clipboard.enabled = on,
             Field::EyeCareEnabled => cfg.eye_care.enabled = on,
             Field::Breathe => cfg.buddy.breathe = on,
+            // 勾上"跟随系统"就放弃字体包：两条设置同时开着，用户看不出在用什么字体。
+            Field::OsFont => {
+                cfg.appearance.os_font = on;
+                if on {
+                    cfg.appearance.font_pack.clear();
+                }
+            }
             Field::LogToFile => cfg.log.to_file = on,
             _ => {}
         }
@@ -845,9 +856,35 @@ impl Model {
         }
     }
 
-    /// 当前字体家族的显示名（`None` = 系统默认字体）。
+    /// 当前字体家族的显示名（`None` = 内置默认字体）。
+    ///
+    /// 优先级与 `App::apply_font` 一致：字体包 > 跟随 Windows > 内置默认。
     pub fn font_family(&self) -> Option<String> {
-        self.current_font_pack().map(|p| p.family.clone())
+        if let Some(pack) = self.current_font_pack() {
+            return Some(pack.family.clone());
+        }
+        if self.config.appearance.os_font {
+            return Some(crate::text::os_family());
+        }
+        None
+    }
+
+    /// "跟随 Windows 字体"这一行的说明。
+    ///
+    /// 打开时把真实家族名报出来（用户勾的是"系统的字体"，但他不知道系统用的是哪个），
+    /// 缺中文字形就换成警告——理由和字体包那条 `font_note` 一样：
+    /// 不说清楚，用户只会觉得渲染坏了。
+    fn os_font_hint(&self) -> String {
+        if !self.config.appearance.os_font {
+            return self.i18n.t("settings.font.os.hint");
+        }
+        let family = crate::text::os_family();
+        if crate::text::family_covers_cjk(&family) {
+            self.i18n
+                .t_args("settings.font.os.current", &[("family", family.as_str())])
+        } else {
+            self.i18n.t("settings.font.os.no.cjk")
+        }
     }
 
     /// 当前选中的字体包（系统字体时是 `None`）。
@@ -1161,6 +1198,14 @@ pub fn build_rows(model: &Model) -> Vec<Row> {
                         .find(|(id, _)| *id == model.config.appearance.font_pack)
                         .map(|(_, label)| label.clone())
                         .unwrap_or_else(|| i18n.t("settings.font.system")),
+                },
+            });
+            rows.push(Row {
+                field: Some(Field::OsFont),
+                label: i18n.t("settings.font.os"),
+                hint: Some(model.os_font_hint()),
+                control: Control::Toggle {
+                    on: model.config.appearance.os_font,
                 },
             });
             rows.push(Row {
@@ -2329,7 +2374,11 @@ pub fn step(model: &mut Model, field: Field, dir: i32) -> Vec<ChangeKind> {
         Field::Language => model.config.general.language = value,
         Field::Theme => model.config.appearance.theme = value,
         Field::Skin => model.config.appearance.skin = value,
-        Field::FontPack => model.config.appearance.font_pack = value,
+        Field::FontPack => {
+            model.config.appearance.font_pack = value.clone();
+            // 选了字体包就不再跟随系统字体（见 `Field::OsFont` 的反向处理）。
+            model.config.appearance.os_font = false;
+        }
         Field::LogLevel => model.config.log.level = value,
         _ => return Vec::new(),
     }
@@ -2345,7 +2394,9 @@ fn changed(model: &mut Model, field: Field) -> Vec<ChangeKind> {
         }
         Field::Hotkey => kinds.push(ChangeKind::Hotkey),
         Field::StartOnBoot => kinds.push(ChangeKind::Autostart),
-        Field::Theme | Field::Skin | Field::FontPack => kinds.push(ChangeKind::Appearance),
+        Field::Theme | Field::Skin | Field::FontPack | Field::OsFont => {
+            kinds.push(ChangeKind::Appearance);
+        }
         Field::LogLevel | Field::LogToFile => kinds.push(ChangeKind::Log),
         Field::AlwaysOnTop => kinds.push(ChangeKind::WindowLevel),
         Field::ClipboardEnabled | Field::ClipboardLimit => kinds.push(ChangeKind::Clipboard),
@@ -3393,6 +3444,54 @@ mod tests {
         assert_eq!(m.config.appearance.skin, "zouwu-ink");
         // 越界点击不能 panic
         assert!(select_skin(&mut m, 99).is_empty());
+    }
+
+    /// 两条字体设置在模型层就必须互斥：勾上"跟随 Windows"要放弃字体包，
+    /// 反过来选了字体包要关掉它。让它们同时为真，用户从界面上看不出在用哪个字体，
+    /// 而 `App::apply_font` 里那个"字体包优先"的分支就变成没人看得懂的不变量。
+    #[test]
+    fn os_font_and_font_pack_are_mutually_exclusive() {
+        let mut m = model();
+        m.fonts = vec![
+            (String::new(), "Built-in".into()),
+            ("fira".into(), "Fira Sans".into()),
+        ];
+        m.config.appearance.font_pack = "fira".into();
+
+        // 勾上"跟随 Windows 字体" → 字体包被放弃
+        Field::OsFont.set_bool(&mut m.config, true);
+        let kinds = changed(&mut m, Field::OsFont);
+        assert_eq!(kinds, vec![ChangeKind::Appearance]);
+        assert!(m.config.appearance.os_font);
+        assert!(
+            m.config.appearance.font_pack.is_empty(),
+            "勾上跟随系统后字体包必须清空，否则谁生效看不出来"
+        );
+
+        // 反向：再从选择行里挑一个字体包 → 跟随系统关掉
+        let kinds = step(&mut m, Field::FontPack, 1);
+        assert_eq!(kinds, vec![ChangeKind::Appearance]);
+        assert_eq!(m.config.appearance.font_pack, "fira");
+        assert!(!m.config.appearance.os_font, "选了字体包就得关掉跟随系统");
+    }
+
+    /// 跟随系统时，只读的"家族"行必须报出真正的家族名，而不是空着。
+    #[test]
+    fn font_family_reports_the_system_family_when_following_it() {
+        let mut m = model();
+        assert_eq!(m.font_family(), None, "默认是内置字体，没有家族名可报");
+
+        m.config.appearance.os_font = true;
+        let family = m.font_family().expect("跟随系统时必须报出家族名");
+        assert!(!family.trim().is_empty(), "家族名不能是空白");
+        // 说明文字里要能看到这个家族名（用户在系统里换过字体，我们得告诉他换成了什么）。
+        if crate::text::family_covers_cjk(&family) {
+            assert!(
+                m.os_font_hint().contains(&family),
+                "hint 里没报出家族名：{}",
+                m.os_font_hint()
+            );
+        }
     }
 
     fn model() -> Model {

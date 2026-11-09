@@ -365,6 +365,15 @@ pub struct Appearance {
     /// 没选字体包时不去写死一个 id：用户可能一辈子不换字体，
     /// 而"空 = 系统"让老配置天然等价于"从未设置过"。
     pub font_pack: String,
+    /// 跟随 Windows 的界面字体（`SPI_GETNONCLIENTMETRICS` 的 `lfMessageFont`）。
+    ///
+    /// 关着的时候用内置默认（`text_gdi::DEFAULT_FAMILY`，写死微软雅黑 UI）——
+    /// 那条路保证有中文字形。打开之后用的字体由系统决定，可能没有中文字形
+    /// （英文系统上是 `Segoe UI`），所以只在用户明确要求时才走。
+    ///
+    /// 选字体包时这一项会被关掉：两条设置同时开着没有意义，
+    /// "哪个优先"不该让用户去猜。
+    pub os_font: bool,
 }
 
 impl Default for Appearance {
@@ -373,6 +382,7 @@ impl Default for Appearance {
             theme: "zouwu-warm".to_string(),
             skin: crate::skin::PROCEDURAL_SKIN_ID.to_string(),
             font_pack: String::new(),
+            os_font: false,
         }
     }
 }
@@ -814,6 +824,25 @@ mod tests {
         assert_eq!(cfg.appearance.skin, "zouwu-ink");
         assert!(cfg.appearance.font_pack.is_empty());
         assert_eq!(cfg.migrated().schema_version, SCHEMA_VERSION);
+    }
+
+    /// `os_font` 是后加的字段：老配置里没有它，必须解析成 `false`。
+    ///
+    /// 反过来（默认 true）会让所有人升级后突然换成 `Segoe UI`：英文系统上
+    /// 中文字形要靠 GDI 回落，150% 缩放下会糊成一团。
+    #[test]
+    fn config_without_os_font_keeps_the_builtin_family() {
+        let cfg = Config::from_toml(
+            r#"
+            schema_version = 9
+            [appearance]
+            theme = "zouwu-warm"
+            skin = "zouwu-ink"
+            font_pack = ""
+            "#,
+        )
+        .expect("parse");
+        assert!(!cfg.appearance.os_font, "os_font must default to off");
     }
 
     #[test]

@@ -76,6 +76,9 @@ that only write a log line, that was a deliberate cull.
   across the body, embers drifting around him). **Right-click the pet** for a quick skin list;
   the current one is outlined.
 - Chinese / English with Fluent, switchable at runtime; `language = "auto"` follows the system.
+- UI text can follow **the Windows UI font** (Settings → Appearance). Off by default: an
+  English system hands back a face with no Chinese glyphs, so it stays opt-in — when it is on,
+  the panel names the resolved font and warns if that font cannot render Chinese.
 
 ### Not there yet
 
@@ -165,6 +168,7 @@ start_on_boot = false
 [appearance]
 theme = "zouwu-warm"
 skin = "zouwu-ink"
+os_font = false            # true = use the Windows UI font
 
 [eye_care]
 enabled = false

@@ -26,6 +26,20 @@ pub fn set_family(family: Option<String>) -> bool {
     family.is_some()
 }
 
+/// 占位实现读不到"系统的界面字体"（mac/Linux 要问各自的桌面环境）。
+pub fn os_ui_family() -> Option<String> {
+    None
+}
+
+pub fn os_family() -> String {
+    DEFAULT_FAMILY.to_string()
+}
+
+/// 占位实现不探测字形覆盖：说"有"，免得在接上真后端之前到处报警告。
+pub fn family_covers_cjk(_family: &str) -> bool {
+    true
+}
+
 pub fn measure(text: &str, px: f32, _bold: bool) -> f32 {
     text.chars().count() as f32 * px * 0.55
 }

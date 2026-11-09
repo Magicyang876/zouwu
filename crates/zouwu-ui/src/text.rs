@@ -29,6 +29,19 @@ pub fn set_family(family: Option<String>) -> bool {
     backend::set_family(family)
 }
 
+/// Windows 的界面字体（读不到时回落到内置默认）。
+///
+/// 用在"跟随系统字体"这一档：用户在系统里把界面字体换成别的时候，
+/// 我们写死的 `DEFAULT_FAMILY` 就和他的桌面不再是同一个字体了。
+pub fn os_family() -> String {
+    backend::os_family()
+}
+
+/// 这个家族有没有中文字形（缺字时中文会走 GDI 的 font-link 回落，很糊）。
+pub fn family_covers_cjk(family: &str) -> bool {
+    backend::family_covers_cjk(family)
+}
+
 /// 文本引擎。字体资源在平台层是全局单例，这里只是一个零成本的门面。
 pub struct TextEngine {
     /// 预留给将来的字形缓存/排版配置。

@@ -632,7 +632,7 @@ impl App {
             // 手改 config.toml 里的 theme/skin/font_pack 也要当场生效，不必重启。
             self.set_theme(self.config.appearance.theme.clone(), now);
             self.set_skin(self.config.appearance.skin.clone(), now);
-            self.set_font_pack(self.config.appearance.font_pack.clone(), now);
+            self.apply_font(now);
             // 子窗口是复用的（不再销毁重建），所以换肤也得主动告诉他们。
             let theme = self.theme.clone();
             if let Some(window) = self.history_window.as_mut() {
@@ -1015,23 +1015,9 @@ impl App {
             self.init_tray();
         }
 
-        // 配置里的字体包在这里装上：字体文件已在 `run()` 里注册进本进程，
-        // 但"用哪个家族"要等文本引擎第一次被问到之前定下来。
-        let pack_id = self.config.appearance.font_pack.clone();
-        if pack_id.is_empty() {
-            log::debug!("font -> system default");
-        } else {
-            match zouwu_platform::fontpack::get(&pack_id) {
-                Some(pack) => {
-                    crate::text::set_family(Some(pack.family.clone()));
-                    log::info!("font -> {} (pack `{pack_id}`)", pack.family);
-                }
-                None => {
-                    log::warn!("font pack `{pack_id}` is missing; using the system font");
-                    self.config.appearance.font_pack.clear();
-                }
-            }
-        }
+        // 用哪个家族要等文本引擎第一次被问到之前定下来（字体文件已在 `run()` 里
+        // 注册进本进程）。三档的先后顺序只写在 `apply_font` 里一处。
+        self.apply_font(Instant::now());
 
         if self.hotkeys.is_none() {
             match HotkeyRegistrar::new() {
@@ -1256,45 +1242,59 @@ impl App {
         log::info!("skin -> {id}");
     }
 
-    /// 换字体包：`""` = 系统默认字体。
+    /// 按配置决定用哪个字体家族，并立刻生效。
     ///
-    /// 字体是**全局状态**（平台层的字体缓存），所以这里不需要碰 pixmap 之外的东西，
-    /// 但必须把整幅重画：连气泡环里的数字、面板里的每个字都要换。
-    /// 包不存在时退回系统字体并记日志——字体不像皮肤，退回去至少还是能读的。
-    fn set_font_pack(&mut self, id: String, now: Instant) {
-        if self.config.appearance.font_pack == id {
-            return;
-        }
-        let family = if id.is_empty() {
-            None
-        } else {
-            match zouwu_platform::fontpack::get(&id) {
+    /// 三档，优先级从高到低：
+    /// 1. `appearance.font_pack` 非空 —— 用户导入的字体包；
+    /// 2. `appearance.os_font` —— 跟随 Windows 的界面字体（英文系统上是 `Segoe UI`，
+    ///    没有中文字形，所以只在用户明确打勾时才走）；
+    /// 3. 都不是 —— 内置默认（`DEFAULT_FAMILY`，写死微软雅黑 UI，保证中文）。
+    ///
+    /// 字体是**全局状态**（平台层的字体缓存），所以换完必须整幅重画：
+    /// 连气泡环里的数字、面板里的每个字都要换。
+    /// 配置里的字体包不存在时退回下一档并记日志——字体不像皮肤，退回去至少还能读。
+    fn apply_font(&mut self, now: Instant) {
+        let pack_id = self.config.appearance.font_pack.clone();
+        let mut family = None;
+        let mut source = "builtin default";
+        if !pack_id.is_empty() {
+            match zouwu_platform::fontpack::get(&pack_id) {
                 Some(pack) => {
                     // 运行期新导入的包还没注册进本进程，用之前先补一次。
                     let dir = zouwu_platform::fontpack::fonts_dir().join(&pack.id);
                     for file in &pack.files {
                         zouwu_platform::text_gdi::add_font_file(&dir.join(file));
                     }
-                    Some(pack.family)
+                    family = Some(pack.family.clone());
+                    source = "font pack";
                 }
                 None => {
-                    log::warn!("font pack `{id}` not found; falling back to the system font");
-                    None
+                    log::warn!("font pack `{pack_id}` is missing; falling back");
+                    self.config.appearance.font_pack.clear();
+                    self.save_config();
                 }
             }
-        };
-        if !crate::text::set_family(family.clone()) {
-            log::debug!("font family unchanged");
         }
-        self.config.appearance.font_pack = if family.is_some() {
-            id.clone()
-        } else {
-            String::new()
-        };
-        self.save_config();
-        self.last_frame = now;
-        self.dirty = true;
-        log::info!("font -> {}", family.as_deref().unwrap_or("system default"));
+        if family.is_none() && self.config.appearance.os_font {
+            family = Some(crate::text::os_family());
+            source = "windows default";
+        }
+        // 手改 config.toml 造成"选了字体包又勾了跟随系统"这种矛盾时以字体包为准，
+        // 并把矛盾抹掉：两份设置同时开着，用户没法从界面上看出到底在用什么。
+        if source == "font pack" && self.config.appearance.os_font {
+            self.config.appearance.os_font = false;
+            self.save_config();
+        }
+        if crate::text::set_family(family.clone()) {
+            self.last_frame = now;
+            self.dirty = true;
+        }
+        log::info!(
+            "font -> {} ({source})",
+            family
+                .as_deref()
+                .unwrap_or(zouwu_platform::text_gdi::DEFAULT_FAMILY)
+        );
     }
 
     /// 导入 `.zwskin`：选文件 → 校验 → 落盘 → 重建菜单 → 立刻换上。

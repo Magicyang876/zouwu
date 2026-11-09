@@ -39,6 +39,14 @@ fn main() -> Result<(), String> {
             eprintln!("no such font pack: {pack_id}");
         }
     }
+    // 跟随 Windows 字体这一档也要能离屏验收：家族名是从系统里读出来的，
+    // 读错了这一页会露馅（说明文字里会印出家族名）。
+    if std::env::var("ZOUWU_OS_FONT").is_ok() {
+        config.appearance.os_font = true;
+        let family = zouwu_ui::text::os_family();
+        zouwu_ui::text::set_family(Some(family.clone()));
+        eprintln!("os font: {family}");
+    }
     let skins = zouwu_platform::assets::skin_choices(&zouwu_core::i18n::I18n::new(
         &config.general.language,
     ));

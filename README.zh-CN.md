@@ -71,6 +71,9 @@
   眼缝、双角从太阳穴往外挑、绯红外袍配金腰带、长刀斜劈过身前、身边浮着火星）。
   右键小兽即可切换。
 - 中文 / 英文（Fluent），运行时切换无需重启；`language = "auto"` 跟随系统。
+- 界面字体也能**跟随 Windows 的界面字体**（设置 → 外观）。默认关着：英文系统上那个
+  字体没有中文字形，中文会回退，所以保持手动开启；打开后面板会写出解析到的字体名，
+  缺中文字形时直接说明会回退。
 
 ### 还没做的
 
@@ -157,6 +160,7 @@ start_on_boot = false
 [appearance]
 theme = "zouwu-warm"
 skin = "zouwu-ink"
+os_font = false            # true = 跟随 Windows 界面字体
 
 [eye_care]
 enabled = false

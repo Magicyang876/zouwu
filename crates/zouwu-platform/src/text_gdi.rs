@@ -107,6 +107,52 @@ struct TextMetricW {
     reserved2: [u8; 3],
 }
 
+/// `LOGFONTW`（只用来从 `NONCLIENTMETRICSW` 里读家族名，其余字段原样摆着）。
+///
+/// 全是定长整型/字节数组，没有指针，所以 32/64 位布局一致、可以直接按 C 结构体读。
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct LogFontW {
+    height: i32,
+    width: i32,
+    escapement: i32,
+    orientation: i32,
+    weight: i32,
+    italic: u8,
+    underline: u8,
+    strike_out: u8,
+    char_set: u8,
+    out_precision: u8,
+    clip_precision: u8,
+    quality: u8,
+    pitch_and_family: u8,
+    /// 家族名，UTF-16、最长 31 个字符 + `NUL`（不是 C 字符串，可能没有结束符）。
+    face: [u16; 32],
+}
+
+/// `NONCLIENTMETRICSW`。`size` 必须由调用方填成结构体大小，
+/// 否则 `SystemParametersInfoW` 会因为"版本不匹配"直接失败。
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct NonClientMetricsW {
+    size: u32,
+    border_width: i32,
+    scroll_width: i32,
+    scroll_height: i32,
+    caption_width: i32,
+    caption_height: i32,
+    caption_font: LogFontW,
+    sm_caption_width: i32,
+    sm_caption_height: i32,
+    sm_caption_font: LogFontW,
+    menu_width: i32,
+    menu_height: i32,
+    menu_font: LogFontW,
+    status_font: LogFontW,
+    message_font: LogFontW,
+    padded_border_width: i32,
+}
+
 #[link(name = "gdi32")]
 extern "system" {
     fn CreateCompatibleDC(hdc: Hdc) -> Hdc;
@@ -142,6 +188,14 @@ extern "system" {
     fn TextOutW(hdc: Hdc, x: i32, y: i32, string: *const u16, count: i32) -> Bool;
     fn GetTextExtentPoint32W(hdc: Hdc, string: *const u16, count: i32, size: *mut Size) -> Bool;
     fn GetTextMetricsW(hdc: Hdc, metrics: *mut TextMetricW) -> Bool;
+    /// 问字体里有没有这个字：缺字时把该位置成 `GGI_MARK_NONEXISTING_GLYPHS`。
+    fn GetGlyphIndicesW(
+        hdc: Hdc,
+        string: *const u16,
+        count: i32,
+        glyphs: *mut u16,
+        flags: u32,
+    ) -> u32;
     /// 把字体文件注册给本进程（`FR_PRIVATE`）：不写注册表、不改系统设置，
     /// 进程退出即失效。用户"导入一个字体包"就是往这儿喂一个文件。
     fn AddFontResourceExW(name: *const u16, flags: u32, reserved: *mut c_void) -> i32;
@@ -150,10 +204,18 @@ extern "system" {
 /// `AddFontResourceExW` 的标志：只对本进程可见，且不污染系统字体列表。
 const FR_PRIVATE: u32 = 0x10;
 
+/// `SystemParametersInfoW`：取 `NONCLIENTMETRICS`（界面字体就在里面）。
+const SPI_GETNONCLIENTMETRICS: u32 = 0x0029;
+
+/// `GetGlyphIndicesW`：缺字的位置写 0xFFFF，而不是 0（0 是合法的字形索引）。
+const GGI_MARK_NONEXISTING_GLYPHS: u32 = 0x0001;
+
 #[link(name = "user32")]
 extern "system" {
     fn GetDC(hwnd: *mut c_void) -> Hdc;
     fn ReleaseDC(hwnd: *mut c_void, hdc: Hdc) -> i32;
+    /// 读一条系统参数。这里只用它问"界面字体是什么"。
+    fn SystemParametersInfoW(action: u32, param: u32, data: *mut c_void, win_ini: u32) -> Bool;
 }
 
 /// 一块可复用的离屏 DIB：每次绘制前只清空用到的那一块。
@@ -310,6 +372,55 @@ pub fn set_family(family: Option<String>) -> bool {
         }
     }
     changed
+}
+
+/// Windows 的界面字体：资源管理器、设置面板、消息框都在用的那一个。
+///
+/// 走 `SPI_GETNONCLIENTMETRICS` 的 `lfMessageFont`（"消息字体"），中文系统上通常是
+/// `Microsoft YaHei UI`，英文系统上是 `Segoe UI`。读不到就返回 `None`。
+///
+/// 注意它**不保证有中文字形**：`Segoe UI` 就没有。要不要用是调用方的事，
+/// 判据是 [`family_covers_cjk`]。
+pub fn os_ui_family() -> Option<String> {
+    let mut ncm = NonClientMetricsW::default();
+    ncm.size = std::mem::size_of::<NonClientMetricsW>() as u32;
+    let size = ncm.size;
+    let ok = unsafe {
+        SystemParametersInfoW(
+            SPI_GETNONCLIENTMETRICS,
+            size,
+            &mut ncm as *mut NonClientMetricsW as *mut c_void,
+            0,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    let face = &ncm.message_font.face;
+    let end = face.iter().position(|c| *c == 0).unwrap_or(face.len());
+    let name = String::from_utf16_lossy(&face[..end]).trim().to_string();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// 界面字体，读不到时回落到 [`DEFAULT_FAMILY`]。
+pub fn os_family() -> String {
+    os_ui_family().unwrap_or_else(|| DEFAULT_FAMILY.to_string())
+}
+
+/// 这个家族在系统里有没有中文字形。
+///
+/// 判定用 GDI 问一次 `中`／`文`，而不是去翻字体文件的 `cmap`：系统字体可能藏在
+/// `.ttc` 里、也可能根本没装（`CreateFontW` 会静默换成默认字体），
+/// 而"GDI 排出来是不是缺字"正是我们真正关心的那件事。
+///
+/// 家族名不存在时 `CreateFontW` 会替换成默认字体，此时返回的是**默认字体**的
+/// 覆盖情况——拿不准的时候说"有"，因为我们只在"确定没有"时才警告用户。
+pub fn family_covers_cjk(family: &str) -> bool {
+    with_gdi(|gdi| gdi.family_covers_cjk(family)).unwrap_or(true)
 }
 
 /// 单行文本的浮点像素宽度（已含 GDI 的进位取整）。
@@ -565,6 +676,53 @@ impl Gdi {
         self.widths.insert(key, width);
         width
     }
+
+    /// 见 [`family_covers_cjk`]：临时造一个该家族的字体，问两个字有没有字形。
+    fn family_covers_cjk(&mut self, family: &str) -> bool {
+        let face: Vec<u16> = family.encode_utf16().chain(std::iter::once(0)).collect();
+        let font = unsafe {
+            CreateFontW(
+                -12,
+                0,
+                0,
+                0,
+                FW_NORMAL,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET,
+                OUT_TT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                ANTIALIASED_QUALITY,
+                DEFAULT_PITCH,
+                face.as_ptr(),
+            )
+        };
+        if font.is_null() {
+            return true;
+        }
+        let old = unsafe { SelectObject(self.scratch.dc, font) };
+        let probe: Vec<u16> = "中文".encode_utf16().collect();
+        let mut glyphs = vec![0u16; probe.len()];
+        let asked = unsafe {
+            GetGlyphIndicesW(
+                self.scratch.dc,
+                probe.as_ptr(),
+                probe.len() as i32,
+                glyphs.as_mut_ptr(),
+                GGI_MARK_NONEXISTING_GLYPHS,
+            )
+        };
+        // 恢复并立刻销毁：字体是进程级资源，不能因为一次探测就漏一个。
+        unsafe {
+            SelectObject(self.scratch.dc, old);
+            DeleteObject(font);
+        }
+        if asked == u32::MAX {
+            return true;
+        }
+        !glyphs.iter().any(|g| *g == 0xFFFF)
+    }
 }
 
 #[cfg(test)]
@@ -699,6 +857,41 @@ mod tests {
                 "{other}px 预热后画的 18px 字形与基准不同：字体没有被显式选进 DC"
             );
         }
+    }
+
+    /// 界面字体读出来得是个真名字（`NONCLIENTMETRICS` 的偏移写错时这里会先炸）。
+    #[test]
+    fn os_ui_family_is_a_plausible_family_name() {
+        let Some(family) = os_ui_family() else {
+            // 无头/服务会话读不到系统参数，跳过而不是假装通过。
+            return;
+        };
+        assert!(!family.trim().is_empty(), "empty family name");
+        // 写错偏移会读到 `lfHeight` 之类的二进制垃圾：家族名不该有控制字符。
+        assert!(
+            family
+                .chars()
+                .all(|c| c.is_ascii_graphic() || !c.is_control()),
+            "family looks like binary garbage: {family:?}"
+        );
+        assert!(
+            family.chars().count() < 32,
+            "family longer than LOGFONTW.face: {family:?}"
+        );
+    }
+
+    /// 缺字探测：雅黑有中文、Consolas 没有。
+    #[test]
+    fn cjk_probe_tells_latin_fonts_apart_from_cjk_fonts() {
+        let _guard = lock();
+        assert!(
+            family_covers_cjk("Microsoft YaHei UI"),
+            "Microsoft YaHei UI must cover CJK"
+        );
+        assert!(
+            !family_covers_cjk("Consolas"),
+            "Consolas must not claim CJK coverage"
+        );
     }
 
     /// 墨迹宽度必须与 `measure` 相称（防"字号没生效"这类退化）。
