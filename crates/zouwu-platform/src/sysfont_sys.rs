@@ -14,7 +14,11 @@ use super::{
 const SPI_GETNONCLIENTMETRICS: u32 = 0x0029;
 const SPI_SETNONCLIENTMETRICS: u32 = 0x002A;
 const SPI_GETICONTITLELOGFONT: u32 = 0x001F;
-const SPI_SETICONTITLELOGFONT: u32 = 0x0021;
+/// 图标字体。**别写成 `0x0021`** —— 那是 `SPI_SETMOUSEBUTTONSWAP`，我们试过：写图标字体
+/// 顺手把用户的鼠标左右键对调了（`param` 传的是 `sizeof(LOGFONT) = 92`，非 0 即"交换"）。
+/// 常量错了不会有任何报错，`SM_SWAPBUTTON` 却是 1——`spi_constants_are_what_we_think`
+/// 这个测试就是为这条踩坑留的。
+const SPI_SETICONTITLELOGFONT: u32 = 0x0022;
 /// 让系统把值写进用户配置（不带它只改内存，注销就没了）。
 const SPIF_UPDATEINIFILE: u32 = 0x01;
 const WM_SETTINGCHANGE: u32 = 0x001A;
@@ -408,6 +412,22 @@ pub fn is_admin() -> bool {
 mod tests {
     use super::super::{height_for_pt, pt_for_height};
     use super::*;
+
+    /// 这些数字是从 `WinUser.h` 抄来的，抄错一个就是一桩事故：
+    /// `0x0021` 不是图标字体而是 `SPI_SETMOUSEBUTTONSWAP`（见常量上的注释）。
+    #[test]
+    fn spi_constants_are_what_we_think() {
+        assert_eq!(SPI_GETNONCLIENTMETRICS, 0x0029);
+        assert_eq!(SPI_SETNONCLIENTMETRICS, 0x002A);
+        assert_eq!(SPI_GETICONTITLELOGFONT, 0x001F);
+        assert_eq!(SPI_SETICONTITLELOGFONT, 0x0022);
+        // 邻居的值写在旁边，是为了让"抄错一行"这件事在下一次也看得见：
+        // 0x0020 = SPI_GETMOUSEBUTTONSWAP、0x0021 = SPI_SETMOUSEBUTTONSWAP。
+        assert_ne!(
+            SPI_SETICONTITLELOGFONT, 0x0021,
+            "0x0021 是 SPI_SETMOUSEBUTTONSWAP"
+        );
+    }
 
     #[test]
     fn pt_and_height_agree() {
