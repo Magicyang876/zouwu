@@ -51,6 +51,26 @@ pub fn is_admin() -> bool {
     false
 }
 
+pub fn system_dpi() -> u32 {
+    96
+}
+
+pub fn os_build() -> u32 {
+    0
+}
+
+pub fn caption_supported() -> bool {
+    false
+}
+
+pub fn chrome_needs_repair() -> bool {
+    false
+}
+
+pub fn restore_chrome() -> Result<super::Chrome, String> {
+    Err("sysfont: only supported on Windows".to_string())
+}
+
 pub fn caption_metrics() -> Option<(i32, i32)> {
     None
 }

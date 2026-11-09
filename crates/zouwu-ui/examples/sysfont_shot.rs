@@ -15,6 +15,20 @@ use zouwu_ui::sysfont_window::{self, Hit, State};
 
 fn main() -> Result<(), String> {
     zouwu_platform::logging::init();
+    // 例子进程默认是 DPI 不感知的，这时 `SPI_GETNONCLIENTMETRICS` 返回的是“逻辑像素”
+    // （读 -18），而挂件自己是 PMv2 感知的（读 -23）——同一个系统两套数，排错时能把
+    // 人绕死。先跟挂件对齐，再干活。
+    #[cfg(windows)]
+    unsafe {
+        #[link(name = "user32")]
+        extern "system" {
+            fn SetProcessDpiAwarenessContext(value: isize) -> i32;
+        }
+        const PER_MONITOR_AWARE_V2: isize = -4;
+        if SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2) == 0 {
+            eprintln!("(could not become per-monitor DPI aware; numbers may be the 96dpi ones)");
+        }
+    }
 
     let out = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -78,6 +92,26 @@ fn main() -> Result<(), String> {
         eprintln!(
             "{}",
             zouwu_platform::sysfont::metrics_dump().unwrap_or_else(|| "cannot read".into())
+        );
+        return Ok(());
+    }
+
+    // 诊断：SPI 给的 `lfHeight` 是逻辑像素还是物理像素？比较不同 DPI 的取值就知道。
+    if std::env::var_os("ZOUWU_SYSFONT_PROBE").is_some() {
+        let dpi = zouwu_platform::sysfont::system_dpi();
+        eprintln!("system dpi = {dpi}");
+        for probe in [96u32, 120, 144] {
+            match zouwu_platform::sysfont::probe_for_dpi(probe) {
+                Some((font, menu, caption)) => eprintln!(
+                    "for dpi {probe}: menu font {font}, menu height {menu}, caption height {caption}"
+                ),
+                None => eprintln!("for dpi {probe}: not supported"),
+            }
+        }
+        eprintln!(
+            "height_for_pt(10.5) = {}, pt_for_height(-18) = {:.1}",
+            zouwu_platform::sysfont::height_for_pt(10.5),
+            zouwu_platform::sysfont::pt_for_height(-18)
         );
         return Ok(());
     }

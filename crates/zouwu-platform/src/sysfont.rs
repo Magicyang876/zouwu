@@ -33,10 +33,11 @@ mod sys;
 
 pub use sys::{
     apply, apply_with, caption_metrics, caption_supported, chrome_needs_repair, current,
-    installed_faces, is_admin, os_build, restore, restore_chrome, set_substitute, substitute_face,
+    installed_faces, is_admin, os_build, probe_for_dpi, restore, restore_chrome, set_substitute,
+    substitute_face, system_dpi,
 };
 
-/// 96 DPI = 100% 缩放。所有像素换算的基准。
+/// 96 DPI = 100% 缩放。只在读不到 `AppliedDPI` 时兜底。
 pub(crate) const DEFAULT_DPI: u32 = 96;
 
 /// 能改的那几项。枚举顺序 = 界面顺序 = 快照顺序。
@@ -121,47 +122,6 @@ impl Entry {
     pub fn is_bold(&self) -> bool {
         self.weight >= 600
     }
-
-    /// 按系统 DPI 系数把字体高度换到“写进系统”的量纲。
-    ///
-    /// 我们读到的 `lfHeight` 是 96 dpi 名义像素，而 `SPI_SETNONCLIENTMETRICS`
-    /// **会按 `AppliedDPI/96` 把整块除掉才存**。所以想让它读回来正好是 `height`，
-    /// 写进去的必须是 `height * factor`——见 `scale_factor_from_dpi`。
-    pub fn scaled(&self, factor: f32) -> Self {
-        Self {
-            face: self.face.clone(),
-            height: scale_height(self.height, factor),
-            weight: self.weight,
-        }
-    }
-}
-
-/// 单个高度按系数缩放（四舍五入，0 保持 0——0 在 `LOGFONT` 里是“默认值”而不是零高）。
-pub fn scale_height(height: i32, factor: f32) -> i32 {
-    if height == 0 || (factor - 1.0).abs() < 0.01 {
-        return height;
-    }
-    (height as f32 * factor).round() as i32
-}
-
-/// `AppliedDPI / 96`：写进系统之前的缩放系数。
-///
-/// 为什不能用实测值反推：`written / got` 只能得到一个 4 % 宽的区间（写 -14 读回 -11，
-/// 真实系数可能是 1.21..1.33）——1.25 和 1.2857 都能解释那一次读数，而它们对
-/// “标题栏字体”这种只做原样回写的字段刚好差一次四舍五入：用错的那个写两遍，
-/// -14 就会变成 -11、再变成 -10（真实的 1.25 是固定点）。
-pub fn scale_factor_from_dpi(dpi: u32) -> f32 {
-    if dpi < 96 {
-        return 1.0;
-    }
-    let factor = dpi as f32 / 96.0;
-    // 能取到的 DPI 就这么几档（100 %..=250 %）；超出这个范围的是脏数据，
-    // 宁可当作 100 %——写错了会把用户的字体缩成什么样子是没法预料的。
-    if (1.0..=2.5).contains(&factor) {
-        factor
-    } else {
-        1.0
-    }
 }
 
 /// 动手之前的样子。`items` 用 `Target::id()` 做键。
@@ -200,25 +160,6 @@ pub const STANDARD_CHROME: Chrome = Chrome {
 };
 
 impl Chrome {
-    /// 按 DPI 系数换成“写进系统”的量纲（SPI 会把值除掉才存，与 `lfHeight` 同理）。
-    pub fn scaled(&self, factor: f32) -> Self {
-        let scale = |value: i32| {
-            if value == 0 || (factor - 1.0).abs() < 0.01 {
-                value
-            } else {
-                ((value as f32) * factor).round() as i32
-            }
-        };
-        Self {
-            border: scale(self.border),
-            scroll_width: scale(self.scroll_width),
-            scroll_height: scale(self.scroll_height),
-            caption_width: scale(self.caption_width),
-            sm_caption_width: scale(self.sm_caption_width),
-            menu_width: scale(self.menu_width),
-        }
-    }
-
     /// 看上去已经不像是人调出来的尺寸。用来在**写盘前**把被写坏的值接住。
     ///
     /// 上界都留了余量（没有哪个正常桌面会把滚动条调到 32 px 宽），下界卡 0 与负数。
@@ -365,36 +306,6 @@ impl Default for NonClientMetricsW {
 }
 
 impl NonClientMetricsW {
-    /// 只把**五个 `LOGFONT` 的字号**乘同一个系数（行高像素与 `size` 都不动）。
-    ///
-    /// 为什么只动字号：`SPI_SETNONCLIENTMETRICS` 写入时对 `lfHeight` 做了 DPI 换算
-    /// （本机 125 %：写 -14 读回 -11），但**`iMenuHeight` / `iCaptionHeight` 这些
-    /// 行高像素是原样存的**。把行高也乘上去，就会每写一次长高 25 %——实测把标题栏
-    /// 从 23 px 顶到 263 px，`SM_CYCAPTION` 264，屏幕上是一条半屏高的标题栏。
-    /// 字号不乘则是反过来的老毛病（ADR-066 前半段记的 -14 → -2）。
-    ///
-    /// 系数由调用方实测/推算得出（`scale_factor_from_dpi`），不在这里猜。
-    pub(crate) fn scale_fonts(&mut self, factor: f32) {
-        if (factor - 1.0).abs() < 0.01 {
-            return;
-        }
-        let scale = |value: &mut i32| {
-            if *value != 0 {
-                *value = ((*value as f32) * factor).round() as i32;
-            }
-        };
-        for font in [
-            &mut self.caption_font,
-            &mut self.sm_caption_font,
-            &mut self.menu_font,
-            &mut self.status_font,
-            &mut self.message_font,
-        ] {
-            scale(&mut font.height);
-            scale(&mut font.width);
-        }
-    }
-
     /// `(标题栏字体高度, 标题栏高度)`：自检与护栏都用它。
     pub(crate) fn caption_pair(&self) -> (i32, i32) {
         (self.caption_font.height, self.caption_height)
@@ -449,42 +360,20 @@ pub fn height_for_pt_dpi(pt: f32, dpi: u32) -> i32 {
     -((pt * dpi as f32 / 72.0).round() as i32).max(1)
 }
 
-/// 字号（pt）→ `lfHeight`。
+/// 字号（pt）→ `lfHeight`（**当前 DPI 下的物理像素**，也就是注册表里存的那个数）。
 ///
-/// **固定按 96 dpi 换算**（`-pt*96/72`），不跟进程 DPI 走。理由：
-/// `NONCLIENTMETRICS` 里的 `lfHeight` 是物理像素，而 Windows 自己的经典字体对话框
-/// 也是拿 96 dpi 当基准给用户看"9 pt"的。跟着 `GetDpiForSystem()` 走会让
-/// "9 pt" 在 125% 屏幕上变成 -15，与系统对话框里同一个 9 pt 对不上。
+/// 必须按系统 DPI 换算：`lfHeight` 存的是物理像素，125 % 下 10.5 pt 就是 23 px。
+/// 拿 96 dpi 换算再指望 SPI 帮忙缩放是不行的——那个缩放方向取决于调用进程的
+/// DPI 感知（见 `apply_with` 的注释），同一条代码在两处会得出两个结果。
+/// 界面反推 pt（`pt_for_height`）用同一个 DPI，所以“显示 10.5 pt”与“写下去的
+/// 就是 10.5 pt”永远一致。
 pub fn height_for_pt(pt: f32) -> i32 {
-    height_for_pt_dpi(pt, DEFAULT_DPI)
+    height_for_pt_dpi(pt, system_dpi())
 }
 
 /// 从 `lfHeight` 反推 pt（界面显示"现在是多少 pt"用）。与 `height_for_pt` 互逆。
 pub fn pt_for_height(height: i32) -> f32 {
-    height.abs() as f32 * 72.0 / DEFAULT_DPI as f32
-}
-
-/// 写进去的值和系统读回来的值对不上时，推算下一次该写多少。
-///
-/// 为什么需要这个：`SPI_SETNONCLIENTMETRICS` 会把 `lfHeight` **按系统 DPI 缩放**
-/// 后再存（本机 125% 下写 -14 读回 -11），而且这个换算与 `GetDpiForSystem()`
-/// 在进程里返回什么无关——实测它返回 96，系统照样除以 1.25。写死了缩放规则的代码
-/// 会在换一台机器后开始"每次应用都小一圈"，所以这里不猜规则，只测：
-/// 写一次、读回来、按实测比例修正一次。
-///
-/// `desired` 是**最终想要的**，`written` 是这次实际写下去的，`got` 是读回来的。
-/// 三者分开是因为第一次尝试时 `written == desired`，第二次就不是了：修正量必须
-/// 相对"想要的"算，拿"上次写的"再乘一遍会越修越离谱。
-///
-/// 返回 `None` 表示已经对上（或无法判断），不需要再写。
-pub fn calibrate(desired: i32, written: i32, got: i32) -> Option<i32> {
-    if desired == 0 || written == 0 || got == 0 || desired == got {
-        return None;
-    }
-    let factor = written as f32 / got as f32;
-    let corrected = ((desired as f32) * factor).round() as i32;
-    // 修正后跟这次写的没差别（四舍五入撞回来了）就没有意义了。
-    (corrected != written && corrected != 0).then_some(corrected)
+    height.abs() as f32 * 72.0 / system_dpi() as f32
 }
 
 /// 标题栏的“字体高度 / 栏高”是不是已经不成样子了。
@@ -702,44 +591,6 @@ mod tests {
         assert_eq!(entry.weight, 700);
         assert!(entry.is_bold());
         assert!(!Entry::new("Segoe UI", -12).is_bold());
-    }
-
-    #[test]
-    fn calibration_compensates_the_dpi_scaling_of_spi() {
-        // 本机实测：125% 缩放下写 -14 读回 -11。
-        assert_eq!(calibrate(-14, -14, -11), Some(-18));
-        // 拿 -18 再写一次，读回就是想要的 -14（实测确认过）→ 不用再动。
-        assert_eq!(calibrate(-14, -18, -14), None, "已经对上了就别再动");
-        // 完全一致时不动。
-        assert_eq!(calibrate(-12, -12, -12), None);
-        // 脏数据不猜。
-        assert_eq!(calibrate(0, 0, -12), None);
-        assert_eq!(calibrate(-12, -12, 0), None);
-    }
-
-    #[test]
-    fn scaling_touches_font_sizes_but_never_band_heights() {
-        let mut metrics = NonClientMetricsW::default();
-        metrics.menu_font.height = -14;
-        metrics.status_font.height = -14;
-        metrics.caption_font.height = -14;
-        metrics.sm_caption_height = 19;
-        metrics.caption_height = 19;
-        metrics.menu_height = 19;
-        metrics.border_width = 4;
-        let size = metrics.size;
-        metrics.scale_fonts(1.25);
-        // 字号要乘：系统写入时会按 DPI 除掉，不乘就是每写一次小一圈。
-        assert_eq!(metrics.menu_font.height, -18);
-        assert_eq!(metrics.status_font.height, -18);
-        assert_eq!(metrics.caption_font.height, -18);
-        // 行高像素**不能**乘：它们是原样存的，乘了就每写一次长高 25 %
-        // （实测把标题栏从 23 px 顶到 263 px）。
-        assert_eq!(metrics.menu_height, 19);
-        assert_eq!(metrics.sm_caption_height, 19);
-        assert_eq!(metrics.caption_height, 19);
-        assert_eq!(metrics.border_width, 4);
-        assert_eq!(metrics.size, size);
     }
 
     #[test]

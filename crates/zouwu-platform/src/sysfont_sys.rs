@@ -40,6 +40,15 @@ struct EnumLogFontExW {
 #[link(name = "user32")]
 extern "system" {
     fn SystemParametersInfoW(action: u32, param: u32, data: *mut c_void, win_ini: u32) -> i32;
+    /// Win10 1607+：同一份 metrics，按**指定 DPI** 取。用来判断 SPI 返回的
+    /// `lfHeight` 到底是逻辑像素还是当前 DPI 的物理像素（诊断用）。
+    fn SystemParametersInfoForDpi(
+        action: u32,
+        param: u32,
+        data: *mut c_void,
+        win_ini: u32,
+        dpi: u32,
+    ) -> i32;
     fn SendMessageTimeoutW(
         hwnd: isize,
         msg: u32,
@@ -221,6 +230,26 @@ pub fn chrome_needs_repair() -> bool {
     read_metrics().is_some_and(|metrics| metrics.chrome().is_broken())
 }
 
+/// 诊断：同一组 metrics 按另一个 DPI 取回来，比较 `lfHeight` 就知道 SPI 给的
+/// 值是逻辑像素（会随 dpi 变）还是当前 DPI 的物理像素（不随 dpi 变）。
+pub fn probe_for_dpi(dpi: u32) -> Option<(i32, i32, i32)> {
+    let mut metrics = NonClientMetricsW::default();
+    let ok = unsafe {
+        SystemParametersInfoForDpi(
+            SPI_GETNONCLIENTMETRICS,
+            metrics.size,
+            &mut metrics as *mut NonClientMetricsW as *mut c_void,
+            0,
+            dpi,
+        )
+    };
+    (ok != 0).then_some((
+        metrics.menu_font.height,
+        metrics.menu_height,
+        metrics.caption_height,
+    ))
+}
+
 /// 当前系统字体。拿不到就 `None`（界面显示"读不出来"，不瞎猜）。
 pub fn current() -> Option<Snapshot> {
     let metrics = read_metrics()?;
@@ -268,86 +297,60 @@ pub fn apply_with(entries: &[(Target, Entry)], chrome: Option<Chrome>) -> Result
     if entries.is_empty() {
         return Err("nothing to apply".to_string());
     }
-    // **系数从第一次写就带上**，而且来自注册表里的 `AppliedDPI`：
-    // `SPI_SETNONCLIENTMETRICS` 写 `lfHeight` 时会按它把值除掉才存，读回来的就是
-    // 除完的。这一点害人不浅——早先的做法是"读出来原样写回去"，于是只做回写的
-    // `lfHeight` 每写一次缩 20%，四次之后标题栏只剩 5 px。
-    // 只对 `lfHeight`：行高像素与边框/滚动条宽度都是原样存的（见上一轮的 263 px 事故）。
-    let factor = scale_factor();
-    log::info!("sysfont: os dpi factor {factor:.4}");
-    let scaled: Vec<(Target, Entry)> = entries
-        .iter()
-        .map(|(target, entry)| (*target, entry.scaled(factor)))
-        .collect();
-
-    let mut attempt = scaled.clone();
-    for round in 0..2 {
-        push(&attempt, factor, chrome)?;
-        let Some(readback) = current() else {
-            return Ok(());
-        };
-        let mut fixed = attempt.clone();
-        let mut off = false;
-        for (index, (target, wanted)) in entries.iter().enumerate() {
-            let Some(got) = readback.get(*target) else {
-                continue;
-            };
-            // 三者分开：`wanted` 是最终目标，`attempt` 是这次实际写的（已乘系数），
-            // `got` 是读回来的。少了任何一个都算不出"还差多少"。
-            if let Some(height) =
-                crate::sysfont::calibrate(wanted.height, attempt[index].1.height, got.height)
-            {
-                log::info!(
-                    "sysfont: {} height {} came back {}, retrying with {}",
-                    target.id(),
-                    wanted.height,
-                    got.height,
-                    height
-                );
-                fixed[index].1.height = height;
-                off = true;
-            }
-        }
-        if !off {
-            return Ok(());
-        }
-        if round == 1 {
-            log::warn!("sysfont: height still differs after calibration, leaving as is");
-            return Ok(());
-        }
-        attempt = fixed;
-    }
-    Ok(())
+    // 一次写到底：`entry.height` 已经就是**当前 DPI 下的物理像素**
+    // （`height_for_pt` 按 `AppliedDPI` 换算），写什么读回来的就是什么。
+    //
+    // 这里曾经有一段“写一次、读回来、按实测比例再修一次”的校准循环，是个大坑：
+    // 它假设 `SPI_GETNONCLIENTMETRICS` 读回的值会被系统按 DPI 除一遍，可那个缩放
+    // 方向取决于**调用进程的 DPI 感知**（感知进程恒等、非感知进程才 ÷1.25）。
+    // 应用进程被 winit 设成 PMv2，于是校准把缩放又抵消了一次——用户点「应用」
+    // 只有日志在动，屏幕上什么都没变。
+    push(entries, chrome)
 }
 
-/// 注册表里的 `AppliedDPI`（写进系统时的缩放比例就从它来），读不到当 100 %。
-fn scale_factor() -> f32 {
-    let dpi = crate::reg::get_dword_in(
+/// 注册表里那六项「装饰尺寸」，换算成 `SPI_GET` 现在的量纲（当前 DPI 的像素）。
+///
+/// 注册表存的是 twips（1 px ≙ 15 twips，带负号）；`SPI_GET` 在感知进程里给的是
+/// 当前 DPI 下的像素。两者差一个 `dpi/96`，不换算就会每写一次涨 25 %。
+fn chrome_from_registry() -> Option<Chrome> {
+    let dpi = system_dpi() as f32;
+    let read = |name: &str| {
+        crate::reg::get_string_in(crate::reg::Root::CurrentUser, WINDOW_METRICS_KEY, name)
+            .and_then(|text| text.trim().parse::<i32>().ok())
+            .map(|twips| ((twips.abs() as f32 / 15.0) * dpi / 96.0).round() as i32)
+    };
+    Some(Chrome {
+        border: read("BorderWidth")?,
+        scroll_width: read("ScrollWidth")?,
+        scroll_height: read("ScrollHeight")?,
+        caption_width: read("CaptionWidth")?,
+        sm_caption_width: read("SmCaptionWidth")?,
+        menu_width: read("MenuWidth")?,
+    })
+}
+
+/// 系统 DPI（写进 `NONCLIENTMETRICS` 的那套长度用的就是它）。
+///
+/// 来源是注册表里的 `AppliedDPI`：`GetDpiForSystem()` 在本进程里恒返回 96，
+/// 拿它换算会把 125% 屏幕上的字号一律算小 20%。
+pub fn system_dpi() -> u32 {
+    crate::reg::get_dword_in(
         crate::reg::Root::CurrentUser,
-        r"Control Panel\Desktop\WindowMetrics",
+        WINDOW_METRICS_KEY,
         "AppliedDPI",
     )
-    .unwrap_or(DEFAULT_DPI);
-    crate::sysfont::scale_factor_from_dpi(dpi)
+    .filter(|dpi| (72..=480).contains(dpi))
+    .unwrap_or(DEFAULT_DPI)
 }
 
 /// 真正写一次 `NONCLIENTMETRICS` + `ICONTITLELOGFONT`。
 ///
-/// `factor` 是写之前先乘到**五个字号**上的系数（见 `scale_fonts`）：`AppliedDPI / 96`。
-/// 行高像素不乘——它们原样存，乘了就是每写一次长高一截。
-fn push(entries: &[(Target, Entry)], factor: f32, chrome: Option<Chrome>) -> Result<(), String> {
+/// 行高像素原样回写、字号写进去就是物理像素——**这里不做任何整块缩放**。
+/// 曾经把整块长度乘过 `AppliedDPI/96`，结果是每写一次边框和滚动条就胖一圈。
+fn push(entries: &[(Target, Entry)], chrome: Option<Chrome>) -> Result<(), String> {
     let mut metrics = read_metrics().ok_or("SPI_GETNONCLIENTMETRICS failed")?;
     let mut icon_font = read_icon_font().ok_or("SPI_GETICONTITLELOGFONT failed")?;
-    let dpi = DEFAULT_DPI as i32;
-
-    // **先把整块乘上系数，再改目标字段**。顺序很要紧：系数是把“读出来的值”换回
-    // “写进去的值”的比例，目标字段自己已经由 `calibrate` 算过一遍，乘两次就写大了。
-    // 读出来的图标字体同理。
-    metrics.scale_fonts(factor);
-    if (factor - 1.0).abs() >= 0.01 {
-        icon_font.height = (icon_font.height as f32 * factor).round() as i32;
-        icon_font.width = (icon_font.width as f32 * factor).round() as i32;
-    }
+    let dpi = system_dpi() as i32;
 
     let mut touched_icon = false;
     for (target, entry) in entries {
@@ -413,10 +416,16 @@ fn push(entries: &[(Target, Entry)], factor: f32, chrome: Option<Chrome>) -> Res
     // 边框/滚动条/标题栏宽度：这些**不按 DPI 换算**，写什么读回什么。曾经被
     // “整块乘系数”连累过一次（边框 36 px、滚动条 39 px），所以先看有没有要还原的
     // 快照值，再看现值是不是已经不像人调的，最后一律让它们回到标准尺寸。
-    // 「装饰尺寸」原样写回（不改值）：SPI 对这几项基本是静默忽略的，真要修只能写
-    // 注册表（`restore_chrome`，登录时生效）。这里之所以还要写，是因为
-    // `apply_with` 可能带着快照里的值——「还原上次」要能连它们一起还原。
-    metrics.set_chrome(chrome.unwrap_or_else(|| metrics.chrome()));
+    // 「装饰尺寸」：SPI 是整块替换，这几项也得跟着写一遍。**但绝不能把
+    // `SPI_GET` 读到的现值原样写回去**：读回来的这套数在感知进程里是“物理像素”，
+    // 而注册表存的是“96 dpi 逻辑值”，写回去就等于每写一次乘 1.25（实测边框
+    // 1 px → 15 → 20，滚动条 11 px → 14）。所以一律以**注册表**那份为准：
+    // 有快照就用快照的（「还原上次」要能连它们一起还原），没有就按注册表换算。
+    metrics.set_chrome(
+        chrome
+            .or_else(|| chrome_from_registry())
+            .unwrap_or_else(|| metrics.chrome()),
+    );
     metrics.size = std::mem::size_of::<NonClientMetricsW>() as u32;
 
     let ok = unsafe {
