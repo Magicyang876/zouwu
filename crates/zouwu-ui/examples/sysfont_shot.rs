@@ -93,6 +93,10 @@ fn main() -> Result<(), String> {
         let Some(before) = zouwu_platform::sysfont::current() else {
             return Err("cannot read current system font".to_string());
         };
+        // 标题栏那一对**不在**我们要改的五项里，所以它是"整块缩放有没有补对"的
+        // 唯一证人：SPI 的 SET 会把整块长度按 DPI 除一次，补不回原值的话它会
+        // 每写一次缩 20%，最后整条标题栏缩成几个像素（真出过这事）。
+        let caption_before = zouwu_platform::sysfont::caption_metrics();
         let entries: Vec<_> = zouwu_platform::sysfont::Target::ALL
             .into_iter()
             .filter_map(|t| before.get(t).map(|e| (t, e.clone())))
@@ -100,6 +104,13 @@ fn main() -> Result<(), String> {
         let path = zouwu_platform::sysfont::save_snapshot(&before);
         zouwu_platform::sysfont::apply(&entries).map_err(|e| format!("apply failed: {e}"))?;
         let after = zouwu_platform::sysfont::current().ok_or("cannot read back")?;
+        let caption_after = zouwu_platform::sysfont::caption_metrics();
+        if caption_before != caption_after {
+            return Err(format!(
+                "caption metrics drifted: {caption_before:?} -> {caption_after:?}"
+            ));
+        }
+        eprintln!("caption (font, height) stayed {caption_after:?}");
         for target in zouwu_platform::sysfont::Target::ALL {
             let a = before.get(target);
             let b = after.get(target);

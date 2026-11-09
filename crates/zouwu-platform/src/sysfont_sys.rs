@@ -7,8 +7,8 @@ use std::ffi::c_void;
 use std::ptr;
 
 use super::{
-    entry_of, write_entry, Entry, LogFontW, NonClientMetricsW, Snapshot, Target, DEFAULT_CHARSET,
-    DEFAULT_DPI,
+    caption_is_broken, entry_of, write_entry, Entry, LogFontW, NonClientMetricsW, Snapshot, Target,
+    DEFAULT_CHARSET, DEFAULT_DPI,
 };
 
 const SPI_GETNONCLIENTMETRICS: u32 = 0x0029;
@@ -90,6 +90,14 @@ fn read_icon_font() -> Option<LogFontW> {
     (ok != 0).then_some(font)
 }
 
+/// `(标题栏字体高度, 标题栏高度)`，都是 `SPI_GETNONCLIENTMETRICS` 的像素值。
+///
+/// 只读、只给人看的诊断用：这一对我们不让人改，所以它一旦变小就说明别处在写系统
+/// 字体（或者我们自己的某次写入把它缩了），`caption_is_broken` 就是拿它判断的。
+pub fn caption_metrics() -> Option<(i32, i32)> {
+    read_metrics().map(|metrics| metrics.caption_pair())
+}
+
 /// 当前系统字体。拿不到就 `None`（界面显示"读不出来"，不瞎猜）。
 pub fn current() -> Option<Snapshot> {
     let metrics = read_metrics()?;
@@ -128,30 +136,33 @@ pub fn apply(entries: &[(Target, Entry)]) -> Result<(), String> {
     if entries.is_empty() {
         return Err("nothing to apply".to_string());
     }
-    // 两遍：先按给定的写，读回来对不上就按**实测比例**修一次再写。
-    // SPI 会按系统 DPI 缩放 `lfHeight`（本机 125%：写 -14 读回 -11），
-    // 不修的话每点一次"应用"字体就小一圈，"还原"也救不回来。
-    let desired = entries.to_vec();
-    let mut attempt: Vec<(Target, Entry)> = entries.to_vec();
+    // **系数从第一次写就带上**，而且来自注册表里的 `AppliedDPI`：
+    // `SPI_SETNONCLIENTMETRICS` 会按它把整块长度除掉才存，读回来的就是除完的值。
+    // 这一点害人不浅——早先的做法是"读出来原样写回去"，于是每个只做回写的字段
+    // （标题栏字体、边框宽度……）每写一次缩 20%，四次之后标题栏只剩 5 px。
+    let factor = scale_factor();
+    log::info!("sysfont: os dpi factor {factor:.4}");
+    let scaled: Vec<(Target, Entry)> = entries
+        .iter()
+        .map(|(target, entry)| (*target, entry.scaled(factor)))
+        .collect();
+
+    let mut attempt = scaled.clone();
     for round in 0..2 {
-        push(&attempt)?;
+        push(&attempt, factor)?;
         let Some(readback) = current() else {
             return Ok(());
         };
         let mut fixed = attempt.clone();
         let mut off = false;
-        for (target, wanted) in &attempt {
-            // `wanted` 是最终目标；`written` 是上一次尝试的写法（用于算缩放比例）。
+        for (index, (target, wanted)) in entries.iter().enumerate() {
             let Some(got) = readback.get(*target) else {
                 continue;
             };
-            let written = desired
-                .iter()
-                .find(|(t, _)| t == target)
-                .map(|(_, e)| e.clone())
-                .unwrap_or_else(|| wanted.clone());
+            // 三者分开：`wanted` 是最终目标，`attempt` 是这次实际写的（已乘系数），
+            // `got` 是读回来的。少了任何一个都算不出"还差多少"。
             if let Some(height) =
-                crate::sysfont::calibrate(wanted.height, written.height, got.height)
+                crate::sysfont::calibrate(wanted.height, attempt[index].1.height, got.height)
             {
                 log::info!(
                     "sysfont: {} height {} came back {}, retrying with {}",
@@ -160,9 +171,7 @@ pub fn apply(entries: &[(Target, Entry)]) -> Result<(), String> {
                     got.height,
                     height
                 );
-                if let Some(slot) = fixed.iter_mut().find(|(t, _)| t == target) {
-                    slot.1.height = height;
-                }
+                fixed[index].1.height = height;
                 off = true;
             }
         }
@@ -178,11 +187,34 @@ pub fn apply(entries: &[(Target, Entry)]) -> Result<(), String> {
     Ok(())
 }
 
+/// 注册表里的 `AppliedDPI`（写进系统时的缩放比例就从它来），读不到当 100 %。
+fn scale_factor() -> f32 {
+    let dpi = crate::reg::get_dword_in(
+        crate::reg::Root::CurrentUser,
+        r"Control Panel\Desktop\WindowMetrics",
+        "AppliedDPI",
+    )
+    .unwrap_or(DEFAULT_DPI);
+    crate::sysfont::scale_factor_from_dpi(dpi)
+}
+
 /// 真正写一次 `NONCLIENTMETRICS` + `ICONTITLELOGFONT`。
-fn push(entries: &[(Target, Entry)]) -> Result<(), String> {
+///
+/// `factor` 是这一步要先把**整块长度**乘上的系数（见 `scale_lengths`）：
+/// 第一遍给 1.0，第二遍给实测出来的 `written / got`。
+fn push(entries: &[(Target, Entry)], factor: f32) -> Result<(), String> {
     let mut metrics = read_metrics().ok_or("SPI_GETNONCLIENTMETRICS failed")?;
     let mut icon_font = read_icon_font().ok_or("SPI_GETICONTITLELOGFONT failed")?;
     let dpi = DEFAULT_DPI as i32;
+
+    // **先把整块乘上系数，再改目标字段**。顺序很要紧：系数是把“读出来的值”换回
+    // “写进去的值”的比例，目标字段自己已经由 `calibrate` 算过一遍，乘两次就写大了。
+    // 读出来的图标字体同理。
+    metrics.scale_lengths(factor);
+    if (factor - 1.0).abs() >= 0.01 {
+        icon_font.height = (icon_font.height as f32 * factor).round() as i32;
+        icon_font.width = (icon_font.width as f32 * factor).round() as i32;
+    }
 
     let mut touched_icon = false;
     for (target, entry) in entries {
@@ -211,6 +243,25 @@ fn push(entries: &[(Target, Entry)]) -> Result<(), String> {
     // noMeiryoUI 也做这一步，代价为零。
     if metrics.padded_border_width == 0 {
         metrics.padded_border_width = 1 + dpi / 96;
+    }
+    // 标题栏高度必须塞得下标题栏的字，否则整条标题栏缩成几个像素、看着就像
+    // “标题栏消失了”（实测坏状态是 `CaptionFont = -2`、`iCaptionHeight = 3px`）。
+    // 这一项我们**不提供修改入口**，所以它坏了一定是别处写的：碰到就按
+    // “跟状态栏字体一样 + 跟小标题栏一样高”修回来，并记一条 warn。
+    if caption_is_broken(
+        metrics.caption_font.height,
+        metrics.caption_height,
+        metrics.status_font.height,
+    ) {
+        log::warn!(
+            "sysfont: caption metrics look broken (font {}, height {}), repairing to font {} / height {}",
+            metrics.caption_font.height,
+            metrics.caption_height,
+            metrics.status_font.height,
+            metrics.sm_caption_height
+        );
+        metrics.caption_font = metrics.status_font.clone();
+        metrics.caption_height = metrics.sm_caption_height;
     }
     metrics.size = std::mem::size_of::<NonClientMetricsW>() as u32;
 

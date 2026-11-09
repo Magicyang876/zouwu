@@ -30,3 +30,7 @@ pub fn set_substitute(_face: Option<&str>) -> Result<(), String> {
 pub fn is_admin() -> bool {
     false
 }
+
+pub fn caption_metrics() -> Option<(i32, i32)> {
+    None
+}

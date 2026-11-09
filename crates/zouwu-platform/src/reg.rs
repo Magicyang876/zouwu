@@ -1,9 +1,10 @@
-//! 注册表读写的最小封装：只支持 `REG_SZ`，根键可选 `HKEY_CURRENT_USER` / `HKEY_LOCAL_MACHINE`。
+//! 注册表读写的最小封装：只支持 `REG_SZ`（外加读 `REG_DWORD`），根键可选
+//! `HKEY_CURRENT_USER` / `HKEY_LOCAL_MACHINE`。
 //!
 //! 装机/卸载/自启一共需要动三个地方（Run 键、Uninstall 键、它们下面的值），
 //! 与其在三处各写一遍 `extern "system"` 和指针运算，不如收成这一层。
 //! 系统字体替换（`sysfont`）是本层的第二个用户：它在 `HKLM` 下面写一个值。
-//! **刻意不做的**：`REG_DWORD`、其他根键、权限参数——没有用到它们的场景，
+//! **刻意不做的**：写 `REG_DWORD`、其他根键、权限参数——没有用到它们的场景，
 //! 加了只会让"这段代码为什么存在"变模糊。需要时再加，而且是加法。
 
 use std::ptr;
@@ -31,6 +32,7 @@ impl Root {
 const KEY_READ_WRITE: u32 = 0x0002 | 0x0004 | 0x0001;
 const KEY_READ: u32 = 0x0001 | 0x0004;
 const REG_SZ: u32 = 1;
+const REG_DWORD: u32 = 4;
 /// `RegDeleteTreeW` 在键不存在时的返回值，不算失败。
 const ERROR_FILE_NOT_FOUND: i32 = 2;
 
@@ -193,6 +195,31 @@ pub(crate) fn get_string_in(root: Root, path: &str, name: &str) -> Option<String
         .take_while(|u| *u != 0)
         .collect();
     Some(String::from_utf16_lossy(&units))
+}
+
+/// 读一个 `REG_DWORD`（不存在或类型不对就 `None`）。
+///
+/// 只为了读 `AppliedDPI`：`SPI_GETNONCLIENTMETRICS` 拿去写进系统的那套长度
+/// **按这个 DPI 缩放**，而 `GetDpiForSystem()` 在我们这种没声明 DPI 感知的进程里
+/// 偏偏一直返回 96，问它等于自己骗自己。
+pub(crate) fn get_dword_in(root: Root, path: &str, name: &str) -> Option<u32> {
+    let key = open(root, path, KEY_READ)?;
+    let name = wide(name);
+    let mut value: u32 = 0;
+    let mut len = std::mem::size_of::<u32>() as u32;
+    let mut kind: u32 = 0;
+    let status = unsafe {
+        RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            ptr::null_mut(),
+            &mut kind,
+            &mut value as *mut u32 as *mut u8,
+            &mut len,
+        )
+    };
+    unsafe { RegCloseKey(key) };
+    (status == 0 && kind == REG_DWORD && len == 4).then_some(value)
 }
 
 /// 删一个值。值本来就不存在也算成功。

@@ -32,7 +32,8 @@ mod sys;
 mod sys;
 
 pub use sys::{
-    apply, current, installed_faces, is_admin, restore, set_substitute, substitute_face,
+    apply, caption_metrics, current, installed_faces, is_admin, restore, set_substitute,
+    substitute_face,
 };
 
 /// 96 DPI = 100% 缩放。所有像素换算的基准。
@@ -113,6 +114,47 @@ impl Entry {
 
     pub fn is_bold(&self) -> bool {
         self.weight >= 600
+    }
+
+    /// 按系统 DPI 系数把字体高度换到“写进系统”的量纲。
+    ///
+    /// 我们读到的 `lfHeight` 是 96 dpi 名义像素，而 `SPI_SETNONCLIENTMETRICS`
+    /// **会按 `AppliedDPI/96` 把整块除掉才存**。所以想让它读回来正好是 `height`，
+    /// 写进去的必须是 `height * factor`——见 `scale_factor_from_dpi`。
+    pub fn scaled(&self, factor: f32) -> Self {
+        Self {
+            face: self.face.clone(),
+            height: scale_height(self.height, factor),
+            weight: self.weight,
+        }
+    }
+}
+
+/// 单个高度按系数缩放（四舍五入，0 保持 0——0 在 `LOGFONT` 里是“默认值”而不是零高）。
+pub fn scale_height(height: i32, factor: f32) -> i32 {
+    if height == 0 || (factor - 1.0).abs() < 0.01 {
+        return height;
+    }
+    (height as f32 * factor).round() as i32
+}
+
+/// `AppliedDPI / 96`：写进系统之前的缩放系数。
+///
+/// 为什不能用实测值反推：`written / got` 只能得到一个 4 % 宽的区间（写 -14 读回 -11，
+/// 真实系数可能是 1.21..1.33）——1.25 和 1.2857 都能解释那一次读数，而它们对
+/// “标题栏字体”这种只做原样回写的字段刚好差一次四舍五入：用错的那个写两遍，
+/// -14 就会变成 -11、再变成 -10（真实的 1.25 是固定点）。
+pub fn scale_factor_from_dpi(dpi: u32) -> f32 {
+    if dpi < 96 {
+        return 1.0;
+    }
+    let factor = dpi as f32 / 96.0;
+    // 能取到的 DPI 就这么几档（100 %..=250 %）；超出这个范围的是脏数据，
+    // 宁可当作 100 %——写错了会把用户的字体缩成什么样子是没法预料的。
+    if (1.0..=2.5).contains(&factor) {
+        factor
+    } else {
+        1.0
     }
 }
 
@@ -252,6 +294,53 @@ impl Default for NonClientMetricsW {
     }
 }
 
+impl NonClientMetricsW {
+    /// 把所有「长度」字段乘同一个系数（`size` 不动）。
+    ///
+    /// 为什么要整块缩：`SPI_SETNONCLIENTMETRICS` **按系统 DPI 把整块里的长度都除一遍
+    /// 才存**，而 `SPI_GETNONCLIENTMETRICS` 读回来的是存下的值（不再乘回去）。
+    /// 后果是“读出来再原样写回去”会让**每个没被显式校准的字段缩 1/1.25**：
+    /// 我拿着对拍的字段修了两遍没看出问题，标题栏字体却在四次写盘里从 -14 缩到了
+    /// -2，整条标题栏因此缩成 5 px——看起来就是“Windows 的标题栏消失了”。
+    ///
+    /// 系数由调用方**实测**得出（写一次、读回来、`written / got`），不猜 DPI。
+    pub(crate) fn scale_lengths(&mut self, factor: f32) {
+        if (factor - 1.0).abs() < 0.01 {
+            return;
+        }
+        let scale = |value: &mut i32| {
+            if *value != 0 {
+                *value = ((*value as f32) * factor).round() as i32;
+            }
+        };
+        scale(&mut self.border_width);
+        scale(&mut self.scroll_width);
+        scale(&mut self.scroll_height);
+        scale(&mut self.caption_width);
+        scale(&mut self.caption_height);
+        scale(&mut self.sm_caption_width);
+        scale(&mut self.sm_caption_height);
+        scale(&mut self.menu_width);
+        scale(&mut self.menu_height);
+        scale(&mut self.padded_border_width);
+        for font in [
+            &mut self.caption_font,
+            &mut self.sm_caption_font,
+            &mut self.menu_font,
+            &mut self.status_font,
+            &mut self.message_font,
+        ] {
+            scale(&mut font.height);
+            scale(&mut font.width);
+        }
+    }
+
+    /// `(标题栏字体高度, 标题栏高度)`：自检与护栏都用它。
+    pub(crate) fn caption_pair(&self) -> (i32, i32) {
+        (self.caption_font.height, self.caption_height)
+    }
+}
+
 /// 从系统读回来的 `LOGFONT` 摘出我们关心的三个字段。
 pub(crate) fn entry_of(font: &LogFontW) -> Entry {
     Entry {
@@ -315,6 +404,27 @@ pub fn calibrate(desired: i32, written: i32, got: i32) -> Option<i32> {
     let corrected = ((desired as f32) * factor).round() as i32;
     // 修正后跟这次写的没差别（四舍五入撞回来了）就没有意义了。
     (corrected != written && corrected != 0).then_some(corrected)
+}
+
+/// 标题栏的“字体高度 / 栏高”是不是已经不成样子了。
+///
+/// 我们**不提供**改标题栏字体的入口（Win11 22H2+ 改过之后标题文字会整体消失），
+/// 所以这一对值要么是系统默认，要么是别处写坏的。判据就两条：字体小于 6 px，
+/// 或者栏高塞不下字（不到字高 + 2）。坏了的症状很吓人：拦不住字的标题栏会缩成
+/// 3~5 px，看起来就是“Windows 的标题栏消失了”——实测过，就是 `CaptionFont = -2`、
+/// `iCaptionHeight = 3px`。
+///
+/// 两个参数都是 `SPI_GETNONCLIENTMETRICS` 返回的**像素**值（负数表示字符高度）。
+///
+/// 上限也得有：栏高比字高三倍多还没人这么设，那是垃圾值了（实测手抖写进一个
+/// 10 位整数，`SM_CYCAPTION` 不变但经典风格的对话框会变形）。
+pub fn caption_is_broken(font_height: i32, caption_height: i32, reference_height: i32) -> bool {
+    let font = font_height.abs();
+    let band = caption_height.abs();
+    // 还有一条：标题栏字体比状态栏字体小一截就说明它被压过了。这两者系统默认是
+    // 同号的，而我们每次写盘都会把“只做回写”的字段缩一点——查出来时已经 -2 了，
+    // 上一版只拦“小到看不见”，结果留在 -10 上：栏还在，但比原来矮一截。
+    font < 6 || band < font + 2 || band > 3 * font + 8 || font + 2 < reference_height.abs()
 }
 
 /// `%APPDATA%\zouwu\sysfont`。与用户数据放在一起，`--uninstall --purge` 时一并清掉。
@@ -522,6 +632,26 @@ mod tests {
         // 脏数据不猜。
         assert_eq!(calibrate(0, 0, -12), None);
         assert_eq!(calibrate(-12, -12, 0), None);
+    }
+
+    #[test]
+    fn broken_captions_are_recognised() {
+        // 实测的坏状态：字体 2 px、标题栏 3 px —— 就是“标题栏消失”那个样子。
+        assert!(caption_is_broken(-2, -48, -14));
+        // 字体正常但栏高塞不下字，同样不能留。
+        assert!(caption_is_broken(-18, 12, -14));
+        // 健康：字体 18 px、栏高 23 px。
+        assert!(!caption_is_broken(-18, 23, -14));
+        assert!(!caption_is_broken(-14, 24, -14));
+        // 边界：正好等于字高 + 2 就够了。
+        assert!(!caption_is_broken(-18, 20, -14));
+        assert!(caption_is_broken(-18, 19, -14));
+        // 栏高远远超过字高（垃圾值）也算坏。
+        assert!(caption_is_broken(-14, 1040088936, -14));
+        assert!(!caption_is_broken(-14, 44, -14));
+        // 栏高正常、字体却被压小了：栏还在但矮一截，也算坏。
+        assert!(caption_is_broken(-10, 18, -14));
+        assert!(!caption_is_broken(-13, 18, -14));
     }
 
     #[test]
