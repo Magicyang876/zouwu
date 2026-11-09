@@ -7,8 +7,8 @@ use std::ffi::c_void;
 use std::ptr;
 
 use super::{
-    caption_is_broken, entry_of, write_entry, Entry, LogFontW, NonClientMetricsW, Snapshot, Target,
-    DEFAULT_CHARSET, DEFAULT_DPI,
+    caption_is_broken, entry_of, write_entry, Chrome, Entry, LogFontW, NonClientMetricsW, Snapshot,
+    Target, DEFAULT_CHARSET, DEFAULT_DPI, STANDARD_CHROME,
 };
 
 const SPI_GETNONCLIENTMETRICS: u32 = 0x0029;
@@ -20,6 +20,7 @@ const SPI_GETICONTITLELOGFONT: u32 = 0x001F;
 /// 这个测试就是为这条踩坑留的。
 const SPI_SETICONTITLELOGFONT: u32 = 0x0022;
 /// 让系统把值写进用户配置（不带它只改内存，注销就没了）。
+/// 「装饰尺寸」在注册表里的家。
 const SPIF_UPDATEINIFILE: u32 = 0x01;
 const WM_SETTINGCHANGE: u32 = 0x001A;
 const SMTO_ABORTIFHUNG: u32 = 0x0002;
@@ -108,7 +109,9 @@ pub(super) fn dump() -> Option<String> {
     let metrics = read_metrics()?;
     let icon = read_icon_font()?;
     Some(format!(
-        "font menu={} status={} message={} palette={} icon={} caption={} | band menu={} smcaption={} caption={} | padded={}",
+        "font menu={} status={} message={} palette={} icon={} caption={} \
+         | band menu={} smcaption={} caption={} \
+         | width border={} scroll={}x{} caption={} smcaption={} menu={} padded={}",
         metrics.menu_font.height,
         metrics.status_font.height,
         metrics.message_font.height,
@@ -118,8 +121,60 @@ pub(super) fn dump() -> Option<String> {
         metrics.menu_height,
         metrics.sm_caption_height,
         metrics.caption_height,
+        metrics.border_width,
+        metrics.scroll_width,
+        metrics.scroll_height,
+        metrics.caption_width,
+        metrics.sm_caption_width,
+        metrics.menu_width,
         metrics.padded_border_width,
     ))
+}
+
+/// 「装饰尺寸」在注册表里的家：这些尺寸的**唯一真相**，登录时读一次。
+const WINDOW_METRICS_KEY: &str = r"Control Panel\Desktop\WindowMetrics";
+
+/// 把边框/滚动条/标题栏·菜单宽度恢复成 Windows 的标准尺寸。
+///
+/// **只写注册表，不碰 `SPI_SETNONCLIENTMETRICS`**。两件事都试过：
+/// - 那几条尺寸 SPI 基本不认（写 17 读回还是 14，只有 `iBorderWidth` 会动），
+///   而它**会把同一个结构体里的字体高度重写一遍**——一不留神就把字体又缩一圈；
+/// - `HKCU\Control Panel\Desktop\WindowMetrics` 才是登录时真正读的那份，`REG_SZ`、
+///   单位 twips（1 px = 15 twips）、带负号，写 `-255` 就是 17 px。
+///
+/// 代价：**下次登录才生效**（Windows 只在登录时把这些读进会话缓存）。
+pub fn restore_chrome() -> Result<Chrome, String> {
+    let before = read_metrics().map(|metrics| metrics.chrome());
+    let want = STANDARD_CHROME;
+    for (name, px) in [
+        ("BorderWidth", want.border),
+        ("ScrollWidth", want.scroll_width),
+        ("ScrollHeight", want.scroll_height),
+        ("CaptionWidth", want.caption_width),
+        ("SmCaptionWidth", want.sm_caption_width),
+        ("MenuWidth", want.menu_width),
+    ] {
+        if !crate::reg::set_string_in(
+            crate::reg::Root::CurrentUser,
+            WINDOW_METRICS_KEY,
+            name,
+            &(-15 * px).to_string(),
+        ) {
+            return Err(format!("cannot write {name}"));
+        }
+    }
+    log::warn!(
+        "sysfont: chrome metrics {before:?} -> {want:?} (registry, effective after signing in)"
+    );
+    Ok(want)
+}
+
+/// 「装饰尺寸」（边框 / 滚动条 / 标题栏·菜单宽度）是不是已经被写大了。
+///
+/// 界面用它决定要不要提示“已恢复标准尺寸、重新登录生效”。读的是
+/// `SPI_GETNONCLIENTMETRICS` 的值——也就是 `push` 下一次会原样写回去的那份。
+pub fn chrome_needs_repair() -> bool {
+    read_metrics().is_some_and(|metrics| metrics.chrome().is_broken())
 }
 
 /// 当前系统字体。拿不到就 `None`（界面显示"读不出来"，不瞎猜）。
@@ -139,6 +194,7 @@ pub fn current() -> Option<Snapshot> {
     Some(Snapshot {
         taken: crate::logging::timestamp(),
         items,
+        chrome: Some(metrics.chrome()),
     })
 }
 
@@ -157,13 +213,21 @@ fn rescale_band(old: i32, old_height: i32, new_height: i32, dpi: i32) -> i32 {
 /// 只写传进来的那几项，其余原样回写——`SPI_SETNONCLIENTMETRICS` 是**整块替换**，
 /// 少带一个字段就等于把它清零。
 pub fn apply(entries: &[(Target, Entry)]) -> Result<(), String> {
+    apply_with(entries, None)
+}
+
+/// `apply` 的完整版：顺便把「装饰尺寸」写成 `chrome`（`None` 就是保持系统现值）。
+///
+/// 两条路都走同一个 `push`，所以“写坏过一次”的值不可能从还原这条路溜进来。
+pub fn apply_with(entries: &[(Target, Entry)], chrome: Option<Chrome>) -> Result<(), String> {
     if entries.is_empty() {
         return Err("nothing to apply".to_string());
     }
     // **系数从第一次写就带上**，而且来自注册表里的 `AppliedDPI`：
-    // `SPI_SETNONCLIENTMETRICS` 会按它把整块长度除掉才存，读回来的就是除完的值。
-    // 这一点害人不浅——早先的做法是"读出来原样写回去"，于是每个只做回写的字段
-    // （标题栏字体、边框宽度……）每写一次缩 20%，四次之后标题栏只剩 5 px。
+    // `SPI_SETNONCLIENTMETRICS` 写 `lfHeight` 时会按它把值除掉才存，读回来的就是
+    // 除完的。这一点害人不浅——早先的做法是"读出来原样写回去"，于是只做回写的
+    // `lfHeight` 每写一次缩 20%，四次之后标题栏只剩 5 px。
+    // 只对 `lfHeight`：行高像素与边框/滚动条宽度都是原样存的（见上一轮的 263 px 事故）。
     let factor = scale_factor();
     log::info!("sysfont: os dpi factor {factor:.4}");
     let scaled: Vec<(Target, Entry)> = entries
@@ -173,7 +237,7 @@ pub fn apply(entries: &[(Target, Entry)]) -> Result<(), String> {
 
     let mut attempt = scaled.clone();
     for round in 0..2 {
-        push(&attempt, factor)?;
+        push(&attempt, factor, chrome)?;
         let Some(readback) = current() else {
             return Ok(());
         };
@@ -226,7 +290,7 @@ fn scale_factor() -> f32 {
 ///
 /// `factor` 是写之前先乘到**五个字号**上的系数（见 `scale_fonts`）：`AppliedDPI / 96`。
 /// 行高像素不乘——它们原样存，乘了就是每写一次长高一截。
-fn push(entries: &[(Target, Entry)], factor: f32) -> Result<(), String> {
+fn push(entries: &[(Target, Entry)], factor: f32, chrome: Option<Chrome>) -> Result<(), String> {
     let mut metrics = read_metrics().ok_or("SPI_GETNONCLIENTMETRICS failed")?;
     let mut icon_font = read_icon_font().ok_or("SPI_GETICONTITLELOGFONT failed")?;
     let dpi = DEFAULT_DPI as i32;
@@ -287,6 +351,13 @@ fn push(entries: &[(Target, Entry)], factor: f32) -> Result<(), String> {
         metrics.caption_font = metrics.status_font.clone();
         metrics.caption_height = metrics.sm_caption_height;
     }
+    // 边框/滚动条/标题栏宽度：这些**不按 DPI 换算**，写什么读回什么。曾经被
+    // “整块乘系数”连累过一次（边框 36 px、滚动条 39 px），所以先看有没有要还原的
+    // 快照值，再看现值是不是已经不像人调的，最后一律让它们回到标准尺寸。
+    // 「装饰尺寸」原样写回（不改值）：SPI 对这几项基本是静默忽略的，真要修只能写
+    // 注册表（`restore_chrome`，登录时生效）。这里之所以还要写，是因为
+    // `apply_with` 可能带着快照里的值——「还原上次」要能连它们一起还原。
+    metrics.set_chrome(chrome.unwrap_or_else(|| metrics.chrome()));
     metrics.size = std::mem::size_of::<NonClientMetricsW>() as u32;
 
     let ok = unsafe {
@@ -346,7 +417,7 @@ pub fn restore(snapshot: &Snapshot) -> Result<(), String> {
         .into_iter()
         .filter_map(|target| snapshot.get(target).map(|e| (target, e.clone())))
         .collect();
-    apply(&entries)
+    apply_with(&entries, snapshot.chrome)
 }
 
 extern "system" fn collect_face(

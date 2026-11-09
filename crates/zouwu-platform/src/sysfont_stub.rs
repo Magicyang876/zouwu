@@ -1,7 +1,7 @@
 //! `sysfont` 的非 Windows 占位：v1 只发 Windows（ADR-001），但 `zouwu-ui` 的测试
 //! 要在别的平台上编得过，所以这里给同名同签名的空实现。
 
-use super::{Entry, Snapshot, Target};
+use super::{Chrome, Entry, Snapshot, Target};
 
 pub fn current() -> Option<Snapshot> {
     None
@@ -12,6 +12,18 @@ pub fn apply(_entries: &[(Target, Entry)]) -> Result<(), String> {
 }
 
 pub fn restore(_snapshot: &Snapshot) -> Result<(), String> {
+    Err("sysfont: only supported on Windows".to_string())
+}
+
+pub fn apply_with(_entries: &[(Target, Entry)], _chrome: Option<Chrome>) -> Result<(), String> {
+    Err("sysfont: only supported on Windows".to_string())
+}
+
+pub fn chrome_needs_repair() -> bool {
+    false
+}
+
+pub fn restore_chrome() -> Result<Chrome, String> {
     Err("sysfont: only supported on Windows".to_string())
 }
 

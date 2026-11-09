@@ -82,6 +82,21 @@ fn main() -> Result<(), String> {
         return Ok(());
     }
 
+    // `ZOUWU_SYSFONT_FIX_CHROME=1`：把边框/滚动条/标题栏宽度恢复成标准尺寸。
+    // 这是给“被旧版本整块乘系数放大过”的机器收尾用的（ADR-066）。
+    if std::env::var_os("ZOUWU_SYSFONT_FIX_CHROME").is_some() {
+        let before = zouwu_platform::sysfont::metrics_dump().unwrap_or_else(|| "?".into());
+        let chrome =
+            zouwu_platform::sysfont::restore_chrome().map_err(|e| format!("fix failed: {e}"))?;
+        eprintln!("before: {before}");
+        eprintln!("chrome -> {chrome:?}");
+        eprintln!(
+            "{}",
+            zouwu_platform::sysfont::metrics_dump().unwrap_or_else(|| "cannot read back".into())
+        );
+        return Ok(());
+    }
+
     if let Ok(path) = std::env::var("ZOUWU_SYSFONT_RESTORE") {
         let snapshot = zouwu_platform::sysfont::read_snapshot(std::path::Path::new(path.trim()))
             .ok_or_else(|| format!("cannot read {}", path.trim()))?;

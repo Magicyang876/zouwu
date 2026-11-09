@@ -248,6 +248,7 @@ sysfont-no-selection = 先在上面挑一个字体
 sysfont-cannot-read = 读不出系统当前的字体，为了安全没有写入
 sysfont-cannot-backup = 存不下备份，为了安全没有写入
 sysfont-applied = 已改成 {$face}。改之前的备份在 {$path}
+sysfont-chrome-repaired = 字体已改。另外发现边框/滚动条被放大过，已恢复成标准尺寸——重新登录后生效
 sysfont-apply-failed = 没改成：{$why}
 sysfont-no-backup = 还没有备份（改过一次系统字体才会生成）
 sysfont-restored = 已还原成 {$path} 里的那一份

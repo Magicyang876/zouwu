@@ -247,6 +247,7 @@ sysfont-no-selection = Pick a face above first
 sysfont-cannot-read = Could not read the current system font, so nothing was written
 sysfont-cannot-backup = Could not save a backup, so nothing was written
 sysfont-applied = Set to {$face}. The pre-change backup is {$path}
+sysfont-chrome-repaired = Font applied. Window borders and scrollbars had been scaled up, so they were reset to the standard sizes — sign in again for that to take effect
 sysfont-apply-failed = Not applied: {$why}
 sysfont-no-backup = No backup yet (one is written the first time you change the system font)
 sysfont-restored = Restored from {$path}

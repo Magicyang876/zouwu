@@ -791,6 +791,15 @@ impl SysFontWindow {
     }
 
     fn apply(&mut self) {
+        // 边框/滚动条被旧版本放大过的话先顺手修：SPI 对这几项不作为，只能写注册表，
+        // 而且要重新登录才生效，所以下面会把提示语换掉。
+        let needs_repair = sysfont::chrome_needs_repair();
+        if needs_repair {
+            match sysfont::restore_chrome() {
+                Ok(chrome) => log::info!("sysfont: chrome restored to {chrome:?}"),
+                Err(err) => log::warn!("sysfont: cannot restore chrome: {err}"),
+            }
+        }
         let entries = self.state.entries();
         if entries.is_empty() {
             self.state.status = Some(self.i18n.t("sysfont.no.selection"));
@@ -816,10 +825,16 @@ impl SysFontWindow {
                     path.display()
                 );
                 self.state.snapshot = sysfont::current();
-                self.state.status = Some(self.i18n.t_args(
-                    "sysfont.applied",
-                    &[("face", &face), ("path", &file_name(&path))],
-                ));
+                // 尺寸修复要重新登录才生效，这时候把“已应用”换成一句带前提的话。
+                let repaired = needs_repair;
+                self.state.status = Some(if repaired {
+                    self.i18n.t("sysfont.chrome.repaired")
+                } else {
+                    self.i18n.t_args(
+                        "sysfont.applied",
+                        &[("face", &face), ("path", &file_name(&path))],
+                    )
+                });
             }
             Err(err) => {
                 log::error!("sysfont: apply failed: {err}");

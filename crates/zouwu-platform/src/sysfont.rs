@@ -32,8 +32,8 @@ mod sys;
 mod sys;
 
 pub use sys::{
-    apply, caption_metrics, current, installed_faces, is_admin, restore, set_substitute,
-    substitute_face,
+    apply, apply_with, caption_metrics, chrome_needs_repair, current, installed_faces, is_admin,
+    restore, restore_chrome, set_substitute, substitute_face,
 };
 
 /// 96 DPI = 100% 缩放。所有像素换算的基准。
@@ -164,6 +164,70 @@ pub struct Snapshot {
     /// `YYYY-MM-DD HH:MM:SS.mmm`，只给人看（排序靠文件名）。
     pub taken: String,
     pub items: Vec<(String, Entry)>,
+    /// 边框/滚动条/标题栏宽度这些「装饰尺寸」。老快照没有这一项（`None`）。
+    #[serde(default)]
+    pub chrome: Option<Chrome>,
+}
+
+/// `NONCLIENTMETRICS` 里除字体之外的那些整数：边框、滚动条、标题栏/菜单的宽度。
+///
+/// 它们**不参与 DPI 换算**（写什么读回什么），但会被“整块乘系数”那种写法连累：
+/// ADR-066 的第一版就是这么把用户的边框写到 36 px、滚动条写到 39 px 的。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Chrome {
+    pub border: i32,
+    pub scroll_width: i32,
+    pub scroll_height: i32,
+    pub caption_width: i32,
+    pub sm_caption_width: i32,
+    pub menu_width: i32,
+}
+
+/// Windows 在 96 dpi 下的标准装饰尺寸（高 DPI 由系统自己放大，不要乘系数）。
+pub const STANDARD_CHROME: Chrome = Chrome {
+    border: 1,
+    scroll_width: 17,
+    scroll_height: 17,
+    caption_width: 22,
+    sm_caption_width: 16,
+    menu_width: 16,
+};
+
+impl Chrome {
+    /// 按 DPI 系数换成“写进系统”的量纲（SPI 会把值除掉才存，与 `lfHeight` 同理）。
+    pub fn scaled(&self, factor: f32) -> Self {
+        let scale = |value: i32| {
+            if value == 0 || (factor - 1.0).abs() < 0.01 {
+                value
+            } else {
+                ((value as f32) * factor).round() as i32
+            }
+        };
+        Self {
+            border: scale(self.border),
+            scroll_width: scale(self.scroll_width),
+            scroll_height: scale(self.scroll_height),
+            caption_width: scale(self.caption_width),
+            sm_caption_width: scale(self.sm_caption_width),
+            menu_width: scale(self.menu_width),
+        }
+    }
+
+    /// 看上去已经不像是人调出来的尺寸。用来在**写盘前**把被写坏的值接住。
+    ///
+    /// 上界都留了余量（没有哪个正常桌面会把滚动条调到 32 px 宽），下界卡 0 与负数。
+    /// 标题栏宽度只要为 0 就是“不管”，而放大过的值会一路涨到几十。
+    pub fn is_broken(&self) -> bool {
+        let out = |value: i32, low: i32, high: i32| !(low..=high).contains(&value);
+        out(self.border, 1, 8)
+            || out(self.scroll_width, 9, 32)
+            || out(self.scroll_height, 9, 32)
+            // 宽度这几项 Win10+ 基本不看（标题按钮尺寸走主题），留宽一点，
+            // 只抓“被乘过系数”的那种成倍放大。
+            || out(self.caption_width, 0, 32)
+            || out(self.sm_caption_width, 0, 28)
+            || out(self.menu_width, 0, 28)
+    }
 }
 
 impl Snapshot {
@@ -328,6 +392,27 @@ impl NonClientMetricsW {
     /// `(标题栏字体高度, 标题栏高度)`：自检与护栏都用它。
     pub(crate) fn caption_pair(&self) -> (i32, i32) {
         (self.caption_font.height, self.caption_height)
+    }
+
+    /// 把「装饰尺寸」拆出来（快照用）。
+    pub(crate) fn chrome(&self) -> Chrome {
+        Chrome {
+            border: self.border_width,
+            scroll_width: self.scroll_width,
+            scroll_height: self.scroll_height,
+            caption_width: self.caption_width,
+            sm_caption_width: self.sm_caption_width,
+            menu_width: self.menu_width,
+        }
+    }
+
+    pub(crate) fn set_chrome(&mut self, chrome: Chrome) {
+        self.border_width = chrome.border;
+        self.scroll_width = chrome.scroll_width;
+        self.scroll_height = chrome.scroll_height;
+        self.caption_width = chrome.caption_width;
+        self.sm_caption_width = chrome.sm_caption_width;
+        self.menu_width = chrome.menu_width;
     }
 }
 
@@ -650,6 +735,66 @@ mod tests {
     }
 
     #[test]
+    fn scaled_chrome_is_recognised_as_broken() {
+        // 标准值本身必须健康——否则护栏会把每个用户的边框都“修”一遍。
+        assert!(!STANDARD_CHROME.is_broken());
+        // 实测的坏状态（被整块乘系数乘了四五次）：边框 36 px、滚动条 39 px。
+        let broken = Chrome {
+            border: 36,
+            scroll_width: 39,
+            scroll_height: 39,
+            caption_width: 31,
+            sm_caption_width: 49,
+            menu_width: 49,
+        };
+        assert!(broken.is_broken());
+        // 哪一项单独超界都算，因为写盘时是一整块一起写。
+        for bad in [
+            Chrome {
+                border: 0,
+                ..STANDARD_CHROME
+            },
+            Chrome {
+                scroll_width: 60,
+                ..STANDARD_CHROME
+            },
+            Chrome {
+                scroll_height: 3,
+                ..STANDARD_CHROME
+            },
+            Chrome {
+                caption_width: 40,
+                ..STANDARD_CHROME
+            },
+            Chrome {
+                sm_caption_width: 49,
+                ..STANDARD_CHROME
+            },
+            Chrome {
+                menu_width: -8,
+                ..STANDARD_CHROME
+            },
+        ] {
+            assert!(bad.is_broken(), "{bad:?} 应该被判为坏");
+        }
+    }
+
+    #[test]
+    fn old_snapshots_without_chrome_still_load() {
+        // 1.0.5 早期的快照没有 `chrome` 那一项，不能因此读不回来。
+        let old = r#"
+            taken = "2026-11-09 11:49:51.696"
+            items = [["menu", { face = "Sarasa Gothic SC", height = -14, weight = 400 }]]
+        "#;
+        let snapshot: Snapshot = toml::from_str(old).expect("老快照要能读");
+        assert_eq!(snapshot.chrome, None);
+        assert_eq!(
+            snapshot.get(Target::Menu).map(|e| e.face.as_str()),
+            Some("Sarasa Gothic SC")
+        );
+    }
+
+    #[test]
     fn broken_captions_are_recognised() {
         // 实测的坏状态：字体 2 px、标题栏 3 px —— 就是“标题栏消失”那个样子。
         assert!(caption_is_broken(-2, -48, -14));
@@ -677,6 +822,7 @@ mod tests {
                 ("menu".to_string(), Entry::new("Microsoft YaHei UI", -12)),
                 ("icon".to_string(), Entry::new("Segoe UI", -15)),
             ],
+            chrome: Some(STANDARD_CHROME),
         };
         let text = toml::to_string_pretty(&snapshot).expect("serialize");
         let back: Snapshot = toml::from_str(&text).expect("parse");
