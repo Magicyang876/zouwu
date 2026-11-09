@@ -36,6 +36,9 @@ pub const ID_SKIN_EXPORT: &str = "zouwu.skin-export";
 /// 打开字体目录。字体包的选择放在设置面板里（那里能看见实际效果），
 /// 托盘只留一个"把目录翻出来"的入口 —— 用户想自己塞字体进去时不至于找不着路。
 pub const ID_FONT_DIR: &str = "zouwu.font-dir";
+/// 「系统字体」小窗：改 Windows 自己的界面字体（ADR-066）。
+/// 与「字体目录」的区别是：那个改本程序，这个改整个 OS。
+pub const ID_SYS_FONT: &str = "zouwu.sys-font";
 /// 扫描二维码。排在显示/隐藏与回到主屏之后的"动作区"。
 pub const ID_SCAN_QR: &str = "zouwu.scan-qr";
 /// 打开剪贴板历史。与扫二维码同属“动作区”。
@@ -53,6 +56,8 @@ pub enum TrayCommand {
     OpenLogs,
     /// 打开字体目录。
     OpenFontsDir,
+    /// 打开「系统字体」小窗（改 Windows 自己的界面字体）。
+    SysFont,
     /// 扫全屏找二维码（结果用一个独立小窗展示）。
     ScanQr,
     /// 打开剪贴板历史小窗。
@@ -96,6 +101,7 @@ struct Items {
     skin_import: MenuItem,
     skin_export: MenuItem,
     font_dir: MenuItem,
+    sys_font: MenuItem,
 }
 
 /// `Tray::new` 的其余入参。
@@ -223,6 +229,7 @@ impl Tray {
         }
 
         let font_dir = MenuItem::with_id(ID_FONT_DIR, i18n.t("tray.font-dir"), true, None);
+        let sys_font = MenuItem::with_id(ID_SYS_FONT, i18n.t("tray.sys-font"), true, None);
 
         let menu = Menu::new();
         menu.append_items(&[
@@ -235,6 +242,7 @@ impl Tray {
             &config_dir,
             &open_logs,
             &font_dir,
+            &sys_font,
             &PredefinedMenuItem::separator(),
             &autostart_item,
             &language_menu,
@@ -287,6 +295,7 @@ impl Tray {
                 skin_import,
                 skin_export,
                 font_dir,
+                sys_font,
             },
         })
     }
@@ -337,6 +346,7 @@ impl Tray {
         self.items.scan_qr.set_text(i18n.t("tray.scan-qr"));
         self.items.clipboard.set_text(i18n.t("tray.clipboard"));
         self.items.font_dir.set_text(i18n.t("tray.font-dir"));
+        self.items.sys_font.set_text(i18n.t("tray.sys-font"));
         self.items.autostart.set_text(i18n.t("tray.autostart"));
         self.items.quit.set_text(i18n.t("tray.quit"));
         self.items.language_menu.set_text(i18n.t("tray.language"));
@@ -395,6 +405,9 @@ impl Tray {
         }
         if id == ID_FONT_DIR {
             return Some(TrayCommand::OpenFontsDir);
+        }
+        if id == ID_SYS_FONT {
+            return Some(TrayCommand::SysFont);
         }
         if id == ID_SCAN_QR {
             return Some(TrayCommand::ScanQr);

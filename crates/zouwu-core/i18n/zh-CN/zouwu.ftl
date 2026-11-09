@@ -136,6 +136,7 @@ settings-about-install-other = 已安装到另一个位置
 
 # ── 字体包 ────────────────────────────────────────────────
 tray-font-dir = 字体目录…
+tray-sys-font = 系统字体…
 settings-font = 字体
 settings-font-hint = 导入 .ttf / .otf / .ttc，整个面板立刻换成该字体
 settings-font-family = 家族名
@@ -226,3 +227,35 @@ settings-hotkey-none = 无热键
 # ── 自定义球：命令拉不起来时的结果窗 ──
 report-launch-failed = 这个球没跑起来
 report-launch-footer = 可以在设置 › 气泡球 里改命令或换图标
+
+# ── System font window (ADR-066) ──
+sysfont-title = 系统字体
+sysfont-current = 现在：{$now}
+sysfont-current-unknown = 现在：读不出来
+sysfont-size = 字号
+sysfont-bold = 加粗
+sysfont-sample = 驺吾 Zouwu 0123 —— 菜单、消息框、状态栏都用这个字体
+sysfont-no-cjk = 这个字体没有中文字形，中文会回落到宋体（很糊）
+sysfont-substitute = 全局替换 Segoe UI（需要管理员）
+sysfont-substitute-on = 全局替换中：Segoe UI → {$face}（需要管理员）
+sysfont-needs-admin = 需要管理员
+sysfont-needs-admin-long = 需要管理员权限：右键 zouwu.exe → 以管理员身份运行，再点一次
+sysfont-apply = 应用到系统
+sysfont-restore = 还原上次
+sysfont-export = 导出 .reg
+sysfont-close = 关闭
+sysfont-no-selection = 先在上面挑一个字体
+sysfont-cannot-read = 读不出系统当前的字体，为了安全没有写入
+sysfont-cannot-backup = 存不下备份，为了安全没有写入
+sysfont-applied = 已改成 {$face}。改之前的备份在 {$path}
+sysfont-apply-failed = 没改成：{$why}
+sysfont-no-backup = 还没有备份（改过一次系统字体才会生成）
+sysfont-restored = 已还原成 {$path} 里的那一份
+sysfont-restore-failed = 还原失败：{$why}
+sysfont-exported = 导出到 {$path}（双击即可导入，不需要管理员）
+sysfont-export-failed = 导出失败：{$why}
+sysfont-substitute-set = Segoe UI 现在全局换成 {$face}，重启资源管理器后整套界面会跟着变
+sysfont-substitute-cleared = 已撤销全局替换
+sysfont-substitute-failed = 替换失败：{$why}
+sysfont-footer = 只改菜单／消息框／状态栏／调色板标题／桌面图标文字；标题栏故意不动
+sysfont-title-window = 系统字体 — 驺吾

@@ -32,6 +32,8 @@ pub(crate) mod reg;
 #[cfg(target_os = "windows")]
 pub mod single_instance;
 
+/// 系统字体：改 Windows 自己的界面字体（读/写 `NONCLIENTMETRICS`、拍快照、导 `.reg`）。
+pub mod sysfont;
 /// 文本栅格化：Windows 走 GDI（系统共享字体，常驻内存≈0）。
 #[cfg(target_os = "windows")]
 pub mod text_gdi;

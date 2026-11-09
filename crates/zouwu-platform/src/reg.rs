@@ -1,7 +1,8 @@
-//! 注册表读写的最小封装：只支持 `HKEY_CURRENT_USER` + `REG_SZ`。
+//! 注册表读写的最小封装：只支持 `REG_SZ`，根键可选 `HKEY_CURRENT_USER` / `HKEY_LOCAL_MACHINE`。
 //!
 //! 装机/卸载/自启一共需要动三个地方（Run 键、Uninstall 键、它们下面的值），
 //! 与其在三处各写一遍 `extern "system"` 和指针运算，不如收成这一层。
+//! 系统字体替换（`sysfont`）是本层的第二个用户：它在 `HKLM` 下面写一个值。
 //! **刻意不做的**：`REG_DWORD`、其他根键、权限参数——没有用到它们的场景，
 //! 加了只会让"这段代码为什么存在"变模糊。需要时再加，而且是加法。
 
@@ -9,8 +10,23 @@ use std::ptr;
 
 type Hkey = usize;
 
-/// `HKEY_CURRENT_USER`（0x80000001）。
-const HKEY_CURRENT_USER: Hkey = 0x8000_0001;
+/// 根键。只列真正用到的两个；`HKEY_USERS` 之类要等有场景再加。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Root {
+    /// `HKEY_CURRENT_USER`（0x80000001）—— 自启、卸载、系统字体（大部分）。
+    CurrentUser,
+    /// `HKEY_LOCAL_MACHINE`（0x80000002）—— 字体替换。写它需要管理员。
+    LocalMachine,
+}
+
+impl Root {
+    fn raw(self) -> Hkey {
+        match self {
+            Root::CurrentUser => 0x8000_0001,
+            Root::LocalMachine => 0x8000_0002,
+        }
+    }
+}
 /// 只要读写值就够了，不要 `KEY_ALL_ACCESS`（那会让安全软件更爱我们）。
 const KEY_READ_WRITE: u32 = 0x0002 | 0x0004 | 0x0001;
 const KEY_READ: u32 = 0x0001 | 0x0004;
@@ -63,10 +79,10 @@ fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-fn open(path: &str, sam: u32) -> Option<Hkey> {
+fn open(root: Root, path: &str, sam: u32) -> Option<Hkey> {
     let sub = wide(path);
     let mut key: Hkey = 0;
-    let status = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, sub.as_ptr(), 0, sam, &mut key) };
+    let status = unsafe { RegOpenKeyExW(root.raw(), sub.as_ptr(), 0, sam, &mut key) };
     if status != 0 {
         log::debug!("RegOpenKeyExW({path}) failed: {status}");
         return None;
@@ -75,13 +91,13 @@ fn open(path: &str, sam: u32) -> Option<Hkey> {
 }
 
 /// 建键（已存在则打开）。返回是否拿到句柄。
-fn create(path: &str) -> Option<Hkey> {
+fn create(root: Root, path: &str) -> Option<Hkey> {
     let sub = wide(path);
     let mut key: Hkey = 0;
     let mut disposition = 0u32;
     let status = unsafe {
         RegCreateKeyExW(
-            HKEY_CURRENT_USER,
+            root.raw(),
             sub.as_ptr(),
             0,
             ptr::null(),
@@ -101,7 +117,12 @@ fn create(path: &str) -> Option<Hkey> {
 
 /// 写一个字符串值（键不存在时创建）。返回写后读回是否一致。
 pub(crate) fn set_string(path: &str, name: &str, value: &str) -> bool {
-    let Some(key) = create(path) else {
+    set_string_in(Root::CurrentUser, path, name, value)
+}
+
+/// 同上，指定根键。
+pub(crate) fn set_string_in(root: Root, path: &str, name: &str, value: &str) -> bool {
+    let Some(key) = create(root, path) else {
         return false;
     };
     let name = wide(name);
@@ -126,7 +147,12 @@ pub(crate) fn set_string(path: &str, name: &str, value: &str) -> bool {
 
 /// 读一个字符串值；不存在/读不出/不是 `REG_SZ` 都返回 `None`。
 pub(crate) fn get_string(path: &str, name: &str) -> Option<String> {
-    let key = open(path, KEY_READ)?;
+    get_string_in(Root::CurrentUser, path, name)
+}
+
+/// 同上，指定根键。
+pub(crate) fn get_string_in(root: Root, path: &str, name: &str) -> Option<String> {
+    let key = open(root, path, KEY_READ)?;
     let name = wide(name);
     let mut len: u32 = 0;
     // 先问长度（值可能比任何固定缓冲都长），再读内容。
@@ -171,7 +197,12 @@ pub(crate) fn get_string(path: &str, name: &str) -> Option<String> {
 
 /// 删一个值。值本来就不存在也算成功。
 pub(crate) fn delete_value(path: &str, name: &str) -> bool {
-    let Some(key) = open(path, KEY_READ_WRITE) else {
+    delete_value_in(Root::CurrentUser, path, name)
+}
+
+/// 同上，指定根键。
+pub(crate) fn delete_value_in(root: Root, path: &str, name: &str) -> bool {
+    let Some(key) = open(root, path, KEY_READ_WRITE) else {
         return true;
     };
     let name = wide(name);
@@ -190,7 +221,7 @@ pub(crate) fn delete_value(path: &str, name: &str) -> bool {
 /// 且每一步都可能半途失败留下垃圾。
 pub(crate) fn delete_tree(path: &str) -> bool {
     let sub = wide(path);
-    let status = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, sub.as_ptr()) };
+    let status = unsafe { RegDeleteTreeW(Root::CurrentUser.raw(), sub.as_ptr()) };
     if status != 0 && status != ERROR_FILE_NOT_FOUND {
         log::warn!("RegDeleteTreeW({path}) failed: {status}");
         return false;

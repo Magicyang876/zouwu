@@ -18,6 +18,8 @@ pub mod settings;
 pub mod settings_window;
 pub mod skin;
 pub mod skin_menu;
+/// 「系统字体」小窗：改 Windows 自己的界面字体（见 ADR-066）。
+pub mod sysfont_window;
 pub mod text;
 pub mod thumb;
 pub mod watchdog;

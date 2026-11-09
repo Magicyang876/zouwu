@@ -49,6 +49,7 @@ use crate::paint::{render, BubblePaint, Scene};
 
 use crate::presenter::Presenter;
 use crate::report::{Entry, Outcome as ReportOutcome, Report, ReportWindow};
+use crate::sysfont_window::{Outcome as SysFontOutcome, SysFontWindow};
 
 /// 启动 zouwu。
 ///
@@ -295,6 +296,10 @@ struct App {
     /// 托盘点了"设置"，但当时手里没有 `ActiveEventLoop`（不能在轮询里建窗口），
     /// 于是先记个意愿，下一拍再开。
     pending_settings: bool,
+    /// 托盘点了「系统字体…」：等下一拍拿到 `&ActiveEventLoop` 再建窗。
+    pending_sysfont: bool,
+    /// 「系统字体」小窗（独立窗口，与设置面板并列）。
+    sysfont: Option<SysFontWindow>,
     /// `ZOUWU_SETTINGS=1` 已消费过（一次性）。
     settings_env_done: bool,
     /// `ZOUWU_SCAN=1` 启动即扫一次二维码（只一次）。托盘与热键都没法脚本化，
@@ -302,6 +307,8 @@ struct App {
     scan_env_done: bool,
     /// `ZOUWU_HISTORY=1` 启动即开一次剪贴板历史窗（只一次）。
     history_env_done: bool,
+    /// `ZOUWU_SYSFONT=1` 只触发一次，理由同 `settings_env_done`。
+    sysfont_env_done: bool,
     /// 待销毁的子窗口。
     ///
     /// **不要在 winit 的事件回调里 drop 掉 `Window`**：Windows 下析构会
@@ -450,9 +457,12 @@ impl App {
             config_watcher: ConfigWatcher::new(zouwu_platform::config_path()),
             settings: None,
             pending_settings: false,
+            pending_sysfont: false,
+            sysfont: None,
             settings_env_done: false,
             scan_env_done: false,
             history_env_done: false,
+            sysfont_env_done: false,
             retired: Vec::new(),
             cycle_left: std::env::var("ZOUWU_CYCLE")
                 .ok()
@@ -639,6 +649,9 @@ impl App {
                 window.set_theme(theme.clone());
             }
             if let Some(window) = self.report.as_mut() {
+                window.set_theme(theme.clone());
+            }
+            if let Some(window) = self.sysfont.as_mut() {
                 window.set_theme(theme);
             }
         }
@@ -947,6 +960,59 @@ impl App {
                 log::info!("qr: report window opened");
             }
             Err(err) => log::error!("qr: cannot open report window: {err}"),
+        }
+    }
+
+    /// 摆出「系统字体」小窗。同样是复用的 —— 关掉只是隐藏，状态留着。
+    fn open_sysfont(&mut self, event_loop: &ActiveEventLoop) {
+        crate::watchdog::enter(crate::watchdog::stage::OPEN_SETTINGS);
+        if let Some(window) = self.sysfont.as_mut() {
+            // 每次打开都重读一次系统字体：用户可能刚在别处改过。
+            window.show();
+            log::info!("sysfont: window reused");
+            return;
+        }
+        let title = self.i18n.t("sysfont.title-window");
+        match SysFontWindow::new(
+            event_loop,
+            self.theme.clone(),
+            &self.config.general.language,
+            &title,
+        ) {
+            Ok(window) => {
+                self.sysfont = Some(window);
+                log::info!("sysfont: window opened");
+            }
+            Err(err) => log::error!("cannot open sysfont window: {err}"),
+        }
+    }
+
+    fn sysfont_event(&mut self, event: WindowEvent) {
+        crate::watchdog::enter(crate::watchdog::stage::SETTINGS_EVENT);
+        log::trace!("app: sysfont event {event:?}");
+        let mut close = false;
+        {
+            let Some(window) = self.sysfont.as_mut() else {
+                return;
+            };
+            for outcome in window.window_event(&event) {
+                match outcome {
+                    SysFontOutcome::Close => close = true,
+                }
+            }
+        }
+        if close {
+            crate::watchdog::enter(crate::watchdog::stage::CLOSE_WINDOW);
+            if let Some(window) = self.sysfont.as_mut() {
+                window.close();
+            }
+            self.last_child_closed_at = Instant::now();
+            self.buttons_down = (
+                zouwu_platform::layer::left_button_down(),
+                zouwu_platform::layer::right_button_down(),
+            );
+            self.next_poll = Instant::now();
+            log::info!("sysfont: window closed");
         }
     }
 
@@ -1369,6 +1435,8 @@ impl App {
                 }
             }
             TrayCommand::Recenter => self.pending_recenter = true,
+            // 建窗都得拿到 `&ActiveEventLoop`，所以只置个标志，下一拍再开。
+            TrayCommand::SysFont => self.pending_sysfont = true,
             // 扫二维码要建窗口，得拿到 `&ActiveEventLoop` —— 同气泡点击，走待办队列。
             TrayCommand::ScanQr => self.pending_action = Some(QRCODE_ACTION.to_string()),
             TrayCommand::Clipboard => self.pending_action = Some(CLIPBOARD_ACTION.to_string()),
@@ -2348,7 +2416,10 @@ impl App {
 
         // 仅阻止穿透到被我们自己的面板盖住的小兽；拖动一旦开始则继续跟踪。
         let covered_by_panel = inside
-            && (self.settings.is_some() || self.report.is_some() || self.history_window.is_some())
+            && (self.settings.is_some()
+                || self.report.is_some()
+                || self.history_window.is_some()
+                || self.sysfont.is_some())
             && zouwu_platform::layer::window_at(sx, sy).is_some_and(|hwnd| {
                 let id = WindowId::from(hwnd as u64);
                 self.settings
@@ -2360,6 +2431,10 @@ impl App {
                         .is_some_and(|p| p.is_visible() && p.id() == id)
                     || self
                         .history_window
+                        .as_ref()
+                        .is_some_and(|p| p.is_visible() && p.id() == id)
+                    || self
+                        .sysfont
                         .as_ref()
                         .is_some_and(|p| p.is_visible() && p.id() == id)
             });
@@ -2751,6 +2826,11 @@ impl ApplicationHandler for App {
             self.report_event(event);
             return;
         }
+        // 「系统字体」小窗同理。
+        if self.sysfont.as_ref().is_some_and(|s| s.id() == id) {
+            self.sysfont_event(event);
+            return;
+        }
         // 剪贴板历史窗同理。
         if self.history_window.as_ref().is_some_and(|h| h.id() == id) {
             self.history_event(event);
@@ -2855,6 +2935,7 @@ impl ApplicationHandler for App {
                             || self.settings.as_ref().is_some_and(|p| p.is_visible())
                             || self.report.as_ref().is_some_and(|p| p.is_visible())
                             || self.history_window.as_ref().is_some_and(|p| p.is_visible())
+                            || self.sysfont.as_ref().is_some_and(|p| p.is_visible())
                         {
                             return;
                         }
@@ -2976,8 +3057,18 @@ impl ApplicationHandler for App {
             self.settings_env_done = true;
             self.pending_settings = true;
         }
+        // 同一套钩子给「系统字体」窗：托盘菜单没法脚本化。
+        if !self.sysfont_env_done
+            && std::env::var_os("ZOUWU_SYSFONT").is_some_and(|v| !v.is_empty())
+        {
+            self.sysfont_env_done = true;
+            self.pending_sysfont = true;
+        }
         if std::mem::take(&mut self.pending_settings) {
             self.open_settings(event_loop, now);
+        }
+        if std::mem::take(&mut self.pending_sysfont) {
+            self.open_sysfont(event_loop);
         }
         self.cycle_tick(event_loop, now);
 

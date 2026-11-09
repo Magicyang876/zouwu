@@ -135,6 +135,7 @@ settings-about-install-other = Installed elsewhere
 
 # ── font packs ────────────────────────────────────────────
 tray-font-dir = Fonts folder…
+tray-sys-font = System font…
 settings-font = Font
 settings-font-hint = Import .ttf / .otf / .ttc and the whole panel switches at once
 settings-font-family = Family
@@ -225,3 +226,35 @@ settings-hotkey-none = No hotkey
 # ── Custom bubble: launch failure report ──
 report-launch-failed = This bubble did not start
 report-launch-footer = Fix the command or icon in Settings › Bubbles
+
+# ── System font window (ADR-066) ──
+sysfont-title = System font
+sysfont-current = Now: {$now}
+sysfont-current-unknown = Now: unreadable
+sysfont-size = Size
+sysfont-bold = Bold
+sysfont-sample = Zouwu 0123 — menus, message boxes and status bars use this font
+sysfont-no-cjk = This face has no CJK glyphs; Chinese falls back to SimSun (very blurry)
+sysfont-substitute = Substitute Segoe UI globally (needs admin)
+sysfont-substitute-on = Substituting: Segoe UI → {$face} (needs admin)
+sysfont-needs-admin = needs admin
+sysfont-needs-admin-long = Needs administrator: right-click zouwu.exe → Run as administrator, then click again
+sysfont-apply = Apply to Windows
+sysfont-restore = Undo last
+sysfont-export = Export .reg
+sysfont-close = Close
+sysfont-no-selection = Pick a face above first
+sysfont-cannot-read = Could not read the current system font, so nothing was written
+sysfont-cannot-backup = Could not save a backup, so nothing was written
+sysfont-applied = Set to {$face}. The pre-change backup is {$path}
+sysfont-apply-failed = Not applied: {$why}
+sysfont-no-backup = No backup yet (one is written the first time you change the system font)
+sysfont-restored = Restored from {$path}
+sysfont-restore-failed = Restore failed: {$why}
+sysfont-exported = Exported to {$path} (double-click to import, no admin needed)
+sysfont-export-failed = Export failed: {$why}
+sysfont-substitute-set = Segoe UI now maps to {$face}; restart Explorer to see it everywhere
+sysfont-substitute-cleared = Global substitution removed
+sysfont-substitute-failed = Substitution failed: {$why}
+sysfont-footer = Only menus, message boxes, status bars, palette titles and icon labels change; the title bar is left alone on purpose
+sysfont-title-window = System font — Zouwu
