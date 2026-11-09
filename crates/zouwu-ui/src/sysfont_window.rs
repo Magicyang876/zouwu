@@ -38,11 +38,13 @@ const VISIBLE_ROWS: usize = 10;
 const LIST_H: f32 = ROW_H * VISIBLE_ROWS as f32;
 const SIZE_H: f32 = 34.0;
 const PREVIEW_H: f32 = 84.0;
+/// 「标题栏能不能改」那一行说明，两行字。
+const NOTE_H: f32 = 36.0;
 const BUTTON_H: f32 = 34.0;
 const FOOTER_H: f32 = 58.0;
 /// 窗口逻辑高度。
 pub const HEIGHT: f32 =
-    HEADER_H + LIST_H + 8.0 + SIZE_H + PREVIEW_H + BUTTON_H + FOOTER_H + PAD * 1.5;
+    HEADER_H + LIST_H + 8.0 + SIZE_H + PREVIEW_H + NOTE_H + BUTTON_H + FOOTER_H + PAD * 1.5;
 
 /// 列表顶部的常客：这几个是中文 Windows 上真正会被拿来当界面字体的。
 /// 放在最前面省得用户在一个几百项的字母序列表里找。
@@ -124,6 +126,7 @@ impl State {
         let entry = Entry::new(face, sysfont::height_for_pt(self.pt)).bold(self.bold);
         Target::ALL
             .into_iter()
+            .filter(|t| *t != Target::Caption || sysfont::caption_supported())
             .map(|t| (t, entry.clone()))
             .collect()
     }
@@ -174,6 +177,8 @@ pub struct Layout {
     pub size_up: Rect,
     pub bold: Rect,
     pub preview: Rect,
+    /// 「标题栏字体能不能一起改」的说明。
+    pub note: Rect,
     pub substitute: Rect,
     pub buttons: Vec<(Rect, Hit)>,
     pub footer: Rect,
@@ -201,6 +206,8 @@ pub fn layout(scroll: usize, count: usize) -> Layout {
     y = size_row.bottom();
     let preview = Rect::new(PAD, y, width, PREVIEW_H);
     y = preview.bottom();
+    let note = Rect::new(PAD, y + 2.0, width, NOTE_H - 4.0);
+    y = note.bottom() + 4.0;
     let substitute = Rect::new(PAD, y, width, BUTTON_H);
     y = substitute.bottom() + 6.0;
 
@@ -223,6 +230,7 @@ pub fn layout(scroll: usize, count: usize) -> Layout {
         size_up,
         bold,
         preview,
+        note,
         substitute,
         buttons: vec![
             (apply, Hit::Apply),
@@ -505,6 +513,45 @@ pub fn draw(pixmap: &mut Pixmap, state: &State, i18n: &I18n, theme: &Theme, hove
             Weight::Regular,
         );
     }
+
+    // 标题栏这一项的说明：支持就说“会一起改”，不支持就把原因写清楚
+    // （Windows 11 22H2 起改标题栏字体会让标题文字消失，微软也劝退）。
+    let (headline, detail) = {
+        let build = sysfont::os_build();
+        if sysfont::caption_supported() {
+            (
+                i18n.t_args("sysfont.caption.on", &[("build", &build.to_string())]),
+                i18n.t("sysfont.caption.on.hint"),
+            )
+        } else {
+            (
+                i18n.t_args("sysfont.caption.off", &[("build", &build.to_string())]),
+                i18n.t("sysfont.caption.off.hint"),
+            )
+        }
+    };
+    let muted = pal.muted;
+    // `Painter::truncate` 也要 `&mut self`，不能和 `text_in` 挤在同一个表达式里。
+    let head = p.truncate(&headline, 10.5, layout.note.w);
+    let tail = p.truncate(&detail, 10.5, layout.note.w);
+    p.text_in(
+        &head,
+        Rect::new(layout.note.x, layout.note.y, layout.note.w, 14.0),
+        10.5,
+        if sysfont::caption_supported() {
+            muted
+        } else {
+            pal.text.with_alpha(0.72)
+        },
+        Weight::Regular,
+    );
+    p.text_in(
+        &tail,
+        Rect::new(layout.note.x, layout.note.y + 15.0, layout.note.w, 14.0),
+        10.5,
+        muted,
+        Weight::Regular,
+    );
 
     // 全局替换开关
     let sub_text = match &state.substituted {

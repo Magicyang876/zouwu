@@ -32,8 +32,8 @@ mod sys;
 mod sys;
 
 pub use sys::{
-    apply, apply_with, caption_metrics, chrome_needs_repair, current, installed_faces, is_admin,
-    restore, restore_chrome, set_substitute, substitute_face,
+    apply, apply_with, caption_metrics, caption_supported, chrome_needs_repair, current,
+    installed_faces, is_admin, os_build, restore, restore_chrome, set_substitute, substitute_face,
 };
 
 /// 96 DPI = 100% 缩放。所有像素换算的基准。
@@ -48,16 +48,20 @@ pub enum Target {
     Status,
     /// 调色板标题（`lfSmCaptionFont`）。
     Palette,
+    /// 标题栏（`lfCaptionFont`）。只在 Windows 11 22H2 之前的系统上生效，
+    /// 之后的系统改它会让标题文字整体消失——见 `caption_supported`。
+    Caption,
     /// 桌面图标文字（`SPI_SETICONTITLELOGFONT`，不属于 `NONCLIENTMETRICS`）。
     Icon,
 }
 
 impl Target {
-    pub const ALL: [Target; 5] = [
+    pub const ALL: [Target; 6] = [
         Target::Menu,
         Target::Message,
         Target::Status,
         Target::Palette,
+        Target::Caption,
         Target::Icon,
     ];
 
@@ -68,6 +72,7 @@ impl Target {
             Target::Message => "message",
             Target::Status => "status",
             Target::Palette => "palette",
+            Target::Caption => "caption",
             Target::Icon => "icon",
         }
     }
@@ -79,6 +84,7 @@ impl Target {
             Target::Message => Some("MessageFont"),
             Target::Status => Some("StatusFont"),
             Target::Palette => Some("SmCaptionFont"),
+            Target::Caption => Some("CaptionFont"),
             Target::Icon => None,
         }
     }
@@ -648,11 +654,13 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), names.len());
-        assert!(!names.contains(&"CaptionFont"), "标题栏不该被我们写");
+        assert!(names.contains(&"CaptionFont"), "标题栏现在也是我们的一项");
         for id in ids {
             assert_eq!(Target::from_id(id).map(|t| t.id()), Some(id));
         }
-        assert_eq!(Target::from_id("caption"), None);
+        assert_eq!(Target::from_id("caption"), Some(Target::Caption));
+        // 老快照里没有 caption 这一项，读出来是 None 而不是报错。
+        assert_eq!(Target::from_id("caption2"), None);
     }
 
     #[test]

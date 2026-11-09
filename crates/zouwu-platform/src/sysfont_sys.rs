@@ -64,6 +64,50 @@ extern "system" {
     ) -> i32;
 }
 
+#[link(name = "ntdll")]
+extern "system" {
+    fn RtlGetVersion(info: *mut OsVersionInfoW) -> i32;
+}
+
+/// `RtlGetVersion` 要的那个结构体（和 `OSVERSIONINFOW` 同布局）。
+#[repr(C)]
+struct OsVersionInfoW {
+    size: u32,
+    major: u32,
+    minor: u32,
+    build: u32,
+    platform: u32,
+    service_pack: [u16; 128],
+}
+
+/// 系统版本号（`build`）。用 `RtlGetVersion` 而不是注册表：注册表里的
+/// `CurrentBuild` 在部分预览版上缺项，而 `GetVersionExW` 会被应用清单骗。
+pub fn os_build() -> u32 {
+    let mut info = OsVersionInfoW {
+        size: std::mem::size_of::<OsVersionInfoW>() as u32,
+        major: 0,
+        minor: 0,
+        build: 0,
+        platform: 0,
+        service_pack: [0; 128],
+    };
+    let status = unsafe { RtlGetVersion(&mut info as *mut OsVersionInfoW) };
+    if status < 0 {
+        // 拿不到就当作“很新的系统”：宁可少改一项，也不要把用户的标题栏弄没。
+        return u32::MAX;
+    }
+    info.build
+}
+
+/// 能不能改标题栏字体。
+///
+/// Windows 11 22H2（build 22621）起，改 `lfCaptionFont` 会让标题栏文字整体消失，
+/// 而且**不一定能改回来**（微软社区里有把系统改坏的记录）。所以：
+/// 22621 及以上一律不提供这一项，界面上说明原因。
+pub fn caption_supported() -> bool {
+    os_build() < 22621
+}
+
 #[link(name = "shell32")]
 extern "system" {
     fn IsUserAnAdmin() -> i32;
@@ -187,6 +231,7 @@ pub fn current() -> Option<Snapshot> {
             Target::Message => entry_of(&metrics.message_font),
             Target::Status => entry_of(&metrics.status_font),
             Target::Palette => entry_of(&metrics.sm_caption_font),
+            Target::Caption => entry_of(&metrics.caption_font),
             Target::Icon => entry_of(&read_icon_font()?),
         };
         items.push((target.id().to_string(), entry));
@@ -319,6 +364,20 @@ fn push(entries: &[(Target, Entry)], factor: f32, chrome: Option<Chrome>) -> Res
                 write_entry(&mut metrics.sm_caption_font, entry);
                 metrics.sm_caption_height =
                     rescale_band(metrics.sm_caption_height, before, entry.height, dpi);
+            }
+            // 标题栏：单改字体不改高度的话，字会被切掉；按字号比例缩放行高
+            // （和菜单、小标题栏同一套办法），并且只在支持的版本上做。
+            Target::Caption if caption_supported() => {
+                let before = metrics.caption_font.height;
+                write_entry(&mut metrics.caption_font, entry);
+                metrics.caption_height =
+                    rescale_band(metrics.caption_height, before, entry.height, dpi);
+            }
+            Target::Caption => {
+                log::warn!(
+                    "sysfont: caption font skipped, build {} does not allow it",
+                    os_build()
+                );
             }
             Target::Icon => {
                 write_entry(&mut icon_font, entry);
@@ -506,6 +565,21 @@ mod tests {
 
     /// 这些数字是从 `WinUser.h` 抄来的，抄错一个就是一桩事故：
     /// `0x0021` 不是图标字体而是 `SPI_SETMOUSEBUTTONSWAP`（见常量上的注释）。
+    #[test]
+    fn os_build_is_a_real_windows_build_number() {
+        // 无头会话也拿得到（RtlGetVersion 不依赖窗口）。
+        let build = super::os_build();
+        assert!(build >= 7600, "build 号看着不对：{build}");
+        // 判断规则本身：22621（Win11 22H2）是分界线。
+        assert!(22621 < 22621 || build >= 22621 || super::caption_supported());
+    }
+
+    #[test]
+    fn caption_support_matches_the_build_cutoff() {
+        // 只能验规则，不能验本机（本机是 19044，支持）。
+        assert_eq!(super::caption_supported(), super::os_build() < 22621);
+    }
+
     #[test]
     fn spi_constants_are_what_we_think() {
         assert_eq!(SPI_GETNONCLIENTMETRICS, 0x0029);

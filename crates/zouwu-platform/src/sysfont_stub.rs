@@ -27,6 +27,14 @@ pub fn restore_chrome() -> Result<Chrome, String> {
     Err("sysfont: only supported on Windows".to_string())
 }
 
+pub fn os_build() -> u32 {
+    0
+}
+
+pub fn caption_supported() -> bool {
+    false
+}
+
 pub fn installed_faces() -> Vec<String> {
     Vec::new()
 }
