@@ -1,0 +1,26 @@
+# 影魔 —— 官方第七套皮肤
+id = "zouwu-shadowfiend"
+name = "影魔"
+author = "zouwu"
+version = "1.0.0"
+
+[geometry]
+radius = 56.0
+breath_amount = 0.03
+
+# 主体在 256 画布里占 0.6（半径 0.30），所以放大 1/0.6 ≈ 1.67 倍，`radius` 才
+# 仍然表示"桌面上的主体半径"。这个数由 make_skin_shadowfiend.rs 按实测占比反推。
+[[layers]]
+image = "body.png"
+scale = 1.67
+
+[[layers]]
+image = "blink.png"
+role = "blink"
+scale = 1.67
+
+# 隔空浮着的火星。覆盖层的 `opacity` 是常驻的，不跟眨眼走。
+[[layers]]
+image = "overlay.png"
+role = "overlay"
+scale = 1.67

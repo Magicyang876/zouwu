@@ -71,13 +71,16 @@ that only write a log line, that was a deliberate cull.
 
 - Themes as TOML overlays (built-in warm and night), skins as directories of PNG layers,
   `.zwskin` single-file skin packages with strict validation, import/export from the tray.
-- Five official skins shipped: the procedural one, 折纸驺吾 (one folded sheet — pure flat
+- Six official skins shipped: the procedural one, 折纸驺吾 (one folded sheet — pure flat
   facets, no gradients), 折纸驺吾 2 (a sitting folded cat: pointed ears, cream muzzle, two
   front paws, curled tail), 大魔导 (a floating robed mage: hooded head with glowing slit
   eyes, horns curving up from the temples, jewelled browband, staff with a gem, a few shards
   hovering around him) and 剑圣 (a masked swordsman: an ivory mask down to two ember-lit eye
   slits, horns sweeping out from the temples, crimson coat with a gold obi, a katana slanting
-  across the body, embers drifting around him). **Right-click the pet** for a quick skin list;
+  across the body, embers drifting around him), and 影魔 (a near-black demon: bone horns
+  curving up, a soul-green crack down the chest and two angry slit eyes, tattered membranes on
+  the shoulders, the lower body tapering into three tongues of smoke with soul-fire motes
+  drifting around). **Right-click the pet** for a quick skin list;
   the current one is outlined.
 - Chinese / English with Fluent, switchable at runtime; `language = "auto"` follows the system.
 - UI text can follow **the Windows UI font** (Settings → Appearance). Off by default: an

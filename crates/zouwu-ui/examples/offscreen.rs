@@ -110,6 +110,7 @@ fn skin_menu_shot(name: &str, scale: f32, theme: &Theme) {
         ("zouwu-paper-2".to_string(), "折纸驺吾 2".to_string()),
         ("zouwu-rubick".to_string(), "大魔导".to_string()),
         ("zouwu-juggernaut".to_string(), "剑圣".to_string()),
+        ("zouwu-shadowfiend".to_string(), "影魔".to_string()),
     ];
     let l = zouwu_ui::skin_menu::layout(choices.len());
     let (w, h) = (
