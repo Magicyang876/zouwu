@@ -78,9 +78,9 @@ that only write a log line, that was a deliberate cull.
   hovering around him) and 剑圣 (a masked swordsman: an ivory mask down to two ember-lit eye
   slits, horns sweeping out from the temples, crimson coat with a gold obi, a katana slanting
   across the body, embers drifting around him), and 影魔 (a near-black demon: bone horns
-  curving up, a soul-green crack down the chest and two angry slit eyes, tattered membranes on
-  the shoulders, the lower body tapering into three tongues of smoke with soul-fire motes
-  drifting around). **Right-click the pet** for a quick skin list;
+  curving up, a soul-green crack down the chest and two angry slit eyes, a bone ribcage, tattered
+  membranes on the shoulders, soul-fire licking up along the flanks, the lower body tapering
+  into three tongues of smoke). **Right-click the pet** for a quick skin list;
   the current one is outlined.
 - Chinese / English with Fluent, switchable at runtime; `language = "auto"` follows the system.
 - UI text can follow **the Windows UI font** (Settings → Appearance). Off by default: an

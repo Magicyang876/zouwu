@@ -218,6 +218,88 @@ fn glow(pm: &mut Pixmap, cx: f32, cy: f32, r: f32, color: Color) {
     }
 }
 
+/// 一根向上收尖的火舌：外焰暗、内焰亮，两片折线套在一起。
+///
+/// `lean` 是火舌往哪边歪——全都直上会像一排栅栏，歪一点才像在烧。
+fn tongue(pm: &mut Pixmap, base_x: f32, base_y: f32, height: f32, width: f32, lean: f32) {
+    let (w, h) = (width, height);
+    // 三层套在一起：外焰宽而半透、中焰偏亮、芯子最亮最窄。
+    // 没有渐变可用，"亮在里面"就是用递减宽度 + 递增不透明度堆出来的。
+    for (k, alpha, spread) in [
+        (1.0f32, 0.20f32, 1.0f32),
+        (0.90, 0.42, 0.66),
+        (0.80, 0.90, 0.34),
+    ] {
+        let box_w = w * spread;
+        let tip = base_y - h * k;
+        let shape = [
+            (base_x - box_w, base_y),
+            (base_x - box_w * 0.55 + lean * 0.25, base_y - h * k * 0.42),
+            (base_x - box_w * 0.80 + lean * 0.55, base_y - h * k * 0.58),
+            (base_x + lean * 0.85, tip),
+            (base_x + box_w * 0.45 + lean * 0.55, base_y - h * k * 0.52),
+            (base_x + box_w * 0.85 + lean * 0.25, base_y - h * k * 0.26),
+            (base_x + box_w, base_y),
+        ];
+        let color = match spread {
+            1.0 => tint(mix(soul_dim(), soul(), 0.15), alpha),
+            0.68 => tint(mix(soul_dim(), soul(), 0.55), alpha),
+            _ => tint(soul(), alpha),
+        };
+        fill(pm, &shape, color);
+    }
+}
+
+/// 一簇火：中间最高、两边依次矮下去。单根火舌看起来像根尖刺，三根挤在一起才有"烧"的感觉。
+/// 一簇火：中间最高、两边各一根矮的，彼此留出缝。
+///
+/// 单根火舌像根尖刺，三根挤在一起又会因为外焰半透 alpha 叠加变成一整块绿板
+/// （在 2 倍尺寸下看起来像一对绿翅膀）。所以只给两根矮的、并且拉开距离。
+fn cluster(pm: &mut Pixmap, x: f32, y: f32, height: f32, width: f32, lean: f32) {
+    for (k, dx) in [(1.0f32, 0.0f32), (0.55, -1.20)] {
+        tongue(
+            pm,
+            x + dx * width,
+            y,
+            height * k,
+            width * (0.40 + 0.26 * k),
+            lean * (0.6 + 0.5 * k),
+        );
+    }
+}
+
+/// 背后那一大片魂火：从肩后往上窜。
+///
+/// 影魔的辨识度一半在角、一半在"他整个人是烧着的"。第一版一点火都没有，
+/// 所以像只蝙蝠状的黑色骑士。这一层画在身体之前，火苗从肩后透出来。
+fn flames(pm: &mut Pixmap) {
+    for (x, y, h, w, lean, glow_r) in [
+        // 肩外侧：大半根火苗在轮廓外边，才能对着背景读成火；
+        // 画在轮廓里面会变成一块半透的绿板。
+        (78.0f32, 120.0f32, 54.0f32, 8.0f32, -13.0f32, 16.0f32),
+        (178.0, 120.0, 50.0, 8.0, 13.0, 16.0),
+        (96.0, 108.0, 34.0, 5.5, -7.0, 10.0),
+        (160.0, 108.0, 30.0, 5.5, 7.0, 10.0),
+    ] {
+        glow(pm, x, y - h * 0.35, glow_r, soul());
+        cluster(pm, x, y, h, w, lean);
+    }
+}
+
+/// 贴在身上的火：腰侧与烟根。画在身体之后，所以是"从身体里冒出来"的。
+fn flares(pm: &mut Pixmap) {
+    for (x, y, h, w, lean) in [
+        // 这两簇画在身体之后面（ flares 最后调），所以它们压在肩甲外缘上，
+        // 看起来是"火苗从身上舔出来"——全部画在背后会变成一对绿翅膀。
+        (74.0f32, 138.0f32, 34.0f32, 6.0f32, -13.0f32),
+        (182.0, 138.0, 32.0, 6.0, 13.0),
+        (104.0, 164.0, 30.0, 6.0, -6.0),
+        (152.0, 164.0, 28.0, 6.0, 6.0),
+    ] {
+        cluster(pm, x, y, h, w, lean);
+    }
+}
+
 /// 破烂的膜翼：从肩后向外摊开，边缘全是锯齿。
 ///
 /// 影魔没有翅膀——这是他自己那层"披风状的皮"。放在最底下当背面，
@@ -386,11 +468,34 @@ fn torso(pm: &mut Pixmap) {
         ],
         hide_dark(),
     );
-    // 肋：三道短折痕，位置错开，别排成梯子。
-    let rib = tint(soot(), 0.30);
-    line(pm, &[(108.0, 118.0), (120.0, 124.0)], rib, 1.4);
-    line(pm, &[(106.0, 130.0), (119.0, 136.0)], rib, 1.4);
-    line(pm, &[(147.0, 122.0), (136.0, 128.0)], rib, 1.2);
+    // 肋骨：三道骨色的折线，从胸骨往两侧包回去。中间让裂缝透出来。
+    for (y, half, alpha) in [
+        (114.0f32, 15.0f32, 0.55f32),
+        (126.0, 17.0, 0.5),
+        (138.0, 13.0, 0.40),
+    ] {
+        let rib = tint(bone_dark(), alpha);
+        line(
+            pm,
+            &[
+                (128.0 - half, y),
+                (128.0 - half * 0.45, y + 4.5),
+                (128.0, y + 2.5),
+            ],
+            rib,
+            2.2,
+        );
+        line(
+            pm,
+            &[
+                (128.0 + half, y),
+                (128.0 + half * 0.45, y + 4.5),
+                (128.0, y + 2.5),
+            ],
+            rib,
+            2.2,
+        );
+    }
 }
 
 /// 胸口的裂缝：一条折来折去的竖缝，里面是魂火。
@@ -616,6 +721,7 @@ fn horns(pm: &mut Pixmap) {
 
 fn body() -> Pixmap {
     let mut pm = canvas();
+    flames(&mut pm);
     wings(&mut pm);
     smoke(&mut pm);
     torso(&mut pm);
@@ -625,6 +731,7 @@ fn body() -> Pixmap {
     horns(&mut pm);
     skull(&mut pm);
     eyes(&mut pm);
+    flares(&mut pm);
     pm
 }
 
