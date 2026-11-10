@@ -12,8 +12,19 @@ GPU: just a layered Win32 window painted with a CPU rasterizer.
 </p>
 
 <p align="center">
-  <img src="assets/screenshots/ring-light.png" width="300" alt="Zouwu with its bubble ring open (light theme)">
-  <img src="assets/screenshots/ring-dark.png" width="300" alt="Zouwu with its bubble ring open (dark theme)">
+  <img src="assets/screenshots/skins/1-procedural.png" width="104" alt="Zouwu drawn in code">
+  <img src="assets/screenshots/skins/2-zouwu-ink.png" width="104" alt="Ink Zouwu">
+  <img src="assets/screenshots/skins/3-zouwu-paper.png" width="104" alt="Origami Zouwu">
+  <img src="assets/screenshots/skins/4-zouwu-paper-2.png" width="104" alt="Origami Zouwu 2">
+</p>
+<p align="center">
+  <img src="assets/screenshots/skins/5-zouwu-rubick.png" width="104" alt="Archmage">
+  <img src="assets/screenshots/skins/6-zouwu-juggernaut.png" width="104" alt="Juggernaut">
+  <img src="assets/screenshots/skins/7-zouwu-shadowfiend.png" width="104" alt="Shadow Fiend">
+</p>
+<p align="center">
+  <sub><b>Seven official skins</b> — code-drawn · ink · origami · origami 2 · archmage ·
+  juggernaut · shadow fiend. Right-click the beast to switch; the current one is outlined.</sub>
 </p>
 
 <p align="center">
@@ -71,7 +82,8 @@ that only write a log line, that was a deliberate cull.
 
 - Themes as TOML overlays (built-in warm and night), skins as directories of PNG layers,
   `.zwskin` single-file skin packages with strict validation, import/export from the tray.
-- Six official skins shipped: the procedural one, 折纸驺吾 (one folded sheet — pure flat
+- Seven official skins shipped: the procedural one, 水墨驺吾 (ink-wash, a round head
+  splashed in pale ink with one Big Dipper star on its brow), 折纸驺吾 (one folded sheet — pure flat
   facets, no gradients), 折纸驺吾 2 (a sitting folded cat: pointed ears, cream muzzle, two
   front paws, curled tail), 大魔导 (a floating robed mage: hooded head with glowing slit
   eyes, horns curving up from the temples, jewelled browband, staff with a gem, a few shards

@@ -11,8 +11,19 @@
 </p>
 
 <p align="center">
-  <img src="assets/screenshots/ring-light.png" width="300" alt="驺吾展开气泡环（浅色主题）">
-  <img src="assets/screenshots/ring-dark.png" width="300" alt="驺吾展开气泡环（深色主题）">
+  <img src="assets/screenshots/skins/1-procedural.png" width="104" alt="代码绘制的驺吾">
+  <img src="assets/screenshots/skins/2-zouwu-ink.png" width="104" alt="水墨驺吾">
+  <img src="assets/screenshots/skins/3-zouwu-paper.png" width="104" alt="折纸驺吾">
+  <img src="assets/screenshots/skins/4-zouwu-paper-2.png" width="104" alt="折纸驺吾 2">
+</p>
+<p align="center">
+  <img src="assets/screenshots/skins/5-zouwu-rubick.png" width="104" alt="大魔导">
+  <img src="assets/screenshots/skins/6-zouwu-juggernaut.png" width="104" alt="剑圣">
+  <img src="assets/screenshots/skins/7-zouwu-shadowfiend.png" width="104" alt="影魔">
+</p>
+<p align="center">
+  <sub><b>七套官方形象</b> —— 代码绘制 · 水墨 · 折纸 · 折纸 2 · 大魔导 · 剑圣 · 影魔。
+  右键小兽切换，当前那套会被框出来。</sub>
 </p>
 
 <p align="center">
@@ -67,13 +78,13 @@
 
 - 主题是 TOML 增量覆盖（内置暖橙 / 夜行两套）；皮肤是 PNG 图层目录；`.zwskin`
   单文件皮肤包带严格校验，托盘里可导入导出。
-- 官方皮肤六套：代码绘制、折纸驺吾（一张纸折到底，只有纯色面与折痕）、折纸驺吾 2
+- 官方皮肤七套：代码绘制、水墨驺吾（淡墨洒出的圆头，额上一星七连）、折纸驺吾（一张纸折到底，只有纯色面与折痕）、折纸驺吾 2
   （一只坐着的折纸猫：尖耳朵、奶白口鼻、两只前爪、卷起来的尾巴）、大魔导
   （一个飘着的长袍法师：兜帽里两团发光的绿眼、从太阳穴向上外弯的角、宝石眉带、
   握着宝石法杖、身边浮着几片碎晶）、剑圣（一个戴面具的武士：象牙面具只留两道余烬橙的
   眼缝、双角从太阳穴往外挑、绯红外袍配金腰带、长刀斜劈过身前、身边浮着火星）、影魔
   （一只近黑的恶魔：骨色双角向上弯、胸口一道灵魂绿的裂缝、两道怒目的细眼缝，
-  肩上是破烂的膜翼与骨刺，身体两侧然着灵魂绿的火，胸腔有骨色肋骨，下半身收成三瓣往上飘的烟）。
+  肩上是破烂的膜翼与骨刺，身体两侧燃着灵魂绿的火，胸腔有骨色肋骨，下半身收成三瓣往上飘的烟）。
   右键小兽即可切换。
 - 中文 / 英文（Fluent），运行时切换无需重启；`language = "auto"` 跟随系统。
 - 界面字体也能**跟随 Windows 的界面字体**（设置 → 外观）。默认关着：英文系统上那个
