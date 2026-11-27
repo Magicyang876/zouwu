@@ -50,6 +50,7 @@ pub const ID_FONT_DIR: &str = "zouwu.font-dir";
 pub const ID_SYS_FONT: &str = "zouwu.sys-font";
 pub const ID_SCAN_QR: &str = "zouwu.scan-qr";
 pub const ID_CLIPBOARD: &str = "zouwu.clipboard";
+pub const ID_LAUNCHER: &str = "zouwu.launcher";
 
 /// 和 Windows 版同一个枚举（`zouwu-ui` 只认它，不看平台）。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,6 +65,8 @@ pub enum TrayCommand {
     SysFont,
     ScanQr,
     Clipboard,
+    /// 打开启动器窗（搜本机已安装的程序）。
+    Launcher,
     Recenter,
     SetAutostart(bool),
     SetLanguage(&'static str),
@@ -112,6 +115,7 @@ struct Texts {
     recenter: String,
     scan_qr: String,
     clipboard: String,
+    launcher: String,
     autostart: String,
     quit: String,
     language: String,
@@ -135,6 +139,7 @@ impl Texts {
             recenter: i18n.t("tray.recenter"),
             scan_qr: i18n.t("tray.scan-qr"),
             clipboard: i18n.t("tray.clipboard"),
+            launcher: i18n.t("tray.launcher"),
             autostart: i18n.t("tray.autostart"),
             quit: i18n.t("tray.quit"),
             language: i18n.t("tray.language"),
@@ -226,6 +231,7 @@ impl ksni::Tray for TrayState {
             standard(show_hide, tx, TrayCommand::Toggle),
             standard(&self.text.scan_qr, tx, TrayCommand::ScanQr),
             standard(&self.text.clipboard, tx, TrayCommand::Clipboard),
+            standard(&self.text.launcher, tx, TrayCommand::Launcher),
             standard(&self.text.recenter, tx, TrayCommand::Recenter),
             standard(&self.text.settings, tx, TrayCommand::Settings),
             MenuItem::Separator,

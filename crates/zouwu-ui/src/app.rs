@@ -464,6 +464,9 @@ impl App {
     }
 
     fn new(config: Config, theme: Theme, themes: Vec<Theme>, instance: InstanceSignal) -> Self {
+        // KDE 的“显示桌面”监听从启动就挂上：用户常常先按 Meta+D，我们得知道他在看壁纸。
+        #[cfg(target_os = "linux")]
+        zouwu_platform::layer::watch_showing_desktop();
         let ring = config.ring.to_ring_config();
         let skin = load_skin(&config.appearance.skin);
         // 历史容量来自配置；从磁盘读出来的条目要按它裁一遍，
@@ -1348,6 +1351,13 @@ impl App {
     }
 
     fn toggle_visible(&mut self, now: Instant) {
+        // KDE 的“显示桌面”（Meta+D）会把小兽一起藏掉，客户端收不到任何通知，
+        // 自己的 `visible` 还停在 `true`：不对一下就是“再藏一次”，热键看着像失灵。
+        #[cfg(target_os = "linux")]
+        if self.visible && zouwu_platform::layer::showing_desktop() {
+            zouwu_platform::layer::leave_showing_desktop();
+            self.visible = false;
+        }
         self.set_visible(!self.visible, now);
     }
 
@@ -2570,12 +2580,19 @@ impl App {
 
     /// 关掉启动器：Esc、回车启动、再按一次热键都走这里。
     ///
-    /// 窗口**不销毁**（只 `set_visible(false)`）：销毁一个 winit 窗口要走
+    /// Windows 上窗口**不销毁**（只 `set_visible(false)`）：销毁一个 winit 窗口要走
     /// USER32 的同步通知，在事件回调里做就是卡死（ADR-053）。`last_child_closed_at`
     /// 与 `buttons_down` 的刷新手不能省，否则选完程序鼠标还按着时小兽会一直以
     /// “指针已离开”的状态抖。
+    ///
+    /// Wayland 上 `set_visible(false)` 是**空实现**（winit："Not possible on
+    /// Wayland"），只藏不拆的话窗口永远待在屏幕上，Esc 一直发 `Close` 也没用。
+    /// 所以和设置面板同一条路：交给墓地销毁，下次呼出重建（见 `close_for_good`）。
     fn close_launcher(&mut self) {
         crate::watchdog::enter(crate::watchdog::stage::CLOSE_WINDOW);
+        #[cfg(not(target_os = "windows"))]
+        close_for_good(&mut self.retired, &mut self.launcher);
+        #[cfg(target_os = "windows")]
         if let Some(window) = self.launcher.as_mut() {
             window.close();
         }

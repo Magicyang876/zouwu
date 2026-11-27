@@ -137,7 +137,19 @@ mod kde {
     ///
     /// 这里曾经填的是 `2`：一个不存在的标志值，行为等同 autoloading。于是首次注册能上、
     /// 运行期改键永远不生效，日志还写着 `hotkey registered: …`（ADR-073）。
+    /// `KGlobalAccel::SetPresent`（KF6 `kglobalacceld.h`：`SetPresent = 0x2`）：
+    /// “这个动作有个活着的属主”。
+    ///
+    /// 缺了它，kglobalaccel 仍会把动作登记进表里（`shortcutNames` 看得到、
+    /// `getGlobalShortcutsByKey` 也查得到、`/component/<名字>.isActive` 是 `false`），
+    /// 但键按下时**一律不触发**——和 `setInactive` 之后的状态一模一样。表现就是
+    /// 热键安静地死了：日志里 `hotkey registered` 照写、配置也正确、界面无任何报错，
+    /// 只有 `invokeShortcut` 这种直接调用还能响。（ADR-076 之前只传 `NoAutoloading`。）
+    pub(super) const SET_PRESENT: u32 = 0x2;
     pub(super) const NO_AUTOLOADING: u32 = 0x4;
+
+    /// 改键时必须两个都带：`NoAutoloading` 才肯用新键，`SetPresent` 才肯在按键时触发。
+    pub(super) const SET_FLAGS: u32 = NO_AUTOLOADING | SET_PRESENT;
 
     // Qt 的键码：字母/数字与小写 ASCII 同值，功能键从 0x01000030 起。
     const QT_KEY_ENTER: i32 = 0x0100_0004;
@@ -208,6 +220,7 @@ mod kde {
         match slot {
             Slot::Summon => "summon".to_string(),
             Slot::RingItem(index) => format!("ring-{index}"),
+            Slot::Launcher => "launcher".to_string(),
         }
     }
 
@@ -215,6 +228,7 @@ mod kde {
         match slot {
             Slot::Summon => "Summon".to_string(),
             Slot::RingItem(index) => format!("Ring item {}", index + 1),
+            Slot::Launcher => "Launcher".to_string(),
         }
     }
 
@@ -341,7 +355,7 @@ mod kde {
                     PATH,
                     Some(IFACE),
                     "setShortcutKeys",
-                    &(id, keys, NO_AUTOLOADING),
+                    &(id, keys, SET_FLAGS),
                 )
                 .map_err(|err| format!("setShortcutKeys({}): {err}", action_name(slot)))?
                 .body()
@@ -447,12 +461,18 @@ mod tests {
         assert_eq!(kde::action_name(Slot::RingItem(2)), "ring-2");
     }
 
-    /// `NoAutoloading` 的取值来自 KF6 头文件，不是我们自己定的。KF6 里 `0x4` 才是
-    /// NoAutoloading，`0x2` 什么都不是；拿 `0x2` 去改键，kglobalaccel 会当作 autoloading
-    /// 丢掉新键（已在真机上对着 `org.kde.KGlobalAccel.setShortcutKeys` 逐个试过：
-    /// 0/2 返回旧键，4/8/10/12 返回新键）。
+    /// `SetPresent` / `NoAutoloading` 的取值来自 KF6 头文件，不是我们自己定的。
+    ///
+    /// - `0x4` = NoAutoloading：不带就是 autoloading，kglobalaccel 把新键当没看见、
+    ///   回你旧键（已在真机上对着 `org.kde.KGlobalAccel.setShortcutKeys` 逐个试过：
+    ///   0/2 返回旧键，4/6/8/10/12 返回新键）。
+    /// - `0x2` = SetPresent：不带就只登记不触发（`isActive` 回 `false`）。真机验过：
+    ///   同一颗键，flags 4 → `isActive=false`、真按下无反应；flags 6 → `isActive=true`、
+    ///   按下即在日志里出现 `hotkey: Summon pressed`。两个都必需，缺一不可。
     #[test]
-    fn no_autoloading_matches_kf6_header() {
+    fn shortcut_flags_match_kf6_header() {
         assert_eq!(kde::NO_AUTOLOADING, 0x4);
+        assert_eq!(kde::SET_PRESENT, 0x2);
+        assert_eq!(kde::SET_FLAGS, 0x6);
     }
 }

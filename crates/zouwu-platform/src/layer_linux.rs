@@ -1674,6 +1674,86 @@ pub fn is_visible(id: isize) -> bool {
     lookup(id).is_some_and(|s| s.visible.load(Ordering::Relaxed))
 }
 
+/// “显示桌面”（Meta+D）现在是不是开着。
+///
+/// 读 `showingDesktop` 属性在 KWin 6 上不准：peek 开着的时候属性仍然是 `false`，
+/// 只有 `showingDesktopChanged` 信号老实。所以自己订一次、自己记着。
+pub fn showing_desktop() -> bool {
+    watch_showing_desktop();
+    SHOWING_DESKTOP.load(Ordering::Relaxed)
+}
+
+/// 启动时先调一次，别等到第一次按热键才挂监听。
+pub fn watch_showing_desktop() {
+    static STARTED: OnceLock<()> = OnceLock::new();
+    STARTED.get_or_init(|| {
+        // 单独一条连接：监听和 `kwin()` 那条上的方法调用互不干扰。
+        std::thread::Builder::new()
+            .name("kwin-showing-desktop".into())
+            .spawn(|| {
+                let Ok(conn) = zbus::blocking::Connection::session() else {
+                    log::warn!("showing-desktop: no session bus");
+                    return;
+                };
+                let rule = zbus::MatchRule::try_from(
+                    "type='signal',interface='org.kde.KWin',member='showingDesktopChanged'",
+                );
+                let Ok(rule) = rule else {
+                    log::warn!("showing-desktop: bad match rule");
+                    return;
+                };
+                let Ok(mut matched) = zbus::blocking::MessageIterator::for_match_rule(
+                    rule,
+                    &conn,
+                    Some(8),
+                ) else {
+                    log::warn!("showing-desktop: match rule rejected");
+                    return;
+                };
+                log::info!("showing-desktop: watching");
+                for message in matched.next() {
+                    let Ok(message) = message else {
+                        break;
+                    };
+                    if let Ok(on) = message.body().deserialize::<bool>() {
+                        log::debug!("showing-desktop: {on}");
+                        SHOWING_DESKTOP.store(on, Ordering::Relaxed);
+                    }
+                }
+            })
+            .ok();
+    });
+}
+
+/// 退出“显示桌面”。热键呼出时调：用户要的是看见小兽，不是看见一张壁纸。
+///
+/// 退出后自己把标记放掉：KWin 的 peek 退出时**不发** `showingDesktopChanged` 信号
+/// （那个属性在 peek 期间一直是 false，信号只有进没有出），不放就会卡在“在看壁纸”，
+/// 之后每次热键都只会显示、不会收起。
+pub fn leave_showing_desktop() {
+    if let Some(conn) = kwin() {
+        let _ = conn.call_method(
+            Some("org.kde.KWin"),
+            "/KWin",
+            Some("org.kde.KWin"),
+            "showDesktop",
+            &(false,),
+        );
+    }
+    SHOWING_DESKTOP.store(false, Ordering::Relaxed);
+}
+
+/// 每次热键都新建一条 session bus 要几毫秒，留一条就够了。连不上（不是 KDE、没有
+/// session bus）就记成 `None`，不反复试。
+fn kwin() -> Option<&'static zbus::blocking::Connection> {
+    static CONN: OnceLock<Option<zbus::blocking::Connection>> = OnceLock::new();
+    CONN.get_or_init(|| zbus::blocking::Connection::session().ok())
+        .as_ref()
+}
+
+/// “显示桌面”正在开着（由 `showingDesktopChanged` 信号维护）。
+static SHOWING_DESKTOP: AtomicBool = AtomicBool::new(false);
+
 pub fn set_bounds(id: isize, x: i32, y: i32, width: i32, height: i32) {
     via_shared!(id, shared => {
         {
