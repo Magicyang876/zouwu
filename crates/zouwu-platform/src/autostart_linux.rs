@@ -63,7 +63,10 @@ pub fn command_path() -> Option<String> {
         };
         let exec = exec.trim();
         // 我们只写一个裸路径（必要时带引号），所以逆操作很简单。
-        let unquoted = exec.trim_matches('"').replace("\\\\", "\\").replace("\\\"", "\"");
+        let unquoted = exec
+            .trim_matches('"')
+            .replace("\\\\", "\\")
+            .replace("\\\"", "\"");
         return Some(unquoted);
     }
     None

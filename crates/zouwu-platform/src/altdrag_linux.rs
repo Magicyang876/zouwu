@@ -73,9 +73,9 @@ pub fn apply(enabled: bool) -> Result<(), String> {
                 log::debug!("alt drag: already applied, KWin has Alt");
                 return Ok(());
             }
-            Some(other) => log::warn!(
-                "alt drag: kwinrc says Alt but KWin still reports {other}; re-applying"
-            ),
+            Some(other) => {
+                log::warn!("alt drag: kwinrc says Alt but KWin still reports {other}; re-applying")
+            }
             // 问不到就当它好好的，别为了一个拿不准的判断反复改人家的配置。
             None => return Ok(()),
         }
@@ -265,7 +265,8 @@ fn restore() -> Result<(), String> {
     write(&path, &text)?;
     reconfigure()?;
     let _ = std::fs::remove_file(marker_path());
-    log::info!("alt drag: restored {KEY}={}", saved.key);    Ok(())
+    log::info!("alt drag: restored {KEY}={}", saved.key);
+    Ok(())
 }
 
 /// 有标记但当前值已经不是我们写的了（用户自己改过、或改完没生效）→ 清掉标记，
@@ -277,9 +278,7 @@ fn heal() {
     let text = read(&kwinrc()).unwrap_or_default();
     let current = get(&text, GROUP, KEY);
     if current.as_deref() != Some(WANT_KEY) {
-        log::info!(
-            "alt drag: stale marker (current {KEY}={current:?}), dropping it"
-        );
+        log::info!("alt drag: stale marker (current {KEY}={current:?}), dropping it");
         let _ = std::fs::remove_file(marker_path());
     } else {
         // 仍然是我们设的值：说明上次没走到还原，保持标记，等 apply(false) 处理。
@@ -431,7 +430,10 @@ fn prune_empty_group(text: &str, group: &str) -> String {
     let Some((start, end)) = split_group(&lines, group) else {
         return text.to_string();
     };
-    if lines[start + 1..end].iter().any(|line| !line.trim().is_empty()) {
+    if lines[start + 1..end]
+        .iter()
+        .any(|line| !line.trim().is_empty())
+    {
         return text.to_string();
     }
     lines.drain(start..end);
@@ -489,7 +491,10 @@ mod tests {
 
     #[test]
     fn reads_existing_key() {
-        assert_eq!(get(SAMPLE, "MouseBindings", "CommandAllKey").as_deref(), Some("Meta"));
+        assert_eq!(
+            get(SAMPLE, "MouseBindings", "CommandAllKey").as_deref(),
+            Some("Meta")
+        );
         assert_eq!(get(SAMPLE, "MouseBindings", "Nope"), None);
         assert_eq!(get(SAMPLE, "Missing", "CommandAllKey"), None);
     }
@@ -503,7 +508,10 @@ mod tests {
         assert!(out.contains("[General]\nfoo=1"));
         assert!(out.contains("[Plugins]\nbar=2"));
         // 幂等。
-        assert_eq!(update(&out, "MouseBindings", "CommandAllKey", Some("Alt")), out);
+        assert_eq!(
+            update(&out, "MouseBindings", "CommandAllKey", Some("Alt")),
+            out
+        );
     }
 
     #[test]
@@ -515,7 +523,12 @@ mod tests {
 
     #[test]
     fn creates_group_when_missing() {
-        let out = update("[General]\nfoo=1\n", "MouseBindings", "CommandAllKey", Some("Alt"));
+        let out = update(
+            "[General]\nfoo=1\n",
+            "MouseBindings",
+            "CommandAllKey",
+            Some("Alt"),
+        );
         assert!(out.contains("[MouseBindings]\nCommandAllKey=Alt"));
         assert!(out.starts_with("[General]\nfoo=1"));
     }
@@ -543,9 +556,15 @@ mod tests {
                       keyCmdAllModKey: 16777251\ndoubleClickBorderToMaximize: true\n";
         assert_eq!(super::parse_mod_key(report), Some(0x0100_0023));
         // 没有这一行（老版本 KWin）不能报错，只是查不到。
-        assert_eq!(super::parse_mod_key("commandAll1: MouseUnrestrictedMove\n"), None);
+        assert_eq!(
+            super::parse_mod_key("commandAll1: MouseUnrestrictedMove\n"),
+            None
+        );
         // Meta 是 KDE 的默认值，和 Alt 必须区分开。
-        assert_ne!(super::parse_mod_key("keyCmdAllModKey: 16777250\n"), Some(0x0100_0023));
+        assert_ne!(
+            super::parse_mod_key("keyCmdAllModKey: 16777250\n"),
+            Some(0x0100_0023)
+        );
     }
 
     /// 开 → 关必须回到原文：四个键都是同一段里原地改 / 新增 / 删行。

@@ -127,8 +127,8 @@ struct Handle {
 impl Handle {
     fn spawn(tint: [u8; 4]) -> Result<Self, String> {
         let conn = Connection::connect_to_env().map_err(|e| format!("wayland connect: {e}"))?;
-        let (globals, mut queue) = registry_queue_init::<Overlay>(&conn)
-            .map_err(|e| format!("wayland registry: {e}"))?;
+        let (globals, mut queue) =
+            registry_queue_init::<Overlay>(&conn).map_err(|e| format!("wayland registry: {e}"))?;
         let qh = queue.handle();
         let desired = Arc::new(Mutex::new(None::<[u8; 4]>));
         let quit = Arc::new(AtomicBool::new(false));
@@ -316,15 +316,15 @@ impl Overlay {
         let Some(pool) = pane.pool.as_mut() else {
             return;
         };
-        let (buffer, canvas) = match pool.create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888)
-        {
-            Ok(pair) => pair,
-            Err(err) => {
-                // 槽位还在合成器手里：这一帧先丢，下一帧再试。
-                log::debug!("eye care: buffer busy ({err})");
-                return;
-            }
-        };
+        let (buffer, canvas) =
+            match pool.create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888) {
+                Ok(pair) => pair,
+                Err(err) => {
+                    // 槽位还在合成器手里：这一帧先丢，下一帧再试。
+                    log::debug!("eye care: buffer busy ({err})");
+                    return;
+                }
+            };
         // 预乘 RGBA → 小端 ARGB8888（内存字节序 B,G,R,A）。
         for px in canvas.chunks_exact_mut(4) {
             px[0] = tint[2];
@@ -343,7 +343,10 @@ impl Overlay {
         }
         pane.surface.damage_buffer(0, 0, w as i32, h as i32);
         pane.layer.commit();
-        log::debug!("eye care: painted pane {index} {w}x{h}px (alpha {})", tint[3]);
+        log::debug!(
+            "eye care: painted pane {index} {w}x{h}px (alpha {})",
+            tint[3]
+        );
     }
 
     fn run(&mut self, queue: &mut wayland_client::EventQueue<Self>, qh: &QueueHandle<Self>) {
@@ -385,7 +388,12 @@ impl OutputHandler for Overlay {
         self.paint_all(qh);
     }
 
-    fn update_output(&mut self, _: &Connection, qh: &QueueHandle<Self>, output: wl_output::WlOutput) {
+    fn update_output(
+        &mut self,
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+        output: wl_output::WlOutput,
+    ) {
         if let Some(index) = self.panes.iter().position(|pane| pane.output == output) {
             let scale = self
                 .output_state
@@ -400,7 +408,12 @@ impl OutputHandler for Overlay {
         }
     }
 
-    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, output: wl_output::WlOutput) {
+    fn output_destroyed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        output: wl_output::WlOutput,
+    ) {
         self.panes.retain(|pane| pane.output != output);
     }
 }
@@ -429,7 +442,10 @@ impl LayerShellHandler for Overlay {
             return;
         };
         self.panes[index].size = configure.new_size;
-        log::debug!("eye care: configure pane {index} -> {:?}", configure.new_size);
+        log::debug!(
+            "eye care: configure pane {index} -> {:?}",
+            configure.new_size
+        );
         self.paint(qh, index);
     }
 }
@@ -483,14 +499,7 @@ impl CompositorHandler for Overlay {
     ) {
     }
 
-    fn frame(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface,
-        _: u32,
-    ) {
-    }
+    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {}
 
     fn surface_enter(
         &mut self,

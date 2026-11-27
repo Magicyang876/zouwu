@@ -77,7 +77,7 @@ that only write a log line, that was a deliberate cull.
 - **Eye care** — an amber overlay across the whole virtual desktop; click-through, never
   steals focus, re-raised whenever a new top-most window appears.
 - **Alt-drag windows** — hold `Alt` and drag any window; `Alt`+double-click toggles maximize;
-  `Alt`+wheel up/down maximizes/minimizes. Can be switched off.
+  `Alt`+wheel up maximizes, down restores. Can be switched off.
 - **Change the OS font** — tray → *System font…* rewrites Windows' own menu, message-box,
   status-bar and desktop-icon fonts (title bars are deliberately left alone), with an optional
   admin-only global substitution for apps that hard-code `Segoe UI`. It snapshots before every

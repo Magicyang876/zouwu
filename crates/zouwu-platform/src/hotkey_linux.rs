@@ -285,14 +285,17 @@ mod kde {
             std::thread::Builder::new()
                 .name("zouwu-hotkeys".into())
                 .spawn(move || {
-                    let mut iter =
-                        match zbus::blocking::MessageIterator::for_match_rule(rule, &conn, Some(64)) {
-                            Ok(iter) => iter,
-                            Err(err) => {
-                                log::error!("hotkeys: cannot watch kglobalaccel signals: {err}");
-                                return;
-                            }
-                        };
+                    let mut iter = match zbus::blocking::MessageIterator::for_match_rule(
+                        rule,
+                        &conn,
+                        Some(64),
+                    ) {
+                        Ok(iter) => iter,
+                        Err(err) => {
+                            log::error!("hotkeys: cannot watch kglobalaccel signals: {err}");
+                            return;
+                        }
+                    };
                     for msg in iter.by_ref() {
                         let Ok(msg) = msg else {
                             break;
@@ -321,7 +324,13 @@ mod kde {
             let id = action_id(slot);
             // 1) 先登记这个动作。重复登记是幂等的（KDE 会直接忽略）。
             self.conn
-                .call_method(Some(SERVICE), PATH, Some(IFACE), "doRegister", &(id.clone(),))
+                .call_method(
+                    Some(SERVICE),
+                    PATH,
+                    Some(IFACE),
+                    "doRegister",
+                    &(id.clone(),),
+                )
                 .map_err(|err| format!("doRegister({}): {err}", action_name(slot)))?;
             // 2) 再把键绑上去。返回值是**实际生效**的键：被别的程序占用时是空表。
             let keys: Vec<(Vec<i32>,)> = vec![(vec![qt_sequence(spec)],)];
@@ -370,9 +379,9 @@ mod kde {
             self.reverse.remove(&action);
             // 直接注销动作：`kglobalshortcutsrc` 里不会留下 `none,none` 这种垃圾行。
             let id = action_id(slot);
-            if let Err(err) = self
-                .conn
-                .call_method(Some(SERVICE), PATH, Some(IFACE), "unRegister", &(id,))
+            if let Err(err) =
+                self.conn
+                    .call_method(Some(SERVICE), PATH, Some(IFACE), "unRegister", &(id,))
             {
                 log::warn!("hotkeys: unRegister({action}): {err}");
             }

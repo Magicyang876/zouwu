@@ -3,11 +3,11 @@
 //! v1 只实现 Windows（见 ADR-001），但所有平台相关逻辑
 //! 都必须待在本 crate 里，UI 与领域层通过这里的函数/ trait 使用。
 
-pub mod assets;
 /// 把面板窗口抬到最前（仅 KDE）：Wayland 没有 raise 接口，靠 KWin 脚本代劳。
 #[cfg(target_os = "linux")]
 #[path = "activate_linux.rs"]
 pub mod activate;
+pub mod assets;
 #[cfg(target_os = "windows")]
 pub mod autostart;
 /// 开机自启：Windows 写 `HKCU\...\Run`，Linux 写 XDG autostart 的 `.desktop`。
@@ -35,6 +35,9 @@ pub mod fontpack;
 /// `XGrabKey` 当全局快捷键处理）。
 #[cfg(not(target_os = "linux"))]
 pub mod hotkey;
+#[cfg(target_os = "linux")]
+#[path = "hotkey_linux.rs"]
+pub mod hotkey;
 /// Linux 的全局热键：走 KDE 的 `kglobalaccel`（Wayland 下唯一不打扰用户的路径）。
 ///
 /// 纯 X11 会话或非 KDE 桌面上仍然需要 `XGrabKey`，所以旧的实现留着当后端，
@@ -42,9 +45,6 @@ pub mod hotkey;
 #[cfg(target_os = "linux")]
 #[path = "hotkey.rs"]
 pub(crate) mod hotkey_x11;
-#[cfg(target_os = "linux")]
-#[path = "hotkey_linux.rs"]
-pub mod hotkey;
 
 #[cfg(target_os = "windows")]
 pub mod install;
@@ -61,12 +61,12 @@ pub mod layer;
 pub mod logging;
 #[cfg(target_os = "windows")]
 pub(crate) mod reg;
-#[cfg(target_os = "windows")]
-pub mod single_instance;
 /// 终止信号：让 `SIGTERM` 也走正常退出（退出时要还原 KDE 的拖动修饰键等）。
 #[cfg(target_os = "linux")]
 #[path = "signal_linux.rs"]
 pub mod signal;
+#[cfg(target_os = "windows")]
+pub mod single_instance;
 /// 单实例：Windows 用命名内核事件，Linux 用 flock + unix socket。
 #[cfg(not(target_os = "windows"))]
 #[path = "single_instance_linux.rs"]
@@ -91,7 +91,7 @@ pub mod tray;
 #[path = "tray_linux.rs"]
 pub mod tray;
 
-/// Alt 拖动窗口（AltSnap 的最小集：拖动 / 双击最大化 / 滚轮最大最小化）。
+/// Alt 拖动窗口（AltSnap 的最小集：拖动 / 双击最大化 / 滚轮最大化与还原）。
 #[cfg(target_os = "windows")]
 pub mod altdrag;
 /// Linux：不自己实现钩子，改为把 KWin 的"按住 Alt 拖动"打开（见模块文档）。

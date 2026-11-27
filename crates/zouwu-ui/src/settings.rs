@@ -1466,9 +1466,12 @@ fn ring_item_row(model: &Model, index: usize) -> Row {
         //
         // 例外：热键串写错时这一行必须长长一点——球的热键注册失败是**静默跳过**
         // 的，不把原因写在这里，用户只能看到一个红了但不知道为什么的框。
-        hint: problem
-            .as_ref()
-            .map(|err| i18n.t_args("settings.hotkey.item-invalid", &[("reason", &hotkey_reason(i18n, err))])),
+        hint: problem.as_ref().map(|err| {
+            i18n.t_args(
+                "settings.hotkey.item-invalid",
+                &[("reason", &hotkey_reason(i18n, err))],
+            )
+        }),
         control: Control::RingItem {
             index,
             name: item.id.clone(),
@@ -3984,11 +3987,7 @@ mod tests {
         let first = rows.next().expect("first ring item row");
         assert_eq!(first.0, 0);
         assert!(first.1, "写错的球热键要标红");
-        assert!(first
-            .2
-            .as_deref()
-            .unwrap_or_default()
-            .contains("Ctrl+Alt"));
+        assert!(first.2.as_deref().unwrap_or_default().contains("Ctrl+Alt"));
         // 另一颗球没写错，不能被连带染红。
         let second = rows.next().expect("second ring item row");
         assert_eq!(second.0, 1);

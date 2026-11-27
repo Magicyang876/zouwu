@@ -184,7 +184,7 @@ settings-eye-care-strength-hint = 越大越暖；开到最大约 55% 的暖色�
 # ── 窗口拖动（AltSnap 那一套） ─────────────────
 settings-section-alt-drag = 窗口拖动
 settings-alt-drag = 按住 Alt 拖动窗口
-settings-alt-drag-hint = 按住 Alt 拖左键可移动光标下的窗口；双击最大化（再双击还原）；滚轮上滚最大化、下滚最小化
+settings-alt-drag-hint = 按住 Alt 拖左键可移动光标下的窗口；双击最大化（再双击还原）；滚轮上滚最大化、下滚还原
 settings-alt-drag-hint-linux = 按住 Alt 拖左键移动光标下的窗口；Alt+滚轮上滚最大化、下滚还原；Alt+中键最小化（由 KWin 代劳，退出时自动还原本来的鼠标绑定；带 Alt 的双击在 Wayland 下无法拦截，双击标题栏可最大化）
 
 # ── 剪贴板历史 ────────────────────────────────────────────

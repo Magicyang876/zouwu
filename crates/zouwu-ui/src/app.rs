@@ -21,10 +21,10 @@ use winit::window::WindowId;
 //
 // 面板窗口（设置/历史/报告/系统字体/形象菜单）仍然是真的 winit 窗口：
 // 它们要键盘焦点、要系统标题栏，winit 完全够用。
-#[cfg(target_os = "windows")]
-use winit::window::{Window, WindowLevel};
 #[cfg(not(target_os = "windows"))]
 use crate::host::PetWindow as Window;
+#[cfg(target_os = "windows")]
+use winit::window::{Window, WindowLevel};
 
 #[cfg(target_os = "windows")]
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -219,10 +219,7 @@ fn raise_panels() {
 /// 交给墓地而不是就地析构：`Window` 可能在它自己的事件派发里被丢掉，见
 /// `App::retired` 的注释。
 #[cfg(not(target_os = "windows"))]
-fn close_for_good<T: 'static>(
-    graveyard: &mut Vec<Box<dyn std::any::Any>>,
-    slot: &mut Option<T>,
-) {
+fn close_for_good<T: 'static>(graveyard: &mut Vec<Box<dyn std::any::Any>>, slot: &mut Option<T>) {
     if let Some(panel) = slot.take() {
         graveyard.push(Box::new(panel));
     }
@@ -384,14 +381,11 @@ struct App {
     scan_env_done: bool,
     /// `ZOUWU_HISTORY=1` 启动即开一次剪贴板历史窗（只一次）。
     history_env_done: bool,
-<<<<<<< HEAD
     /// `ZOUWU_LAUNCHER=1` 启动即开一次启动器（只一次）。
     launcher_env_done: bool,
-=======
     /// `ZOUWU_SKIN_MENU=1` 启动即在宠物中心开一次形象菜单（只一次）。
     /// 右键没法脚本化，而"菜单摆在哪"只能靠眼睛验。
     skin_menu_env_done: bool,
->>>>>>> ad7ab556b386e8a8456b6eb581b748d3a0b48b3b
     /// `ZOUWU_SYSFONT=1` 只触发一次，理由同 `settings_env_done`。
     sysfont_env_done: bool,
     /// 待销毁的子窗口。
@@ -554,11 +548,8 @@ impl App {
             settings_env_done: false,
             scan_env_done: false,
             history_env_done: false,
-<<<<<<< HEAD
             launcher_env_done: false,
-=======
             skin_menu_env_done: false,
->>>>>>> ad7ab556b386e8a8456b6eb581b748d3a0b48b3b
             sysfont_env_done: false,
             retired: Vec::new(),
             cycle_left: std::env::var("ZOUWU_CYCLE")
@@ -1670,8 +1661,7 @@ impl App {
                 let window = std::sync::Arc::new(crate::host::PetWindow::new(surface.clone()));
                 self.presenter = Some(Box::new(crate::presenter::LayerPresenter::new(surface)));
                 if let Some((x, y)) = pos {
-                    window
-                        .set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+                    window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
                 }
                 self.window = Some(window);
                 self.respawn_at = None;
@@ -2073,9 +2063,7 @@ impl App {
             let _ = event_loop;
             return zouwu_platform::layer::monitors()
                 .into_iter()
-                .map(|(x, y, w, h, _scale)| {
-                    Rect::new(x as f32, y as f32, w as f32, h as f32)
-                })
+                .map(|(x, y, w, h, _scale)| Rect::new(x as f32, y as f32, w as f32, h as f32))
                 .collect();
         }
         #[cfg(target_os = "windows")]
@@ -2334,10 +2322,8 @@ impl App {
             match event {
                 zouwu_platform::layer::PetInput::Motion { x, y } => {
                     let origin = window.outer_position().unwrap_or_default();
-                    let p = Point::new(
-                        (x - origin.x) as f32 / scale,
-                        (y - origin.y) as f32 / scale,
-                    );
+                    let p =
+                        Point::new((x - origin.x) as f32 / scale, (y - origin.y) as f32 / scale);
                     self.on_cursor_moved(p, now);
                     changed = true;
                     // 拖动：表面跟着走，指针就一直在本体上，这是 Wayland 唯一的拖动办法。
@@ -2365,10 +2351,7 @@ impl App {
                         zouwu_platform::layer::PointerButton::Middle => MouseButton::Middle,
                         zouwu_platform::layer::PointerButton::Other => continue,
                     };
-                    self.buttons_down = (
-                        button == MouseButton::Left,
-                        button == MouseButton::Right,
-                    );
+                    self.buttons_down = (button == MouseButton::Left, button == MouseButton::Right);
                     self.click(button, now);
                     changed = true;
                 }
@@ -3061,7 +3044,8 @@ impl App {
         }
     }
 
-    fn render_frame(&mut self, now: Instant) -> Result<(), String> {        crate::watchdog::enter(crate::watchdog::stage::RENDER);
+    fn render_frame(&mut self, now: Instant) -> Result<(), String> {
+        crate::watchdog::enter(crate::watchdog::stage::RENDER);
         let Some(win) = self.window_arc() else {
             return Ok(());
         };
@@ -3688,7 +3672,6 @@ impl ApplicationHandler<UserEvent> for App {
             self.sysfont_env_done = true;
             self.pending_sysfont = true;
         }
-<<<<<<< HEAD
         // 同上：全局热键没法脚本化。
         if !self.launcher_env_done
             && std::env::var_os("ZOUWU_LAUNCHER").is_some_and(|v| !v.is_empty())
@@ -3698,7 +3681,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         if std::mem::take(&mut self.pending_launcher) {
             self.open_launcher(event_loop);
-=======
+        }
         // `ZOUWU_SKIN_MENU=1`：右键没法脚本化，就在宠物中心开一次。
         if !self.skin_menu_env_done
             && std::env::var_os("ZOUWU_SKIN_MENU").is_some_and(|v| !v.is_empty())
@@ -3716,7 +3699,6 @@ impl ApplicationHandler<UserEvent> for App {
                     ),
                 );
             }
->>>>>>> ad7ab556b386e8a8456b6eb581b748d3a0b48b3b
         }
         if std::mem::take(&mut self.pending_settings) {
             self.open_settings(event_loop, now);
@@ -3760,8 +3742,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // 兜底定时器能把最坏情况钳在一帧，不会空转转满一个核。
                 // 间隔按当前动画档位取（不是写死的 16ms）：环境动画是 20fps，
                 // 写 16ms 会让空闲时白醒两次。
-                event_loop
-                    .set_control_flow(ControlFlow::WaitUntil(now + self.frame_interval(now)));
+                event_loop.set_control_flow(ControlFlow::WaitUntil(now + self.frame_interval(now)));
             }
             Some(t) => event_loop.set_control_flow(ControlFlow::WaitUntil(t)),
             None => event_loop.set_control_flow(ControlFlow::Wait),

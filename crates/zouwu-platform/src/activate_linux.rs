@@ -132,13 +132,8 @@ pub fn raise_panels() {
         return;
     };
     let path = format!("{SCRIPTING_PATH}/Script{id}");
-    if let Err(err) = conn.call_method(
-        Some(SERVICE),
-        path.as_str(),
-        Some(SCRIPT_IFACE),
-        "run",
-        &(),
-    ) {
+    if let Err(err) = conn.call_method(Some(SERVICE), path.as_str(), Some(SCRIPT_IFACE), "run", &())
+    {
         log::debug!("activate: run failed: {err}");
     }
 }

@@ -43,7 +43,10 @@ pub fn install(wake: Arc<dyn Fn() + Send + Sync>) {
     let mut fds = [0 as libc::c_int; 2];
     // 阻塞写端（默认）没问题：一个字节而已；读端非阻塞方便线程退出。
     if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-        log::warn!("signal: cannot create self-pipe: {}", std::io::Error::last_os_error());
+        log::warn!(
+            "signal: cannot create self-pipe: {}",
+            std::io::Error::last_os_error()
+        );
         return;
     }
     let (read_fd, write_fd) = (fds[0], fds[1]);
@@ -64,9 +67,7 @@ pub fn install(wake: Arc<dyn Fn() + Send + Sync>) {
             let file = unsafe { std::fs::File::from_raw_fd(read_fd) };
             let mut buf = [0u8; 8];
             loop {
-                let n = unsafe {
-                    libc::read(file.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len())
-                };
+                let n = unsafe { libc::read(file.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
                 if n < 0 {
                     let err = std::io::Error::last_os_error();
                     if err.kind() == std::io::ErrorKind::Interrupted {

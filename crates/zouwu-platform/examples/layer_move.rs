@@ -3,15 +3,29 @@
 //!
 //! 跑法：`cargo run -p zouwu-platform --example layer_move`
 //! 观察日志里有没有 `Protocol error`、`pos` 是否跟着走。
+//!
+//! 只在 Linux 上有意义（`PetSurface` 是 layer-shell 的东西），别的平台上是个空壳——
+//! 示例编不过不该挡住 Windows 上的 `cargo test`。
 
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 fn main() -> Result<(), String> {
     let size = 340u32;
-    let surface = Arc::new(zouwu_platform::layer::PetSurface::create(size, size, (40, 40))?);
+    let surface = Arc::new(zouwu_platform::layer::PetSurface::create(
+        size,
+        size,
+        (40, 40),
+    )?);
     surface.set_waker(Arc::new(|| {}));
-    println!("surface {} created, scale {}", surface.id(), surface.scale());
+    println!(
+        "surface {} created, scale {}",
+        surface.id(),
+        surface.scale()
+    );
 
     // `monitors()` 读的是活着的表面记下的输出表，得等表面建好之后才有值。
     std::thread::sleep(Duration::from_millis(500));
@@ -52,7 +66,12 @@ fn main() -> Result<(), String> {
     let path: Vec<(i32, i32)> = {
         let (_, _, w0, h0) = logical[0];
         // 关键三段：屏内 → **骑在缝上**（位置允许越界，靠翻锚点表达）→ 落在第二块屏。
-        let mut out = vec![(40, 40), (w0 - 400, h0 / 2), (w0 - 170, h0 / 2), (w0 - 907, h0 / 2)];
+        let mut out = vec![
+            (40, 40),
+            (w0 - 400, h0 / 2),
+            (w0 - 170, h0 / 2),
+            (w0 - 907, h0 / 2),
+        ];
         if logical.len() > 1 {
             let (x1, _, w1, h1) = logical[1];
             out.push((x1 + 40, h1 / 2));
@@ -125,6 +144,14 @@ fn main() -> Result<(), String> {
     if err {
         return Err("surface was closed during the walk (compositor killed it)".into());
     }
-    println!("ok: walked across {} output(s) without the surface dying", logical.len());
+    println!(
+        "ok: walked across {} output(s) without the surface dying",
+        logical.len()
+    );
     Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("layer_move: 只有 Linux（layer-shell）上才有意义");
 }

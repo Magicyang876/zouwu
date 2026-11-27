@@ -73,7 +73,10 @@ impl SingleInstance {
         let rc = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
         if rc != 0 {
             // 锁被占 = 已有实例。不写 pid，也不用清理什么。
-            log::debug!("single-instance: {} is held by another process", path.display());
+            log::debug!(
+                "single-instance: {} is held by another process",
+                path.display()
+            );
             return Ok(None);
         }
         log::debug!("single-instance guard acquired: {}", path.display());

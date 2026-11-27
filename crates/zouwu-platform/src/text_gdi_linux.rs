@@ -115,7 +115,10 @@ impl Engine {
         let text = String::from_utf8_lossy(&out.stdout);
         let mut parts = text.split('\u{1}');
         let path = parts.next()?.trim();
-        let index: isize = parts.next().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+        let index: isize = parts
+            .next()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
         if path.is_empty() {
             return None;
         }
@@ -466,7 +469,10 @@ pub fn draw(
             let Some(face) = engine.prepare(&target, px) else {
                 continue;
             };
-            if face.load_char(ch as usize, LoadFlag::RENDER | LoadFlag::TARGET_NORMAL).is_err() {
+            if face
+                .load_char(ch as usize, LoadFlag::RENDER | LoadFlag::TARGET_NORMAL)
+                .is_err()
+            {
                 continue;
             }
             let slot = face.glyph();
@@ -480,7 +486,9 @@ pub fn draw(
             if mode == Some(PixelMode::Gray) {
                 let dst_x0 = pen.round() as i32 + left;
                 let dst_y0 = baseline as i32 - top;
-                blend(&mut out, pm_width, pm_height, dst_x0, dst_y0, &bitmap, color, clip);
+                blend(
+                    &mut out, pm_width, pm_height, dst_x0, dst_y0, &bitmap, color, clip,
+                );
                 if synthetic_bold {
                     blend(
                         &mut out,
@@ -535,7 +543,8 @@ fn ini_value(path: &Path, section: Option<&str>, key: &str) -> Option<String> {
     for line in text.lines() {
         let line = line.trim();
         if line.starts_with('[') && line.ends_with(']') {
-            in_section = section.is_some_and(|want| line[1..line.len() - 1].eq_ignore_ascii_case(want));
+            in_section =
+                section.is_some_and(|want| line[1..line.len() - 1].eq_ignore_ascii_case(want));
             continue;
         }
         if !in_section {

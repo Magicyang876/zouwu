@@ -4,7 +4,7 @@
 //!
 //! * 按住 `Alt` + 左键拖动 = 移动光标下的窗口；
 //! * 按住 `Alt` + 双击 = 最大化 / 还原；
-//! * 按住 `Alt` + 滚轮上 = 最大化，滚轮下 = 最小化。
+//! * 按住 `Alt` + 滚轮上 = 最大化，滚轮下 = 还原（不是最小化，见 ADR-075）。
 //!
 //! ## 为什么自己挪窗口，而不是让系统进入它的移动循环
 //!
@@ -125,7 +125,6 @@ const SM_CXDRAG: i32 = 68;
 const SM_CYDRAG: i32 = 69;
 
 const SW_MAXIMIZE: i32 = 3;
-const SW_MINIMIZE: i32 = 6;
 const SW_RESTORE: i32 = 9;
 
 const SWP_NOSIZE: u32 = 0x0001;
@@ -149,7 +148,7 @@ fn accept_injected() -> bool {
 }
 
 /// 滚轮防抖：精密触控板一次手势会连发十几个小 delta，
-/// 不防抖就是"最大化-最小化"花式抖动。
+/// 不防抖就是"最大化-还原"花式抖动。
 const WHEEL_DEBOUNCE: Duration = Duration::from_millis(120);
 
 /// 调试用事件跟踪：`ZOUWU_ALTDRAG_TRACE=<文件路径>` 时把每次钩子事件追加进去。
@@ -312,14 +311,16 @@ impl Tracker {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Wheel {
     Maximize,
-    Minimize,
+    /// 还原到普通窗口。**不是**最小化：滚轮是改大小的手势，最小化是让人看不见的手势，
+    /// 手心一滑就能把窗口甩飞（ADR-075）。
+    Restore,
 }
 
 /// `WHEEL_DELTA` 是 120；正数向上（远离用户）。
 pub fn wheel_action(delta: i16) -> Option<Wheel> {
     match delta {
         d if d > 0 => Some(Wheel::Maximize),
-        d if d < 0 => Some(Wheel::Minimize),
+        d if d < 0 => Some(Wheel::Restore),
         _ => None,
     }
 }
@@ -486,8 +487,8 @@ fn resize_action(hwnd: Hwnd, what: Wheel) {
             Wheel::Maximize => {
                 ShowWindow(hwnd, SW_MAXIMIZE);
             }
-            Wheel::Minimize => {
-                ShowWindow(hwnd, SW_MINIMIZE);
+            Wheel::Restore => {
+                ShowWindow(hwnd, SW_RESTORE);
             }
         }
     }
@@ -1043,7 +1044,7 @@ mod tests {
 
     #[test]
     #[ignore = "需要交互式 Windows 桌面（要建真窗口）"]
-    fn wheel_up_maximizes_and_wheel_down_minimizes_the_target() {
+    fn wheel_up_maximizes_and_wheel_down_restores_the_target() {
         let hwnd = test_window(400, 300);
         let env = env_for(hwnd, true);
         let now = Instant::now();
@@ -1065,7 +1066,8 @@ mod tests {
             now,
             &env
         ));
-        assert_ne!(unsafe { IsIconic(hwnd) }, 0, "Alt+滚轮下要最小化");
+        assert_eq!(unsafe { IsIconic(hwnd) }, 0, "Alt+滚轮下不能最小化");
+        assert_eq!(unsafe { IsZoomed(hwnd) }, 0, "Alt+滚轮下要还原成普通窗口");
         unsafe { DestroyWindow(hwnd) };
     }
 
@@ -1247,10 +1249,10 @@ mod tests {
     }
 
     #[test]
-    fn wheel_direction_maps_to_maximize_and_minimize() {
+    fn wheel_direction_maps_to_maximize_and_restore() {
         assert_eq!(wheel_action(120), Some(Wheel::Maximize));
         assert_eq!(wheel_action(360), Some(Wheel::Maximize));
-        assert_eq!(wheel_action(-120), Some(Wheel::Minimize));
+        assert_eq!(wheel_action(-120), Some(Wheel::Restore));
         assert_eq!(wheel_action(0), None);
     }
 

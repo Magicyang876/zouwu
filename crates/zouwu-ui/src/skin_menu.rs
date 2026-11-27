@@ -421,8 +421,7 @@ fn place_wayland(size: (f32, f32), at: (i32, i32), pad: f32) -> (i32, i32) {
             (mw as f64 / s).round() as i32,
             (mh as f64 / s).round() as i32,
         );
-        if logical_at.is_none() && at.0 >= mx && at.1 >= my && at.0 < mx + mw && at.1 < my + mh
-        {
+        if logical_at.is_none() && at.0 >= mx && at.1 >= my && at.0 < mx + mw && at.1 < my + mh {
             logical_at = Some((
                 (at.0 as f64 / s).round() as i32,
                 (at.1 as f64 / s).round() as i32,

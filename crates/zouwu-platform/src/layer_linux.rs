@@ -111,7 +111,6 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// 掉出去——掉出去就再也点不到了。
 const KEEP_ON_SCREEN: i32 = 56;
 
-
 /// UI 线程和 Wayland 线程共享的那点状态。
 struct Shared {
     id: isize,
@@ -229,8 +228,8 @@ impl PetSurface {
     /// 同步等待第一次 configure：返回时尺寸/缩放已经确定，UI 侧可以立刻分配画布。
     pub fn create(width: u32, height: u32, pos: (i32, i32)) -> Result<Self, String> {
         let conn = Connection::connect_to_env().map_err(|e| format!("wayland connect: {e}"))?;
-        let (globals, mut event_queue) = registry_queue_init::<Widget>(&conn)
-            .map_err(|e| format!("wayland registry: {e}"))?;
+        let (globals, mut event_queue) =
+            registry_queue_init::<Widget>(&conn).map_err(|e| format!("wayland registry: {e}"))?;
         let qh = event_queue.handle();
 
         let shared = Arc::new(Shared {
@@ -499,8 +498,8 @@ impl Widget {
         qh: &QueueHandle<Self>,
         shared: Arc<Shared>,
     ) -> Result<Self, String> {
-        let compositor = CompositorState::bind(globals, qh)
-            .map_err(|e| format!("wl_compositor: {e}"))?;
+        let compositor =
+            CompositorState::bind(globals, qh).map_err(|e| format!("wl_compositor: {e}"))?;
         let layer_shell = LayerShell::bind(globals, qh)
             .map_err(|e| format!("zwlr_layer_shell_v1 (需要 wlroots/KWin 的 layer-shell): {e}"))?;
         let shm = Shm::bind(globals, qh).map_err(|e| format!("wl_shm: {e}"))?;
@@ -510,8 +509,11 @@ impl Widget {
             .ok();
         let viewporter = globals.bind::<WpViewporter, _, _>(qh, 1..=1, ()).ok();
         if fractional_mgr.is_none() || viewporter.is_none() {
-            log::debug!("wayland: no fractional scale (mgr={}, vp={}), using integer buffer scale",
-                fractional_mgr.is_some(), viewporter.is_some());
+            log::debug!(
+                "wayland: no fractional scale (mgr={}, vp={}), using integer buffer scale",
+                fractional_mgr.is_some(),
+                viewporter.is_some()
+            );
         }
         Ok(Self {
             registry_state: RegistryState::new(globals),
@@ -599,7 +601,10 @@ impl Widget {
     /// 而位置只能夹进这块屏。若按“窗口左上角所在屏”选，只要左上角还在旧屏上，
     /// 位置就会被夹在旧屏右边、永远过不去（两块屏之间有 340px 的死区，拖到那里
     /// 就“卡住/弹回去”）。
-    fn output_at_physical(&self, cursor: (i32, i32)) -> Option<(wl_output::WlOutput, i32, (i32, i32))> {
+    fn output_at_physical(
+        &self,
+        cursor: (i32, i32),
+    ) -> Option<(wl_output::WlOutput, i32, (i32, i32))> {
         for output in self.output_state.outputs() {
             let Some(info) = self.output_state.info(&output) else {
                 continue;
@@ -637,7 +642,10 @@ impl Widget {
                     info.logical_position.unwrap_or(info.location),
                 ))
             })
-            .or_else(|| self.output_for(pos).map(|(o, s, origin)| (Some(o), s, origin)))
+            .or_else(|| {
+                self.output_for(pos)
+                    .map(|(o, s, origin)| (Some(o), s, origin))
+            })
             .unwrap_or((None, 1, (0, 0)));
         self.output_scale = scale;
         *lock(&self.shared.monitor_scale) = scale;
@@ -766,7 +774,10 @@ impl Widget {
         *lock(&self.shared.scale) = self.scale;
         self.viewport_destination();
         if changed {
-            log::debug!("wayland: buffer geometry -> {w}x{h} px (logical {lw}x{lh}, scale {})", self.scale);
+            log::debug!(
+                "wayland: buffer geometry -> {w}x{h} px (logical {lw}x{lh}, scale {})",
+                self.scale
+            );
             // 新尺寸 = 新画布：让 UI 重新分配像素图并重画。
             self.shared.drawn_seq.store(u64::MAX, Ordering::Relaxed);
             self.shared.wake();
@@ -802,7 +813,11 @@ impl Widget {
         } else {
             0
         };
-        let top = if anchor_bottom { 0 } else { (pos.1 - oy).max(0) };
+        let top = if anchor_bottom {
+            0
+        } else {
+            (pos.1 - oy).max(0)
+        };
         let bottom = if anchor_bottom {
             (oy + oh - (pos.1 + lh)).max(0)
         } else {
@@ -1205,7 +1220,6 @@ impl Widget {
         self.frames = self.frames.wrapping_add(1);
         Ok(())
     }
-
 }
 
 /// 只有 alpha 真的不透明的格子才吃鼠标。矩形是**缓冲像素**，除以缩放后填进 region。
@@ -1328,14 +1342,7 @@ impl CompositorHandler for Widget {
     ) {
     }
 
-    fn frame(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface,
-        _: u32,
-    ) {
-    }
+    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {}
 
     /// 合成器告诉我们表面进了哪块屏——**故意不听**。
     ///
@@ -1646,8 +1653,6 @@ macro_rules! via_shared {
     }};
 }
 
-
-
 // 说明：真正常用的是 `PetSurface` 的方法本身；下面这些自由函数只是为了
 // 让 `app.rs` 的 `layer::xxx(hwnd, ..)` 调用点保持原样。
 
@@ -1856,9 +1861,9 @@ mod tests {
                 if alpha <= 8 {
                     continue;
                 }
-                let hit = rects.iter().any(|(rx, ry, rw, rh)| {
-                    x >= *rx && x < rx + rw && y >= *ry && y < ry + rh
-                });
+                let hit = rects
+                    .iter()
+                    .any(|(rx, ry, rw, rh)| x >= *rx && x < rx + rw && y >= *ry && y < ry + rh);
                 if !hit {
                     return false;
                 }

@@ -183,7 +183,7 @@ settings-eye-care-strength-hint = Higher is warmer; the maximum is roughly a 55%
 # ── Window drag (AltSnap style) ─────────────────────────
 settings-section-alt-drag = Window drag
 settings-alt-drag = Hold Alt to drag windows
-settings-alt-drag-hint = Hold Alt and drag with the left button to move the window under the cursor; double-click to maximize (again to restore); wheel up maximizes, wheel down minimizes
+settings-alt-drag-hint = Hold Alt and drag with the left button to move the window under the cursor; double-click to maximize (again to restore); wheel up maximizes, wheel down restores
 settings-alt-drag-hint-linux = Hold Alt and drag with the left button to move the window under the cursor; Alt+wheel up maximizes, wheel down restores; Alt+middle-click minimizes (KWin does the work and your original mouse bindings are restored when Zouwu exits; with Alt held a double-click cannot be intercepted on Wayland, double-clicking the title bar instead maximizes)
 
 # ── Clipboard history ─────────────────────────────────────

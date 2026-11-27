@@ -46,14 +46,14 @@ fn lock_cache() -> std::sync::MutexGuard<'static, Cache> {
 
 /// 真读一次选区。失败（没有选区 / 对方不提供文本 / 超时）时返回 None。
 fn read_selection() -> Option<String> {
-    let (mut pipe, _mime) = match get_contents(ClipboardType::Regular, Seat::Unspecified, PasteMime::Text)
-    {
-        Ok(pair) => pair,
-        Err(err) => {
-            log::debug!("clipboard read failed: {err}");
-            return None;
-        }
-    };
+    let (mut pipe, _mime) =
+        match get_contents(ClipboardType::Regular, Seat::Unspecified, PasteMime::Text) {
+            Ok(pair) => pair,
+            Err(err) => {
+                log::debug!("clipboard read failed: {err}");
+                return None;
+            }
+        };
     let mut bytes = Vec::new();
     if let Err(err) = pipe.read_to_end(&mut bytes) {
         log::debug!("clipboard pipe read failed: {err}");

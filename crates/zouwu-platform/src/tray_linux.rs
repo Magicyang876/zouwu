@@ -162,7 +162,11 @@ fn to_icon(rgba: &[u8], width: u32, height: u32) -> Icon {
     }
 }
 
-fn standard(label: impl Into<String>, tx: &Sender<TrayCommand>, cmd: TrayCommand) -> MenuItem<TrayState> {
+fn standard(
+    label: impl Into<String>,
+    tx: &Sender<TrayCommand>,
+    cmd: TrayCommand,
+) -> MenuItem<TrayState> {
     let tx = tx.clone();
     MenuItem::Standard(StandardItem {
         label: label.into(),
@@ -294,8 +298,16 @@ impl ksni::Tray for TrayState {
             })
             .collect();
         skins.push(MenuItem::Separator);
-        skins.push(standard(&self.text.skin_import, tx, TrayCommand::ImportSkin));
-        skins.push(standard(&self.text.skin_export, tx, TrayCommand::ExportSkin));
+        skins.push(standard(
+            &self.text.skin_import,
+            tx,
+            TrayCommand::ImportSkin,
+        ));
+        skins.push(standard(
+            &self.text.skin_export,
+            tx,
+            TrayCommand::ExportSkin,
+        ));
         items.push(MenuItem::SubMenu(SubMenu {
             label: self.text.skin.clone(),
             submenu: skins,

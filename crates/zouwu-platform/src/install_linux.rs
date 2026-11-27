@@ -191,7 +191,10 @@ pub fn install(version: &str) -> Result<InstallReport, String> {
         if let Some(parent) = entry.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        match crate::write_atomic(&entry, &desktop_contents(&target, icon.is_ok().then_some(APP_NAME))) {
+        match crate::write_atomic(
+            &entry,
+            &desktop_contents(&target, icon.is_ok().then_some(APP_NAME)),
+        ) {
             Ok(()) => report.shortcut = Some(entry),
             Err(err) => log::warn!("cannot write desktop entry: {err}"),
         }
@@ -288,7 +291,10 @@ mod tests {
     fn icon_lands_in_the_hicolor_theme() {
         let path = icon_path().expect("HOME set in tests");
         let text = path.display().to_string();
-        assert!(text.contains("icons/hicolor/128x128/apps/zouwu.png"), "{text}");
+        assert!(
+            text.contains("icons/hicolor/128x128/apps/zouwu.png"),
+            "{text}"
+        );
     }
 
     #[test]
