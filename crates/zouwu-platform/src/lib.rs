@@ -58,6 +58,8 @@ pub mod eyecare;
 pub mod eyecare;
 /// 跑一条用户写的命令 / 打开一个程序（自定义气泡球的执行端）。
 pub mod launch;
+/// 本机已安装的程序（启动器的数据源）。
+pub mod programs;
 pub mod reload;
 #[cfg(target_os = "windows")]
 pub mod screen;

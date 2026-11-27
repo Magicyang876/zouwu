@@ -64,6 +64,11 @@ that only write a log line, that was a deliberate cull.
 - **Clipboard history** (`Ctrl+Alt+V`) — text only, persisted to disk, deduplicated,
   capped at 100 entries. Type to search (space = AND, IME-friendly), `↑`/`↓`/`PgUp`/`PgDn`/wheel
   to navigate, `Enter` to paste, `Delete` to remove.
+- **Program launcher** (`Ctrl+Alt+Space`, or tray → *Launcher…*) — a Flow-Launcher-ish search
+  box over the Start Menu: every `.lnk` under both Start Menu roots, ranked by name match then
+  path. Type to filter (space = AND), `↑`/`↓` to pick, `Enter` to start it. Rescanned on every
+  open, so a just-installed app shows up immediately. Add `[launcher] dirs` to search extra
+  folders (portable tools, your own shortcut stash) on top of the Start Menu.
 - **Custom command bubbles** — add a bubble that runs any program/command; per-bubble global
   hotkeys; reorder and disable items independently.
 
@@ -101,9 +106,9 @@ that only write a log line, that was a deliberate cull.
 
 ### Not there yet
 
-Screenshot & annotation, translation, OCR, color picker, pomodoro, a text launcher,
-scriptable plugins and auto-update are **planned, not shipped**. The ring only ever contains
-features that actually work.
+Screenshot & annotation, translation, OCR, color picker, pomodoro, scriptable plugins and
+auto-update are **planned, not shipped**. The launcher only sees the Start Menu (no portable
+`.exe`, no UWP), and the ring only ever contains features that actually work.
 
 ---
 
@@ -199,6 +204,11 @@ enabled = true
 [clipboard]
 enabled = true
 limit = 100
+
+[launcher]
+enabled = true
+hotkey = "Ctrl+Alt+Space" # no UI row for this one; edit it here
+dirs = ["D:\\Tools"]        # extra folders to pick .lnk shortcuts from (recursive, 6 deep)
 
 [interaction]
 hover_delay_ms = 150

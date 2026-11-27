@@ -25,6 +25,8 @@ pub enum Slot {
     /// 用下标而不是固定槽位：球的清单是用户配的（ADR-042），
     /// 槽位得跟着清单走——每一颗球都可以有自己的一条热键。
     RingItem(usize),
+    /// 呼出启动器（搜本机程序）。
+    Launcher,
 }
 
 /// 真正碰系统的那两个动作（`RegisterHotKey` / `UnregisterHotKey`）。

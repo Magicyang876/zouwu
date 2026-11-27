@@ -2,7 +2,7 @@
 
 > 本文是 [`README.md`](../README.md) 的技术展开：**这套代码是怎么拼起来的、为什么这么拼**。
 > 只写已经存在的东西。计划中的功能、以及「为什么最后没这么做」，在作者的本地决策笔记里
-> （那 61 篇 ADR 不随仓库发布）。
+> （那 73 篇 ADR 不随仓库发布）。
 
 ---
 
@@ -12,7 +12,7 @@
 ┌──────────────────────────────────────────────────────────────────┐
 │  zouwu-app        （bin）单实例、日志、托盘与窗口装配、主循环      │
 ├──────────────────────────────────────────────────────────────────┤
-│  zouwu-ui         渲染 + 交互 + 三个真窗口                         │
+│  zouwu-ui         渲染 + 交互 + 几个真窗口                         │
 │    app.rs         事件循环、状态机、热键派发、帧调度                │
 │    frame.rs       开窗/摆位/上屏（先隐藏、摆好画好再显示）          │
 │    paint.rs       Scene → tiny-skia 位图（兽、气泡、主题色）       │
@@ -21,16 +21,19 @@
 │    skin_menu.rs   右键形象菜单（真窗口，不是 TrackPopupMenu）      │
 │    settings*.rs   设置面板（第二个窗，五页）                       │
 │    history.rs     剪贴板历史窗      linefield.rs  单行编辑控件     │
+│    launcher.rs    启动器窗（搜开始菜单，与 history.rs 共用骨架）     │
 │    present*.rs    呈现后端（分层窗口 / 实验性 wgpu）               │
 │    text.rs icon.rs thumb.rs report.rs watchdog.rs                  │
 ├──────────────────────────────────────────────────────────────────┤
 │  zouwu-core       领域层：**零 Win32，可以在任何平台跑测试**       │
 │    geom anim ring config theme skin action hotkey history qr drag  │
+│    launcher       启动器检索与排序（纯函数）                      │
 ├──────────────────────────────────────────────────────────────────┤
 │  zouwu-platform   平台能力（每个都有 *_stub.rs 的占位实现）        │
 │    layer 分层窗口  clipboard 剪贴板  hotkey 全局热键  tray 托盘    │
 │    eyecare 护眼遮罩  altdrag Alt 拖动  screen 截屏  dialogs 对话框 │
 │    text_gdi 文字  assets 内置素材  skinpack .zwskin  install 注册表│
+│    programs 开始菜单扫描（搜本机程序）                               │
 │    logging 日志  single_instance 单实例  autostart 开机启动        │
 ├──────────────────────────────────────────────────────────────────┤
 │  iconres          手写 COFF `.rsrc` 段（gnu 工具链下嵌 exe 图标）  │
@@ -38,7 +41,7 @@
 ```
 
 **依赖方向**：`app → ui → core`，`ui → platform`，`core` 谁都不依赖。
-`core` 里的 `ring` / `anim` / `config` / `skin` 全是纯数据与纯函数，所以 273 个测试里
+`core` 里的 `ring` / `anim` / `config` / `skin` 全是纯数据与纯函数，所以 324 个测试里
 大部分不需要窗口、不需要显示器。
 
 `iconres` 是个例外：它不依赖任何 crate，只负责把 `.ico` 拼成链接器认得的 COFF 目标文件。

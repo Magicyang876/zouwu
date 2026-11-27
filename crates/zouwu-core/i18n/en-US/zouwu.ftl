@@ -191,6 +191,7 @@ settings-clipboard-clear-hint = Only deletes the record; the system clipboard is
 settings-clipboard-clear-button = Clear...
 settings-clipboard-clear-confirm = Clear the whole clipboard history? This cannot be undone.
 tray-clipboard = Clipboard history
+tray-launcher = Launcher...
 skin-menu-title = Appearance
 
 history-title = Clipboard history
@@ -199,6 +200,12 @@ history-footer-empty = Nothing yet; copy something and it shows up here
 history-empty = Nothing yet
 history-search = Search (space separates terms)
 history-no-match = No matching entries
+
+launcher-title = Launcher
+launcher-footer = ↑↓ select · Enter open · type to search · Esc close
+launcher-search = Search installed programs (space separates terms)
+launcher-empty = No programs found in the Start Menu
+launcher-no-match = No matching programs
 
 # ── Bubbles (the ring's feature list) ─────────────────────
 settings-section-bubbles = Order & hotkeys

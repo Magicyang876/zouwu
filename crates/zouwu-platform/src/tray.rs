@@ -43,6 +43,8 @@ pub const ID_SYS_FONT: &str = "zouwu.sys-font";
 pub const ID_SCAN_QR: &str = "zouwu.scan-qr";
 /// 打开剪贴板历史。与扫二维码同属“动作区”。
 pub const ID_CLIPBOARD: &str = "zouwu.clipboard";
+/// 启动器（搜本机已安装的程序）。
+pub const ID_LAUNCHER: &str = "zouwu.launcher";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TrayCommand {
@@ -62,6 +64,8 @@ pub enum TrayCommand {
     ScanQr,
     /// 打开剪贴板历史小窗。
     Clipboard,
+    /// 打开启动器窗（搜本机已安装的程序）。
+    Launcher,
     /// 把小工具搬回主屏。存在的理由很具体：多屏拔掉之后，
     /// 旧坐标落在不存在的桌面上，用户看不见、也拖不到它。
     Recenter,
@@ -86,6 +90,7 @@ struct Items {
     open_logs: MenuItem,
     scan_qr: MenuItem,
     clipboard: MenuItem,
+    launcher: MenuItem,
     autostart: CheckMenuItem,
     quit: MenuItem,
     language_menu: Submenu,
@@ -144,6 +149,7 @@ impl Tray {
         let recenter = MenuItem::with_id(ID_RECENTER, i18n.t("tray.recenter"), true, None);
         let scan_qr = MenuItem::with_id(ID_SCAN_QR, i18n.t("tray.scan-qr"), true, None);
         let clipboard = MenuItem::with_id(ID_CLIPBOARD, i18n.t("tray.clipboard"), true, None);
+        let launcher = MenuItem::with_id(ID_LAUNCHER, i18n.t("tray.launcher"), true, None);
         let autostart_item = CheckMenuItem::with_id(
             ID_AUTOSTART,
             i18n.t("tray.autostart"),
@@ -236,6 +242,7 @@ impl Tray {
             &show_hide,
             &scan_qr,
             &clipboard,
+            &launcher,
             &recenter,
             &settings,
             &PredefinedMenuItem::separator(),
@@ -283,6 +290,7 @@ impl Tray {
                 open_logs,
                 scan_qr,
                 clipboard,
+                launcher,
                 autostart: autostart_item,
                 quit,
                 language_menu,
@@ -345,6 +353,7 @@ impl Tray {
         self.items.open_logs.set_text(i18n.t("tray.open-logs"));
         self.items.scan_qr.set_text(i18n.t("tray.scan-qr"));
         self.items.clipboard.set_text(i18n.t("tray.clipboard"));
+        self.items.launcher.set_text(i18n.t("tray.launcher"));
         self.items.font_dir.set_text(i18n.t("tray.font-dir"));
         self.items.sys_font.set_text(i18n.t("tray.sys-font"));
         self.items.autostart.set_text(i18n.t("tray.autostart"));
@@ -414,6 +423,9 @@ impl Tray {
         }
         if id == ID_CLIPBOARD {
             return Some(TrayCommand::Clipboard);
+        }
+        if id == ID_LAUNCHER {
+            return Some(TrayCommand::Launcher);
         }
         if id == ID_AUTOSTART {
             return Some(TrayCommand::SetAutostart(self.items.autostart.is_checked()));

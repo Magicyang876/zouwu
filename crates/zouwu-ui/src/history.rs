@@ -1037,7 +1037,14 @@ pub fn draw(
         pal.bg,
     );
 
-    draw_search(&mut p, layout.search, &view, &pal);
+    draw_search(
+        &mut p,
+        layout.search,
+        view.search,
+        view.search_focus,
+        view.placeholder,
+        &pal,
+    );
 
     // 列表
     p.set_clip(layout.list);
@@ -1093,8 +1100,17 @@ pub fn draw(
 }
 
 /// 搜索框：左侧放大镜、提示语/输入内容、右侧「×」。
-fn draw_search(p: &mut Painter<'_>, rect: Rect, view: &View<'_>, pal: &Palette) {
-    let active = !view.search.buffer.is_empty();
+///
+/// `pub(crate)` 是给启动器窗用的：两个窗的头部长得一样，画法各存一份必然长得不一样。
+pub(crate) fn draw_search(
+    p: &mut Painter<'_>,
+    rect: Rect,
+    search: &Search,
+    focused: bool,
+    placeholder: &str,
+    pal: &Palette,
+) {
+    let active = !search.text().is_empty();
     p.fill(rect, 7.0, pal.raised);
     p.stroke(
         rect,
@@ -1125,19 +1141,19 @@ fn draw_search(p: &mut Painter<'_>, rect: Rect, view: &View<'_>, pal: &Palette) 
     );
 
     let area = search_inner(rect, active);
-    if active || view.search_focus {
+    if active || focused {
         // 内容、选区底纹、光标、横向滚动条都由 `linefield` 一处画：
         // 点在哪、选到哪、光标画在哪必须用同一份几何，各算一次必然对不上。
         linefield::draw_contents(
             p,
             area,
-            view.search,
+            search,
             pal.text,
             pal.dim.with_alpha(0.28),
             pal.accent,
         );
     } else {
-        p.text_in(view.placeholder, area, SEARCH_PX, pal.dim, Weight::Regular);
+        p.text_in(placeholder, area, SEARCH_PX, pal.dim, Weight::Regular);
     }
     if active {
         let clear = clear_button_in(rect);
@@ -1146,15 +1162,15 @@ fn draw_search(p: &mut Painter<'_>, rect: Rect, view: &View<'_>, pal: &Palette) 
 }
 
 #[derive(Clone, Copy)]
-struct Palette {
-    bg: Rgba,
-    raised: Rgba,
-    text: Rgba,
-    dim: Rgba,
-    accent: Rgba,
+pub(crate) struct Palette {
+    pub(crate) bg: Rgba,
+    pub(crate) raised: Rgba,
+    pub(crate) text: Rgba,
+    pub(crate) dim: Rgba,
+    pub(crate) accent: Rgba,
 }
 
-fn palette(theme: &Theme) -> Palette {
+pub(crate) fn palette(theme: &Theme) -> Palette {
     Palette {
         bg: theme.bubble_bg.with_alpha(0.98),
         raised: theme.bubble_bg_active.with_alpha(0.9),

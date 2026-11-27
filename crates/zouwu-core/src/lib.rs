@@ -11,6 +11,7 @@ pub mod geom;
 pub mod history;
 pub mod hotkey;
 pub mod i18n;
+pub mod launcher;
 pub mod qr;
 pub mod ring;
 pub mod skin;

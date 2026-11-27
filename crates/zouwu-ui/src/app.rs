@@ -34,6 +34,7 @@ use zouwu_core::ring::{solve_rotation, Bubble, RingConfig};
 use zouwu_core::skin::PROCEDURAL_SKIN_ID;
 
 use crate::history::{HistoryWindow, Outcome as HistoryOutcome};
+use crate::launcher::{LauncherWindow, Outcome as LauncherOutcome};
 use crate::settings_window::{Outcome as SettingsOutcome, SettingsWindow};
 use crate::skin::Skin;
 use crate::skin_menu::{Outcome as SkinMenuOutcome, SkinMenuWindow};
@@ -267,6 +268,8 @@ struct App {
     report: Option<ReportWindow>,
     /// 剪贴板历史窗。
     history_window: Option<HistoryWindow>,
+    /// 启动器窗（搜本机程序）。
+    launcher: Option<LauncherWindow>,
     /// 右键呼出的形象列表（真窗口，见 `skin_menu.rs`）。
     skin_menu: Option<SkinMenuWindow>,
     /// 剪贴板历史数据。
@@ -298,6 +301,8 @@ struct App {
     pending_settings: bool,
     /// 托盘点了「系统字体…」：等下一拍拿到 `&ActiveEventLoop` 再建窗。
     pending_sysfont: bool,
+    /// 热键/托盘要开启动器：建窗同样得等下一拍。
+    pending_launcher: bool,
     /// 「系统字体」小窗（独立窗口，与设置面板并列）。
     sysfont: Option<SysFontWindow>,
     /// `ZOUWU_SETTINGS=1` 已消费过（一次性）。
@@ -307,6 +312,8 @@ struct App {
     scan_env_done: bool,
     /// `ZOUWU_HISTORY=1` 启动即开一次剪贴板历史窗（只一次）。
     history_env_done: bool,
+    /// `ZOUWU_LAUNCHER=1` 启动即开一次启动器（只一次）。
+    launcher_env_done: bool,
     /// `ZOUWU_SYSFONT=1` 只触发一次，理由同 `settings_env_done`。
     sysfont_env_done: bool,
     /// 待销毁的子窗口。
@@ -402,6 +409,7 @@ impl App {
             pending_skin_menu: false,
             report: None,
             history_window: None,
+            launcher: None,
             skin_menu: None,
             history,
             // 启动时**只记基线**，不把当前剪贴板内容当成"刚复制"。
@@ -458,10 +466,12 @@ impl App {
             settings: None,
             pending_settings: false,
             pending_sysfont: false,
+            pending_launcher: false,
             sysfont: None,
             settings_env_done: false,
             scan_env_done: false,
             history_env_done: false,
+            launcher_env_done: false,
             sysfont_env_done: false,
             retired: Vec::new(),
             cycle_left: std::env::var("ZOUWU_CYCLE")
@@ -649,6 +659,9 @@ impl App {
                 window.set_theme(theme.clone());
             }
             if let Some(window) = self.report.as_mut() {
+                window.set_theme(theme.clone());
+            }
+            if let Some(window) = self.launcher.as_mut() {
                 window.set_theme(theme.clone());
             }
             if let Some(window) = self.sysfont.as_mut() {
@@ -1144,6 +1157,16 @@ impl App {
     /// 球的差错只警告那一颗（一个写错的热键不该把别的球一起废掉）。
     fn apply_hotkey(&self, registrar: &mut HotkeyRegistrar) -> Result<(), String> {
         apply_hotkey_setting(Slot::Summon, &self.config.general.hotkey, registrar)?;
+        // 启动器热键：关掉时连键位一起让出来。
+        if self.config.launcher.enabled {
+            if let Err(err) =
+                apply_hotkey_setting(Slot::Launcher, &self.config.launcher.hotkey, registrar)
+            {
+                log::warn!("launcher hotkey skipped: {err}");
+            }
+        } else {
+            registrar.clear(Slot::Launcher);
+        }
         // 先放掉已经不存在的那几颗球（删球/减球）占着的键位。
         registrar.retain_ring_items(self.config.ring.items.len());
         for (index, item) in self.config.ring.items.iter().enumerate() {
@@ -1440,6 +1463,7 @@ impl App {
             // 扫二维码要建窗口，得拿到 `&ActiveEventLoop` —— 同气泡点击，走待办队列。
             TrayCommand::ScanQr => self.pending_action = Some(QRCODE_ACTION.to_string()),
             TrayCommand::Clipboard => self.pending_action = Some(CLIPBOARD_ACTION.to_string()),
+            TrayCommand::Launcher => self.pending_launcher = true,
             TrayCommand::SetTheme(id) => self.set_theme(id, now),
             TrayCommand::SetSkin(id) => self.set_skin(id, now),
             TrayCommand::ImportSkin => self.import_skin(now),
@@ -1487,6 +1511,8 @@ impl App {
             log::info!("hotkey: {slot:?} pressed");
             match slot {
                 Slot::Summon => self.toggle_visible(now),
+                // 启动器要建窗，而建窗得拿到 `&ActiveEventLoop`：只置标志。
+                Slot::Launcher => self.pending_launcher = true,
                 Slot::RingItem(index) => {
                     // 按配置顺序取第 index 条：关掉的球不占位置，所以这里取的是
                     // **配置里的第几条**，与屏幕上第几颗由 `resolve` 保序对应。
@@ -2212,6 +2238,100 @@ impl App {
         }
     }
 
+    /// 叫出启动器（搜本机程序）。
+    ///
+    /// 清单每次重扫：用户完全可能“刚装完就来搜”。开始菜单里几百个 `.lnk` 的
+    /// 目录遍历是毫秒级的事，不值得为它维护缓存与失效策略。
+    fn open_launcher(&mut self, event_loop: &ActiveEventLoop) {
+        crate::watchdog::enter(crate::watchdog::stage::OPEN_HISTORY);
+        let programs = zouwu_platform::programs::installed(&self.config.launcher.dirs);
+        log::info!(
+            "app: open launcher ({} programs, was open: {})",
+            programs.len(),
+            self.launcher.is_some()
+        );
+        if let Some(window) = self.launcher.as_mut() {
+            window.show(programs);
+            return;
+        }
+        let window = LauncherWindow::new(
+            event_loop,
+            programs,
+            self.theme.clone(),
+            self.i18n.t("launcher.title"),
+            self.i18n.t("launcher.search"),
+            self.i18n.t("launcher.footer"),
+            self.i18n.t("launcher.empty"),
+            self.i18n.t("launcher.no-match"),
+        );
+        match window {
+            Ok(mut window) => {
+                // 调试/截图入口：带一个初始搜索词打开。
+                if let Ok(query) = std::env::var("ZOUWU_LAUNCHER_QUERY") {
+                    window.set_query(&query);
+                    log::debug!(
+                        "launcher: query {query:?} -> {} matches",
+                        window.visible_len()
+                    );
+                }
+                self.launcher = Some(window);
+            }
+            Err(err) => log::error!("cannot open launcher window: {err}"),
+        }
+    }
+
+    /// 启动器的事件：开程序（顺带关窗）或关窗。
+    ///
+    /// 先关窗再 spawn：开程序可能拖几百毫秒，不能让搜索框僵在那里。
+    fn launcher_event(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
+        crate::watchdog::enter(crate::watchdog::stage::HISTORY_EVENT);
+        log::trace!("app: launcher event {event:?}");
+        let mut close = false;
+        let mut launch = None;
+        {
+            let Some(window) = self.launcher.as_mut() else {
+                return;
+            };
+            for outcome in window.window_event(&event) {
+                match outcome {
+                    LauncherOutcome::Launch(program) => {
+                        log::info!("launcher: open `{}`", program.name);
+                        launch = Some(program);
+                        close = true;
+                    }
+                    LauncherOutcome::Close => close = true,
+                }
+            }
+        }
+        if close {
+            crate::watchdog::enter(crate::watchdog::stage::CLOSE_WINDOW);
+            if let Some(window) = self.launcher.as_mut() {
+                window.close();
+            }
+            self.last_child_closed_at = Instant::now();
+            self.buttons_down = (
+                zouwu_platform::layer::left_button_down(),
+                zouwu_platform::layer::right_button_down(),
+            );
+            self.next_poll = Instant::now();
+        }
+        if let Some(program) = launch {
+            if let Err(err) = zouwu_platform::programs::open(&program.path) {
+                log::warn!("launcher: open `{}` failed: {err}", program.name);
+                let report = Report {
+                    headline: self.i18n.t("report.launch.failed"),
+                    detail: Some(program.name),
+                    entries: vec![Entry {
+                        text: err,
+                        screen: program.path,
+                    }],
+                    footer: self.i18n.t("report.launch.footer"),
+                };
+                self.open_report(event_loop, report);
+            }
+        }
+    }
+
     /// 打开/关闭右键形象菜单。
     ///
     /// 已经开着就关掉：右键是开关，不是"叠加打开"——不然连点两下会叠出两个窗。
@@ -2419,6 +2539,7 @@ impl App {
             && (self.settings.is_some()
                 || self.report.is_some()
                 || self.history_window.is_some()
+                || self.launcher.is_some()
                 || self.sysfont.is_some())
             && zouwu_platform::layer::window_at(sx, sy).is_some_and(|hwnd| {
                 let id = WindowId::from(hwnd as u64);
@@ -2431,6 +2552,10 @@ impl App {
                         .is_some_and(|p| p.is_visible() && p.id() == id)
                     || self
                         .history_window
+                        .as_ref()
+                        .is_some_and(|p| p.is_visible() && p.id() == id)
+                    || self
+                        .launcher
                         .as_ref()
                         .is_some_and(|p| p.is_visible() && p.id() == id)
                     || self
@@ -2671,7 +2796,10 @@ impl App {
 /// 变更上（`RingCfg` 整段比较）。只盯 `Hotkey` 的话，面板里改球的键只会存盘、
 /// 运行期永远不生效。
 fn touches_hotkeys(kind: ChangeKind) -> bool {
-    matches!(kind, ChangeKind::Hotkey | ChangeKind::Ring)
+    matches!(
+        kind,
+        ChangeKind::Hotkey | ChangeKind::Ring | ChangeKind::Launcher
+    )
 }
 
 /// 注册 `raw`（形如 `"Alt+Space"`）描述的全局热键。
@@ -2698,7 +2826,7 @@ fn apply_hotkey_setting(
                 // 呼出热键是"救命"通道，写错了必须回退到默认，否则用户打不开小兽。
                 Slot::Summon => Hotkey::default_summon(),
                 // 球的热键是锦上添花：配置写错就干脆不注册，别占一个用户没要的键。
-                Slot::RingItem(_) => {
+                Slot::RingItem(_) | Slot::Launcher => {
                     registrar.clear(slot);
                     return Err(format!("hotkey `{raw}` invalid ({err}); not registered"));
                 }
@@ -2836,6 +2964,11 @@ impl ApplicationHandler for App {
             self.history_event(event);
             return;
         }
+        // 启动器窗同理。
+        if self.launcher.as_ref().is_some_and(|l| l.id() == id) {
+            self.launcher_event(event_loop, event);
+            return;
+        }
         // 形象菜单同理。
         if self.skin_menu.as_ref().is_some_and(|m| m.id() == id) {
             self.skin_menu_event(event);
@@ -2935,6 +3068,7 @@ impl ApplicationHandler for App {
                             || self.settings.as_ref().is_some_and(|p| p.is_visible())
                             || self.report.as_ref().is_some_and(|p| p.is_visible())
                             || self.history_window.as_ref().is_some_and(|p| p.is_visible())
+                            || self.launcher.as_ref().is_some_and(|p| p.is_visible())
                             || self.sysfont.as_ref().is_some_and(|p| p.is_visible())
                         {
                             return;
@@ -3063,6 +3197,16 @@ impl ApplicationHandler for App {
         {
             self.sysfont_env_done = true;
             self.pending_sysfont = true;
+        }
+        // 同上：全局热键没法脚本化。
+        if !self.launcher_env_done
+            && std::env::var_os("ZOUWU_LAUNCHER").is_some_and(|v| !v.is_empty())
+        {
+            self.launcher_env_done = true;
+            self.pending_launcher = true;
+        }
+        if std::mem::take(&mut self.pending_launcher) {
+            self.open_launcher(event_loop);
         }
         if std::mem::take(&mut self.pending_settings) {
             self.open_settings(event_loop, now);

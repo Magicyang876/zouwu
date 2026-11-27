@@ -20,6 +20,8 @@ pub struct Config {
     /// Alt 拖动窗口（移动 / 双击最大化 / 滚轮最大最小化）。
     pub alt_drag: AltDrag,
     pub clipboard: ClipboardCfg,
+    /// 启动器：一个快捷键 + 搜索框，找本机已安装的程序。
+    pub launcher: LauncherCfg,
     pub log: LogCfg,
     pub interaction: Interaction,
     pub ring: RingCfg,
@@ -36,6 +38,7 @@ impl Default for Config {
             eye_care: EyeCare::default(),
             alt_drag: AltDrag::default(),
             clipboard: ClipboardCfg::default(),
+            launcher: LauncherCfg::default(),
             log: LogCfg::default(),
             interaction: Interaction::default(),
             ring: RingCfg::default(),
@@ -63,6 +66,36 @@ impl Default for ClipboardCfg {
         Self {
             enabled: true,
             limit: crate::history::DEFAULT_LIMIT,
+        }
+    }
+}
+
+/// 启动器（ADR-073）。
+///
+/// 默认**开着**：升级上来的老配置里没有 `[launcher]` 这一段，靠 `serde(default)`
+/// 补出一个可用的默认值，功能才会"装完就有"。做成气泡球走不通——老配置的
+/// `ring.items` 里没有这一项，新功能会隐形。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LauncherCfg {
+    /// 是否注册启动器的快捷键。
+    pub enabled: bool,
+    /// 呼出搜索框的热键；空串 = 不注册。
+    ///
+    /// 不能用 `Alt+Space`：那是呼出小兽的键，抢同一个键位两个功能都会失灵。
+    pub hotkey: String,
+    /// 除了开始菜单，还从这些目录（递归）里捡快捷方式。
+    ///
+    /// 填目录，别填文件。绿色软件、桌面上的快捷方式、自建的工具夹都靠它。
+    pub dirs: Vec<String>,
+}
+
+impl Default for LauncherCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            hotkey: "Ctrl+Alt+Space".to_string(),
+            dirs: Vec::new(),
         }
     }
 }
@@ -563,6 +596,9 @@ impl Config {
         if self.clipboard != next.clipboard {
             out.push(Clipboard);
         }
+        if self.launcher != next.launcher {
+            out.push(Launcher);
+        }
         if self.log != next.log {
             out.push(Log);
         }
@@ -605,6 +641,8 @@ pub enum ChangeKind {
     AltDrag,
     /// 剪贴板历史开关与容量
     Clipboard,
+    /// 启动器的开关与热键
+    Launcher,
     /// 日志级别与落盘策略
     Log,
     /// 悬停延时 / 命中容差 / 收起半径
@@ -629,6 +667,7 @@ impl ChangeKind {
             ChangeKind::EyeCare => "eye_care",
             ChangeKind::AltDrag => "alt_drag",
             ChangeKind::Clipboard => "clipboard",
+            ChangeKind::Launcher => "launcher",
             ChangeKind::Log => "log",
             ChangeKind::Interaction => "interaction",
             ChangeKind::Ring => "ring",

@@ -192,6 +192,7 @@ settings-clipboard-clear-hint = 只删记录，不动系统剪贴板里的东西
 settings-clipboard-clear-button = 清空…
 settings-clipboard-clear-confirm = 确定清空全部剪贴板历史吗？这一步无法撤销。
 tray-clipboard = 剪贴板历史
+tray-launcher = 启动器…
 skin-menu-title = 形象
 
 history-title = 剪贴板历史
@@ -200,6 +201,12 @@ history-footer-empty = 还没有记录，复制点什么就会出现在这里
 history-empty = 还没有记录
 history-search = 搜索（空格分隔多个关键词）
 history-no-match = 没有匹配的条目
+
+launcher-title = 启动器
+launcher-footer = ↑↓ 选择 · Enter 打开 · 输入即搜索 · Esc 关闭
+launcher-search = 搜索已安装的程序（空格分隔多个关键词）
+launcher-empty = 开始菜单里没找到任何程序
+launcher-no-match = 没有匹配的程序
 
 # ── 气泡球（环上的功能清单） ──────────────────────────────
 settings-section-bubbles = 顺序与热键

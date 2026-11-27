@@ -8,6 +8,7 @@ pub mod app;
 pub mod frame;
 pub mod history;
 pub mod icon;
+pub mod launcher;
 pub mod linefield;
 pub mod paint;
 pub mod presenter;
