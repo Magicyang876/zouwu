@@ -7,6 +7,10 @@
 pub mod app;
 pub mod frame;
 pub mod history;
+/// Linux/Wayland：小兽本体的 layer 表面宿主（其他平台没有这个模块，
+/// 小兽本体就是普通的 winit 窗口）。
+#[cfg(not(target_os = "windows"))]
+pub mod host;
 pub mod icon;
 pub mod linefield;
 pub mod paint;

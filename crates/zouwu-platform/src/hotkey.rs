@@ -16,7 +16,7 @@ use zouwu_core::hotkey::{Hotkey, Key};
 /// 名字是给"按下去之后该干什么"用的：注册器只负责把它们区分开，
 /// 不关心具体动作。加功能时在这里加一个槽位，而不是再造一个注册器
 /// （每个注册器都会建自己的隐藏窗口，没必要）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Slot {
     /// 呼出 / 收起小兽。
     Summon,

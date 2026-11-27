@@ -449,6 +449,11 @@ pub enum Control {
     Hotkey {
         text: String,
         capturing: bool,
+        /// 配置里的这一串解析不出来（见 [`hotkey_problem`]）。
+        ///
+        /// 要单独标出来：注册失败只写日志，用户打开面板看到的仍是自己写的
+        /// 那串字，会以为热键生效了。红框 + 行内原因才是唯一看得见的信号。
+        invalid: bool,
     },
     Button {
         text: String,
@@ -484,6 +489,8 @@ pub enum Control {
         enabled: bool,
         hotkey: String,
         capturing: bool,
+        /// 这颗球配置的热键串解析不出来（它会被跳过注册，见 `apply_hotkey_setting`）。
+        invalid: bool,
     },
     /// 可编辑的单行文本（自定义球的名字、要运行的程序或命令）。
     Text {
@@ -988,13 +995,32 @@ pub fn build_rows(model: &Model) -> Vec<Row> {
     match model.tab {
         Tab::General => {
             rows.push(choice_row(model, Field::Language, language_options(i18n)));
+            let capturing = model.capturing == Some(CaptureTarget::Summon);
+            // 录键过程中框里显示的是"正在捕获…"，那串不是配置值，别拿它判错。
+            let problem = if capturing {
+                None
+            } else {
+                hotkey_problem(&model.config.general.hotkey)
+            };
             rows.push(Row {
                 field: Some(Field::Hotkey),
                 label: i18n.t("settings.hotkey"),
-                hint: Some(i18n.t("settings.hotkey.hint")),
+                hint: Some(match &problem {
+                    // 行内直接说清两件事：为什么不能用、现在实际生效的是哪个键
+                    // （与 `app.rs::apply_hotkey_setting` 的回退行为对齐）。
+                    Some(err) => i18n.t_args(
+                        "settings.hotkey.fallback",
+                        &[
+                            ("reason", &hotkey_reason(i18n, err)),
+                            ("fallback", &Hotkey::default_summon().to_string()),
+                        ],
+                    ),
+                    None => i18n.t("settings.hotkey.hint"),
+                }),
                 control: Control::Hotkey {
                     text: hotkey_text(model),
-                    capturing: model.capturing == Some(CaptureTarget::Summon),
+                    capturing,
+                    invalid: problem.is_some(),
                 },
             });
             rows.push(toggle_row(model, Field::StartOnBoot));
@@ -1023,7 +1049,13 @@ pub fn build_rows(model: &Model) -> Vec<Row> {
             rows.push(Row {
                 field: Some(Field::AltDragEnabled),
                 label: i18n.t("settings.alt-drag"),
-                hint: Some(i18n.t("settings.alt-drag.hint")),
+                // Linux 上只有“移动”这一项能做到（KWin 的窗口动作），
+                // 双击最大化/滚轮缩放都做不到，所以文案分开。
+                hint: Some(i18n.t(if cfg!(target_os = "windows") {
+                    "settings.alt-drag.hint"
+                } else {
+                    "settings.alt-drag.hint-linux"
+                })),
                 control: Control::Toggle {
                     on: model.config.alt_drag.enabled,
                 },
@@ -1420,24 +1452,36 @@ fn ring_item_row(model: &Model, index: usize) -> Row {
         Some(b) => i18n.t(b.label_key),
         None => item.display_name().to_string(),
     };
+    let capturing = model.capturing == Some(CaptureTarget::Item(index));
+    let problem = if capturing {
+        None
+    } else {
+        hotkey_problem(&item.hotkey)
+    };
     Row {
         field: None,
         label: name,
         // 不加 hint：次序怎么改已经写在页首那条说明里，四行重复一遍只会把
         // 每行撑高 18px、把「移除」按钮挤到滚动条外面。
-        hint: None,
+        //
+        // 例外：热键串写错时这一行必须长长一点——球的热键注册失败是**静默跳过**
+        // 的，不把原因写在这里，用户只能看到一个红了但不知道为什么的框。
+        hint: problem
+            .as_ref()
+            .map(|err| i18n.t_args("settings.hotkey.item-invalid", &[("reason", &hotkey_reason(i18n, err))])),
         control: Control::RingItem {
             index,
             name: item.id.clone(),
             enabled: item.enabled,
-            hotkey: if model.capturing == Some(CaptureTarget::Item(index)) {
+            hotkey: if capturing {
                 i18n.t("settings.hotkey.capturing")
             } else if item.hotkey.trim().is_empty() {
                 i18n.t("settings.hotkey.none")
             } else {
                 item.hotkey.clone()
             },
-            capturing: model.capturing == Some(CaptureTarget::Item(index)),
+            capturing,
+            invalid: problem.is_some(),
         },
     }
 }
@@ -2853,6 +2897,38 @@ pub fn describe_hotkey_error(err: &HotkeyError) -> String {
     err.to_string()
 }
 
+/// 配置里写的那串热键能不能用。
+///
+/// 空串是合法的“我不要热键”，不返回错误；返回 `Some` 就是运行期会被
+/// 跳过（或回退）的那些值——面板据此标红，用户不用去翻日志。
+pub fn hotkey_problem(raw: &str) -> Option<HotkeyError> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    Hotkey::parse(raw).err()
+}
+
+/// 把解析错误翻成当前语言的一句话。
+///
+/// `HotkeyError` 的 `Display` 是日志口径（恒中文），面板不能直接拿来用：
+/// 英文界面里会冒出半句中文。
+fn hotkey_reason(i18n: &I18n, err: &HotkeyError) -> String {
+    match err {
+        HotkeyError::Empty => i18n.t("settings.hotkey.err-empty"),
+        HotkeyError::MissingKey { text } => {
+            i18n.t_args("settings.hotkey.err-missing-key", &[("text", text)])
+        }
+        HotkeyError::UnknownToken { token } => {
+            i18n.t_args("settings.hotkey.err-unknown-token", &[("token", token)])
+        }
+        HotkeyError::NoModifier { key } => {
+            let key = key.to_string();
+            i18n.t_args("settings.hotkey.err-no-modifier", &[("key", &key)])
+        }
+    }
+}
+
 // ── 绘制 ──────────────────────────────────────────────────
 
 struct Palette {
@@ -2864,6 +2940,8 @@ struct Palette {
     line: Rgba,
     accent: Rgba,
     on_accent: Rgba,
+    /// 「这行配错了」：不跟主题走，错误色必须每套皮肤都一眼看见。
+    danger: Rgba,
 }
 
 fn palette(theme: &Theme) -> Palette {
@@ -2876,6 +2954,7 @@ fn palette(theme: &Theme) -> Palette {
         line: theme.bubble_edge.with_alpha(0.55),
         accent: theme.accent,
         on_accent: theme.bubble_bg,
+        danger: Rgba::rgb(0xd9, 0x4a, 0x3f),
     }
 }
 
@@ -2978,6 +3057,13 @@ fn draw_row(
         (rl.control.x - rl.rect.x - 16.0).max(40.0),
         rl.rect.h,
     );
+    // 这一行配错了：热键框里的串解析不出来。框自己变红，提示文字也跟着红——
+    // 因为原因就写在提示里，用次要色写错误等于没写。
+    let invalid = matches!(
+        row.control,
+        Control::Hotkey { invalid: true, .. } | Control::RingItem { invalid: true, .. }
+    );
+    let hint_color = if invalid { pal.danger } else { pal.muted };
     if let Control::Section { text } = &row.control {
         // 文字活在一段明确的带子里（上留白之下、分隔线之上），居中；
         // 这样"字压线"就不会再因为行高调整而回归。
@@ -3006,11 +3092,11 @@ fn draw_row(
             let h = p.line_height(11.0);
             let rect = Rect::new(label_rect.x, rl.rect.bottom() - h - 2.0, label_rect.w, h);
             let hint = p.truncate(hint, 11.0, rect.w);
-            p.text_in(&hint, rect, 11.0, pal.muted, Weight::Regular);
+            p.text_in(&hint, rect, 11.0, hint_color, Weight::Regular);
         }
         (true, Some(hint)) => {
             let hint = p.truncate(hint, 11.0, label_rect.w);
-            p.text_in(&hint, label_rect, 11.0, pal.muted, Weight::Regular);
+            p.text_in(&hint, label_rect, 11.0, hint_color, Weight::Regular);
         }
         (true, None) => {}
         (false, None) => {
@@ -3037,7 +3123,7 @@ fn draw_row(
             let label = p.truncate(&row.label, 14.0, top.w);
             p.text_in(&label, top, 14.0, pal.text, Weight::Regular);
             let hint = p.truncate(hint, 11.0, bottom.w);
-            p.text_in(&hint, bottom, 11.0, pal.muted, Weight::Regular);
+            p.text_in(&hint, bottom, 11.0, hint_color, Weight::Regular);
         }
     }
 
@@ -3118,10 +3204,18 @@ fn draw_row(
             let shown = p.truncate(text, 13.0, value_rect.w - 6.0);
             p.text_center(&shown, value_rect, 13.0, pal.text, Weight::Regular);
         }
-        Control::Hotkey { text, capturing } => {
+        Control::Hotkey {
+            text,
+            capturing,
+            invalid,
+        } => {
             let r = rl.hit;
             let (fill, edge, fg) = if *capturing {
                 (pal.accent.with_alpha(0.22), pal.accent, pal.text)
+            } else if *invalid {
+                // 红框不只在提示行里出现：用户第一眼看到的是这个框里的字，
+                // 它自己就得显示"这串不能用"。
+                (pal.danger.with_alpha(0.16), pal.danger, pal.danger)
             } else {
                 (pal.raised, pal.line.with_alpha(0.5), pal.text)
             };
@@ -3141,6 +3235,7 @@ fn draw_row(
             enabled,
             hotkey,
             capturing,
+            invalid,
             ..
         } => {
             // 关掉的球不上环：整行控件一起变淡，而不是只把开关拨到暗色 ——
@@ -3166,6 +3261,9 @@ fn draw_row(
             let r = rl.hotkey;
             let (fill, edge, fg) = if *capturing {
                 (pal.accent.with_alpha(0.22), pal.accent, pal.text)
+            } else if *invalid {
+                // 这颗球的热键被跳过了注册：同样用错误色，别让它看起来正常。
+                (pal.danger.with_alpha(0.16), pal.danger, pal.danger)
             } else {
                 (
                     pal.raised,
@@ -3810,6 +3908,92 @@ mod tests {
         );
         // 内容带之外不命中
         assert_eq!(hit(&l, Point::new(10.0, 4.0)), None);
+    }
+
+    // ── 热键写错要看得见 ──
+    //
+    // 注册失败只写日志，面板照旧显示用户写的那串字，于是“我配了但按不动”。
+    // 这几条钉住面板这一侧的补偿：标红 + 行内说明原因。
+
+    /// `(invalid, hint)`：呼出热键那一行的可观测状态。
+    fn summon_hotkey_row(m: &Model) -> (bool, Option<String>) {
+        let l = layout(m, 760.0, 600.0);
+        let (row, _) = l
+            .rows
+            .iter()
+            .find(|(row, _)| row.field == Some(Field::Hotkey))
+            .expect("hotkey row");
+        match &row.control {
+            Control::Hotkey { invalid, .. } => (*invalid, row.hint.clone()),
+            other => panic!("hotkey row must carry Control::Hotkey, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn valid_hotkey_is_not_marked_invalid() {
+        let mut m = model();
+        m.config.general.hotkey = "Ctrl+Alt+Space".into();
+        let (invalid, hint) = summon_hotkey_row(&m);
+        assert!(!invalid);
+        assert_eq!(hint, Some(m.i18n.t("settings.hotkey.hint")));
+    }
+
+    #[test]
+    fn empty_hotkey_is_a_choice_not_an_error() {
+        let mut m = model();
+        m.config.general.hotkey.clear();
+        let (invalid, hint) = summon_hotkey_row(&m);
+        assert!(!invalid, "空串是“不要热键”，不是写错");
+        assert_eq!(hint, Some(m.i18n.t("settings.hotkey.hint")));
+    }
+
+    /// 只写修饰键（例如 `Ctrl+Ctrl`）时，运行期会回退到默认键：
+    /// 面板必须把“为什么不行”和“现在实际是哪个键”一起写出来。
+    #[test]
+    fn modifier_only_hotkey_is_flagged_with_the_fallback() {
+        let mut m = model();
+        m.config.general.hotkey = "Ctrl+Ctrl".into();
+        let (invalid, hint) = summon_hotkey_row(&m);
+        assert!(invalid, "解析不出来的热键必须标红");
+        let hint = hint.expect("hint");
+        // 不看语言（这套断言要中英文都成立）：写错的那串必须被原样引出来，
+        // 同时说清现在实际生效的是哪颗键。
+        assert!(hint.contains("Ctrl+Ctrl"), "要点出是哪串写错了：{hint}");
+        assert!(hint.contains("Alt+Space"), "回退后的键也要说清：{hint}");
+    }
+
+    /// 录制中显示的是“正在捕获…”，那不是配置值，不能拿它报错。
+    #[test]
+    fn capturing_does_not_flag_the_value_being_replaced() {
+        let mut m = model();
+        m.config.general.hotkey = "Ctrl+Ctrl".into();
+        m.capturing = Some(CaptureTarget::Summon);
+        assert!(!summon_hotkey_row(&m).0);
+    }
+
+    #[test]
+    fn broken_item_hotkey_is_flagged_on_its_own_row() {
+        let mut m = model();
+        m.set_tab(Tab::Bubbles);
+        m.config.ring.items[0].hotkey = "Ctrl+Alt".into();
+        let l = layout(&m, 760.0, 600.0);
+        let mut rows = l.rows.iter().filter_map(|(row, _)| match &row.control {
+            Control::RingItem { index, invalid, .. } => Some((*index, *invalid, row.hint.clone())),
+            _ => None,
+        });
+        let first = rows.next().expect("first ring item row");
+        assert_eq!(first.0, 0);
+        assert!(first.1, "写错的球热键要标红");
+        assert!(first
+            .2
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Ctrl+Alt"));
+        // 另一颗球没写错，不能被连带染红。
+        let second = rows.next().expect("second ring item row");
+        assert_eq!(second.0, 1);
+        assert!(!second.1);
+        assert!(second.2.is_none(), "正常的球不该多一行说明");
     }
 
     #[test]

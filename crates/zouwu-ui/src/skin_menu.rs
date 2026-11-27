@@ -14,7 +14,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tiny_skia::Pixmap;
-use winit::dpi::{LogicalSize, PhysicalPosition};
+use winit::dpi::LogicalSize;
+#[cfg(target_os = "windows")]
+use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
@@ -32,6 +34,13 @@ const PAD: f32 = 8.0;
 const MAX_ROWS: usize = 12;
 /// 建窗后忽略失焦事件的时间窗（见 opened_at）。
 const FOCUS_GRACE: Duration = Duration::from_millis(400);
+
+/// Wayland 下右键菜单的窗口标题。
+///
+/// 窗口是无边框的，标题本来就不显示；这里用一个固定标记，好让 KWin 的定位
+/// 脚本能唯一地找到它（本地化标题会随语言变，还要做 JS 转义）。
+#[cfg(not(target_os = "windows"))]
+const CAPTION: &str = "zouwu-skin-menu";
 
 /// 一份几何：整窗、标题、每一行。
 #[derive(Clone, Debug, PartialEq)]
@@ -102,16 +111,36 @@ impl SkinMenuWindow {
         pad: f32,
     ) -> Result<Self, String> {
         let layout = layout(choices.len());
-        let scale = event_loop
-            .primary_monitor()
-            .map(|m| m.scale_factor())
-            .unwrap_or(1.0);
-        let (x, y) = place(event_loop, layout.size, at, scale, pad);
+        // Windows/X11：winit 能自己摆窗口，用物理坐标 + DPI 缩放。
+        #[cfg(target_os = "windows")]
+        let (x, y) = {
+            let scale = event_loop
+                .primary_monitor()
+                .map(|m| m.scale_factor())
+                .unwrap_or(1.0);
+            place(event_loop, layout.size, at, scale, pad)
+        };
+        // Wayland：`at` 是 UI 的“物理”坐标（逻辑 × wl_output.scale），先换算成
+        // compositor 逻辑坐标；窗口本身摆不了，创建前先请 KWin 的脚本接管。
+        #[cfg(not(target_os = "windows"))]
+        let (x, y) = place_wayland(layout.size, at, pad);
+        #[cfg(not(target_os = "windows"))]
+        let caption = CAPTION;
+        #[cfg(target_os = "windows")]
+        let caption = title.as_str();
+        #[cfg(not(target_os = "windows"))]
+        zouwu_platform::activate::place_window(
+            caption,
+            x,
+            y,
+            layout.size.0.round() as i32,
+            layout.size.1.round() as i32,
+        );
+
         let attrs = Window::default_attributes()
-            .with_title(&title)
+            .with_title(caption)
             .with_window_icon(crate::icon::app_icon())
             .with_inner_size(LogicalSize::new(layout.size.0, layout.size.1))
-            .with_position(PhysicalPosition::new(x, y))
             .with_decorations(false)
             .with_resizable(false)
             // 小兽是分层**置顶**窗口：菜单不置顶就会被压在它下面（实测菜单左上角
@@ -121,16 +150,22 @@ impl SkinMenuWindow {
             // 那一刻窗口会以系统默认尺寸（实测 1440x847）先闪一帧出来。
             // 见 `frame::settle` / `frame::show`。
             .with_visible(false);
+        #[cfg(target_os = "windows")]
+        let attrs = attrs.with_position(PhysicalPosition::new(x, y));
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
                 .map_err(|e| format!("create skin menu: {e}"))?,
         );
         // 窗口此刻还不可见：把位置与尺寸补到位，`inner_size()` 已经是最终值。
+        #[cfg(target_os = "windows")]
+        let settle_at = Some(PhysicalPosition::new(x, y));
+        #[cfg(not(target_os = "windows"))]
+        let settle_at = None;
         let physical = crate::frame::settle(
             &window,
             LogicalSize::new(layout.size.0, layout.size.1),
-            Some(PhysicalPosition::new(x, y)),
+            settle_at,
         );
         let presenter = create_soft(window.clone(), physical.width, physical.height)?;
         crate::frame::apply(&window, &theme);
@@ -367,9 +402,77 @@ pub fn draw(pixmap: &mut Pixmap, layout: &Layout, theme: &Theme, view: &View<'_>
     }
 }
 
-/// 把菜单摆到光标旁边，并夹进屏幕里。
+/// Wayland：把 UI 的“物理”光标换算成 compositor 逻辑坐标，再算菜单位置。
+///
+/// `layer::monitors()` 给的是 `(x, y, w, h, scale)`，前四项在 UI 的物理空间
+/// （compositor 逻辑 × `wl_output.scale`）。KWin 脚本要的是纯逻辑坐标，所以按
+/// 每块屏自己的 scale 除回去；光标也用它所在那块屏的 scale。
+#[cfg(not(target_os = "windows"))]
+fn place_wayland(size: (f32, f32), at: (i32, i32), pad: f32) -> (i32, i32) {
+    let mut rects = Vec::new();
+    let mut logical_at = None;
+    for (mx, my, mw, mh, scale) in zouwu_platform::layer::monitors() {
+        let s = if scale > 0.0 { scale } else { 1.0 };
+        let (lx, ly) = (
+            (mx as f64 / s).round() as i32,
+            (my as f64 / s).round() as i32,
+        );
+        let (lw, lh) = (
+            (mw as f64 / s).round() as i32,
+            (mh as f64 / s).round() as i32,
+        );
+        if logical_at.is_none() && at.0 >= mx && at.1 >= my && at.0 < mx + mw && at.1 < my + mh
+        {
+            logical_at = Some((
+                (at.0 as f64 / s).round() as i32,
+                (at.1 as f64 / s).round() as i32,
+            ));
+        }
+        rects.push((lx, ly, lw, lh));
+    }
+    // 光标不落在任何已知屏上（刚拔屏/布局还没刷新）：别猜缩放，按原坐标放，
+    // 至少不会把它甩到另一块屏去。
+    let at = logical_at.unwrap_or(at);
+    place_in(&rects, size, at, (8.0 + pad).round() as i32)
+}
+
+/// 在一组**同一坐标系**的屏幕矩形里，把 `size` 摆到 `at` 旁边。
+///
+/// 优先放到光标右下（鼠标惯用方向），右边/下边放不下就翻到左上；
+/// 最后夹进光标所在那块屏。`monitors` 为空时退回 `at + gap`。
+#[cfg(not(target_os = "windows"))]
+fn place_in(
+    monitors: &[(i32, i32, i32, i32)],
+    size: (f32, f32),
+    at: (i32, i32),
+    gap: i32,
+) -> (i32, i32) {
+    let (w, h) = (size.0.round() as i32, size.1.round() as i32);
+    let chosen = monitors
+        .iter()
+        .find(|(x, y, mw, mh)| at.0 >= *x && at.1 >= *y && at.0 < x + mw && at.1 < y + mh)
+        .or_else(|| monitors.first());
+    let Some(&(mx, my, mw, mh)) = chosen else {
+        return (at.0 + gap, at.1 + gap);
+    };
+    let mut x = at.0 + gap;
+    let mut y = at.1 + gap;
+    if x + w > mx + mw {
+        x = at.0 - gap - w;
+    }
+    if y + h > my + mh {
+        y = at.1 - gap - h;
+    }
+    (
+        x.clamp(mx, (mx + mw - w).max(mx)),
+        y.clamp(my, (my + mh - h).max(my)),
+    )
+}
+
+/// 把菜单摆到光标旁边，并夹进屏幕里（Windows/X11；Wayland 走 `place_wayland`）。
 ///
 /// 优先放到光标右下（鼠标惯用方向），右边/下边放不下就翻到左上。
+#[cfg(target_os = "windows")]
 fn place(
     event_loop: &ActiveEventLoop,
     size: (f32, f32),
@@ -426,6 +529,25 @@ fn place(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 右键菜单贴着光标右下；右边放不下就翻到左边，并且绝不跨到另一块屏。
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn menu_opens_at_the_cursor_and_flips_at_the_screen_edge() {
+        // 和这台机器一致：两块 2226×1252 的逻辑屏，右屏从 x=2227 开始。
+        let screens = [(0, 0, 2226, 1252), (2227, 0, 2226, 1252)];
+        let size = (216.0, 316.0);
+        // 光标在左屏中间：右下放得下。
+        assert_eq!(place_in(&screens, size, (800, 400), 64), (864, 464));
+        // 光标在左屏右缘：右下会越界，翻到左上。
+        let (x, y) = place_in(&screens, size, (2100, 400), 64);
+        assert_eq!((x, y), (1820, 464));
+        assert!(x + 216 <= 2226, "菜单必须留在光标所在那块屏里");
+        // 光标在右屏：换算/夹取只用右屏的边界，不会跑回左屏。
+        let (x, y) = place_in(&screens, size, (2500, 400), 64);
+        assert_eq!((x, y), (2564, 464));
+        assert!(x >= 2227);
+    }
 
     #[test]
     fn rows_stack_under_the_header_without_gaps() {

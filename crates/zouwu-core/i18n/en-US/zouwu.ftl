@@ -47,6 +47,12 @@ settings-hotkey = Summon hotkey
 settings-hotkey-hint = Click, then press a combo; Esc cancels, Backspace clears
 settings-hotkey-capturing = Waiting for keys…
 settings-hotkey-empty = Not set
+settings-hotkey-fallback = { $reason }. Using { $fallback } instead
+settings-hotkey-item-invalid = { $reason }. This bubble ignores its hotkey
+settings-hotkey-err-empty = The hotkey is empty
+settings-hotkey-err-missing-key = `{ $text }` has no main key
+settings-hotkey-err-unknown-token = don't know `{ $token }`
+settings-hotkey-err-no-modifier = `{ $key }` needs Ctrl/Alt/Shift
 settings-start-on-boot = Start with Windows
 settings-show-on-start = Show on launch
 settings-bring-to-front = Bring to front on summon
@@ -178,6 +184,7 @@ settings-eye-care-strength-hint = Higher is warmer; the maximum is roughly a 55%
 settings-section-alt-drag = Window drag
 settings-alt-drag = Hold Alt to drag windows
 settings-alt-drag-hint = Hold Alt and drag with the left button to move the window under the cursor; double-click to maximize (again to restore); wheel up maximizes, wheel down minimizes
+settings-alt-drag-hint-linux = Hold Alt and drag with the left button to move the window under the cursor; Alt+wheel up maximizes, wheel down restores; Alt+middle-click minimizes (KWin does the work and your original mouse bindings are restored when Zouwu exits; with Alt held a double-click cannot be intercepted on Wayland, double-clicking the title bar instead maximizes)
 
 # ── Clipboard history ─────────────────────────────────────
 settings-count = {$count} items

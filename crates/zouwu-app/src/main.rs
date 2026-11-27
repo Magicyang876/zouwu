@@ -37,7 +37,7 @@ fn main() -> ExitCode {
         "zouwu starting {VERSION} (platform={}, config={}, installed={})",
         zouwu_platform::platform_name(),
         zouwu_platform::config_path().display(),
-        cfg!(windows) && zouwu_platform::install::is_installed(),
+        zouwu_platform::install::is_installed(),
     );
 
     if let Err(err) = zouwu_ui::run() {
@@ -71,7 +71,6 @@ fn command(args: &[String]) -> ExitCode {
     }
 }
 
-#[cfg(windows)]
 fn install(silent: bool) -> ExitCode {
     match zouwu_platform::install::install(VERSION) {
         Ok(report) => {
@@ -105,13 +104,6 @@ fn install(silent: bool) -> ExitCode {
     }
 }
 
-#[cfg(not(windows))]
-fn install(_silent: bool) -> ExitCode {
-    eprintln!("install is only implemented for Windows");
-    ExitCode::FAILURE
-}
-
-#[cfg(windows)]
 fn uninstall(args: &[String], silent: bool) -> ExitCode {
     let purge = args.iter().any(|a| a == "--purge");
     match zouwu_platform::install::uninstall() {
@@ -139,18 +131,14 @@ fn uninstall(args: &[String], silent: bool) -> ExitCode {
     }
 }
 
-#[cfg(not(windows))]
-fn uninstall(_args: &[String], _silent: bool) -> ExitCode {
-    eprintln!("uninstall is only implemented for Windows");
-    ExitCode::FAILURE
-}
-
 const USAGE: &str = "\
 zouwu - a desktop companion that expands into a ring of shortcuts
 
 USAGE:
     zouwu                     start the widget (tray + global hotkey)
-    zouwu --install [--silent]      install into %LOCALAPPDATA%\\Programs\\zouwu
+    zouwu --install [--silent]      install for the current user
+                              (Windows: %LOCALAPPDATA%\\Programs\\zouwu,
+                               Linux:   ~/.local/bin/zouwu + menu entry)
     zouwu --uninstall [--purge] [--silent]
                               remove program files, registry entries, shortcut
                               (--purge also deletes settings, skins and logs)

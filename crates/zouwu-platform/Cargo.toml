@@ -13,3 +13,26 @@ log = { workspace = true }
 tray-icon = { workspace = true }
 global-hotkey = { workspace = true }
 rfd = { version = "0.17.2", default-features = false }
+
+# rfd 在非 Windows 上必须显式挑一个后端（build.rs 里 panic），Windows 不需要。
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal", "wayland"] }
+# 桌面挂件的"分层窗口"：layer-shell 的 overlay 层 + wl_shm 逐像素 alpha。
+# 只开 client 侧、不开 calloop/xkbcommon（我们不用它们的键盘和事件循环）。
+smithay-client-toolkit = { version = "0.19", default-features = false }
+wayland-client = "0.31"
+# 分数缩放：wl_surface 的 buffer scale 只能取整，KWin 在 1.15/1.25 这种屏上只能报 2，
+# 挂件就白白大一圈。`wp_fractional_scale_v1`（staging）+ `wp_viewporter` 才是正解：
+# buffer scale 恒为 1，真缩放由 preferred_scale(÷120) 告知，再由 viewport 映射回逻辑尺寸。
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+# 托盘：StatusNotifierItem 是纯 D-Bus 协议，走 ksni 就不需要 gtk/appindicator 那套
+# （也就不会逼出一个“必须在主线程建、必须跑 gtk 事件循环”的隐藏约束）。
+zbus = "5"
+ksni = { version = "0.3", default-features = false, features = ["async-io", "blocking"] }
+# 剪贴板：Wayland 下读选区必须走 wl_data_device + 管道（wl-clipboard-rs 封装好了）。
+wl-clipboard-rs = "0.9"
+# 文本栅格化：fontconfig 找字体文件 + FreeType 出覆盖率（即 Linux 版的 GDI）。
+# 用系统共享的字体文件而不是把字面读进进程，内存代价和 Windows 的 GDI 同一量级。
+freetype-rs = "0.38"
+# 日志时间戳：`localtime_r` 拿本地时间（Windows 走 GetLocalTime，不需要它）。
+libc = "0.2"

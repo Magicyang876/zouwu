@@ -12,8 +12,21 @@ use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{Window, WindowId, WindowLevel};
+use winit::window::WindowId;
 
+// 小兽本体在 Windows 上就是一个普通 winit 窗口；在 Linux/Wayland 上必须是
+// `wlr-layer-shell` 表面（winit 不给置顶/绝对定位/点击穿透），所以这里把
+// `Window` 这个名字换成 `host::PetWindow`——它的方法名与 `winit::Window`
+// 一一对应，下面几千行状态机因此一行都不用改。
+//
+// 面板窗口（设置/历史/报告/系统字体/形象菜单）仍然是真的 winit 窗口：
+// 它们要键盘焦点、要系统标题栏，winit 完全够用。
+#[cfg(target_os = "windows")]
+use winit::window::{Window, WindowLevel};
+#[cfg(not(target_os = "windows"))]
+use crate::host::PetWindow as Window;
+
+#[cfg(target_os = "windows")]
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 // 托盘应用的窗口不该占任务栏位置。winit 把这条挂在 Windows 扩展 trait 上，
@@ -77,6 +90,17 @@ pub fn run() -> Result<(), String> {
         return Ok(());
     };
 
+    // Linux 要有人叫醒事件循环：小兽表面上的输入是 Wayland 线程收的，
+    // 它只能通过 user event 把主线程戳起来（Windows 不需要，分层窗口自己收消息）。
+    #[cfg(not(target_os = "windows"))]
+    let event_loop = {
+        let event_loop = EventLoop::<UserEvent>::with_user_event()
+            .build()
+            .map_err(|e| format!("event loop: {e}"))?;
+        crate::host::install_waker(event_loop.create_proxy());
+        event_loop
+    };
+    #[cfg(target_os = "windows")]
     let event_loop = EventLoop::new().map_err(|e| format!("event loop: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
@@ -110,6 +134,24 @@ const BREATH_MS: Duration = Duration::from_millis(1200);
 /// 眨眼 180ms、呼吸 ~1.2s 都是“秒级慢变化”，30fps 纯属浪费：
 /// 实测常驻 CPU 几乎与“空闲帧率 × 单帧成本”成正比，降到 20fps 肉眼无差。
 const AMBIENT_FPS: f32 = 20.0;
+
+/// `ZOUWU_PERF=1` 时打每帧耗时（raster/present）。平时零开销。
+/// `ZOUWU_PERF_PACING=1` 时把每帧的节拍决策打进日志（调帧率用，平时关）。
+#[cfg(not(target_os = "windows"))]
+fn perf_pacing() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("ZOUWU_PERF_PACING").is_some_and(|v| !v.is_empty()))
+}
+
+#[cfg(target_os = "windows")]
+fn perf_pacing() -> bool {
+    false
+}
+
+fn perf_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("ZOUWU_PERF").is_some_and(|v| !v.is_empty()))
+}
 /// 光标在窗口外时的轮询间隔：只用来尽早发现“光标进来了”。
 ///
 /// 分层窗口的鼠标命中测试由系统决定，实测在部分环境里根本收不到 `CursorMoved`，
@@ -158,6 +200,32 @@ const CLIPBOARD_ACTION: &str = "builtin.clipboard";
 /// `GetClipboardSequenceNumber` 只是读一个计数器（约 0.1 µs），250ms 一次
 /// 的代价完全不可测。再快没有意义：人不会 250ms 内连复两次。
 const CLIPBOARD_POLL: Duration = Duration::from_millis(250);
+
+/// 面板刚建好/刚打开：请合成器把它抬到最前（Wayland 没有 raise 接口）。
+#[cfg(not(target_os = "windows"))]
+fn raise_panels() {
+    zouwu_platform::activate::raise_panels();
+}
+
+/// 关掉面板后**销毁**它（仅 Wayland 走这条）。
+///
+/// Windows 可以 `SetWindowPos` 把旧窗口重新顶上来；Wayland 没有等价能力：
+/// `set_visible(true)` 只是重新 map，合成器按自己的规矩摆 Z 序，实测就停在别的
+/// 窗口后面——面板"开了、看不见、也点不到"，于是也关不掉。
+/// 所以 Linux 上关面板等于销毁：下次打开是全新的 `xdg_toplevel`，合成器会把它
+/// 摆到最前并激活（Esc 和标题栏的关闭按钮这才够得着）。
+///
+/// 交给墓地而不是就地析构：`Window` 可能在它自己的事件派发里被丢掉，见
+/// `App::retired` 的注释。
+#[cfg(not(target_os = "windows"))]
+fn close_for_good<T: 'static>(
+    graveyard: &mut Vec<Box<dyn std::any::Any>>,
+    slot: &mut Option<T>,
+) {
+    if let Some(panel) = slot.take() {
+        graveyard.push(Box::new(panel));
+    }
+}
 
 struct App {
     config: Config,
@@ -209,7 +277,11 @@ struct App {
     /// 呼吸动画的起点
     breath_start: Option<Instant>,
 
+    /// 上一次**真的渲染出帧**的时刻。帧节拍锚在它上面（见 `next_deadline`）。
     last_frame: Instant,
+    /// 上一次跑 `update` 的时刻。弹簧积分的 `dt` 用它，和 `last_frame` 分开：
+    /// 一次没画东西的更新不该把帧节拍往前推，否则 60fps 会一直漂。
+    last_update: Instant,
     boot: Instant,
     /// 事件导致的"脏"标记：即使弹簧已收敛也要再画一帧
     dirty: bool,
@@ -307,6 +379,9 @@ struct App {
     scan_env_done: bool,
     /// `ZOUWU_HISTORY=1` 启动即开一次剪贴板历史窗（只一次）。
     history_env_done: bool,
+    /// `ZOUWU_SKIN_MENU=1` 启动即在宠物中心开一次形象菜单（只一次）。
+    /// 右键没法脚本化，而"菜单摆在哪"只能靠眼睛验。
+    skin_menu_env_done: bool,
     /// `ZOUWU_SYSFONT=1` 只触发一次，理由同 `settings_env_done`。
     sysfont_env_done: bool,
     /// 待销毁的子窗口。
@@ -324,6 +399,10 @@ struct App {
     cycle_left: u32,
     cycle_step: u8,
     cycle_next: Option<std::time::Instant>,
+    /// 表面重建的退避时间。合成器把我们的 layer 表面关掉（越界 margin 触发的
+    /// 协议错误、KWin 重启、输出热插拔…）时，界面得自己长回来，而不是留一个
+    /// 空进程在跑却「小兽不见了」。
+    respawn_at: Option<std::time::Instant>,
 }
 
 /// 把自定义球的图标都解成位图，下标与 `items` 对齐。
@@ -434,6 +513,7 @@ impl App {
             next_breath: Instant::now() + Duration::from_millis(4200),
             breath_start: None,
             last_frame: Instant::now(),
+            last_update: Instant::now(),
             boot: Instant::now(),
             dirty: true,
             rng: 0x5EED_1234,
@@ -462,6 +542,7 @@ impl App {
             settings_env_done: false,
             scan_env_done: false,
             history_env_done: false,
+            skin_menu_env_done: false,
             sysfont_env_done: false,
             retired: Vec::new(),
             cycle_left: std::env::var("ZOUWU_CYCLE")
@@ -470,6 +551,7 @@ impl App {
                 .unwrap_or(0),
             cycle_step: 0,
             cycle_next: None,
+            respawn_at: None,
         }
     }
 
@@ -485,9 +567,10 @@ impl App {
         self.window.clone()
     }
 
-    /// 平台的原始窗口句柄（Windows 下是 HWND）。
+    /// 平台的原始窗口句柄（Windows 下是 HWND，Linux 下是 layer 表面编号）。
     ///
     /// 托盘/显隐/置前这些都是**原生窗口概念**，所以在这里取一次句柄交给
+    #[cfg(target_os = "windows")]
     fn hwnd(&self) -> Option<isize> {
         let window = self.window.as_ref()?;
         let handle = window.window_handle().ok()?;
@@ -495,6 +578,11 @@ impl App {
             RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
             _ => None,
         }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn hwnd(&self) -> Option<isize> {
+        self.window.as_ref().map(|w| w.id_raw())
     }
 
     /// 用完就放：把配置写回磁盘（语言、热键、自启这些用户改动）。
@@ -672,7 +760,7 @@ impl App {
         }
 
         let names: Vec<&str> = changed.iter().map(|k| k.as_str()).collect();
-        self.last_frame = now;
+        self.last_update = now;
         self.dirty = true;
         log::info!("config applied from {origin}: {}", names.join(", "));
     }
@@ -734,6 +822,8 @@ impl App {
         match SettingsWindow::new(event_loop, self.config.clone(), self.themes.clone(), skins) {
             Ok(panel) => {
                 self.settings = Some(panel);
+                #[cfg(not(target_os = "windows"))]
+                raise_panels();
                 // 所有面板一视同仁：开面板**不动**小兽的 Z 序（ADR-039）。
                 // 小兽留在它该在的那一层，面板开着也照样能拖能点。
             }
@@ -770,6 +860,10 @@ impl App {
             self.save_config();
         }
         if close {
+            // Wayland 上重新 map 的窗口不会回到最前，所以关掉就真的销毁（见
+            // `close_for_good`）。Windows 保留窗口对象，下次 show 就够。
+            #[cfg(not(target_os = "windows"))]
+            close_for_good(&mut self.retired, &mut self.settings);
             // 关闭按钮的按下/松开不属于小兽，先同步按键基线再恢复轮询。
             self.buttons_down = (
                 zouwu_platform::layer::left_button_down(),
@@ -954,6 +1048,8 @@ impl App {
         }
         let title = self.i18n.t("qr.window-title");
         let copied = self.i18n.t("qr.copied");
+        #[cfg(not(target_os = "windows"))]
+        raise_panels();
         match ReportWindow::new(event_loop, report, self.theme.clone(), &title, copied) {
             Ok(window) => {
                 self.report = Some(window);
@@ -973,6 +1069,8 @@ impl App {
             return;
         }
         let title = self.i18n.t("sysfont.title-window");
+        #[cfg(not(target_os = "windows"))]
+        raise_panels();
         match SysFontWindow::new(
             event_loop,
             self.theme.clone(),
@@ -1006,6 +1104,8 @@ impl App {
             if let Some(window) = self.sysfont.as_mut() {
                 window.close();
             }
+            #[cfg(not(target_os = "windows"))]
+            close_for_good(&mut self.retired, &mut self.sysfont);
             self.last_child_closed_at = Instant::now();
             self.buttons_down = (
                 zouwu_platform::layer::left_button_down(),
@@ -1035,6 +1135,8 @@ impl App {
             if let Some(window) = self.report.as_mut() {
                 window.close();
             }
+            #[cfg(not(target_os = "windows"))]
+            close_for_good(&mut self.retired, &mut self.report);
             self.last_child_closed_at = Instant::now();
             self.buttons_down = (
                 zouwu_platform::layer::left_button_down(),
@@ -1167,8 +1269,8 @@ impl App {
         }
         self.visible = visible;
         if visible {
-            // 隐藏期间时间照样在走，dt 会很大：把帧节拍对齐到现在。
-            self.last_frame = now;
+            // 隐藏期间时间照样在走，dt 会很大：把积分钟对齐到现在。
+            self.last_update = now;
             self.dirty = true;
             self.buttons_down = (
                 zouwu_platform::layer::left_button_down(),
@@ -1277,7 +1379,7 @@ impl App {
             menu.set_theme(self.theme.clone());
         }
         self.save_config();
-        self.last_frame = now;
+        self.last_update = now;
         self.dirty = true;
         log::info!("theme -> {id}");
     }
@@ -1303,7 +1405,7 @@ impl App {
         }
         self.refresh_tray_icon();
         self.save_config();
-        self.last_frame = now;
+        self.last_update = now;
         self.dirty = true;
         log::info!("skin -> {id}");
     }
@@ -1352,7 +1454,7 @@ impl App {
             self.save_config();
         }
         if crate::text::set_family(family.clone()) {
-            self.last_frame = now;
+            self.last_update = now;
             self.dirty = true;
         }
         log::info!(
@@ -1514,6 +1616,45 @@ impl App {
         let size = win.inner_size();
         let scale = win.scale_factor() as f32;
         (size.width as f32 / scale, size.height as f32 / scale)
+    }
+
+    /// 重建 layer 表面（Wayland 专用）。合成器关掉它之后（协议错误、KWin 重启、
+    /// 输出热插拔），这是让挂件「自己长回来」的唯一办法：layer 表面不能救，只能重开。
+    #[cfg(not(target_os = "windows"))]
+    fn respawn_pet(&mut self, now: Instant) -> Result<(), String> {
+        let (lw, _lh) = self.logical_size();
+        // **逻辑**像素进 `create`：它自己会拿这块屏的缩放乘出真实缓冲区。
+        // 以前这里穿的是乘过缩放的物理值，重建一次大一圈（1.15x 屏上
+        // 680→1360→2720……），几轮之后整只就飞出屏幕外了。
+        let logical = (lw.round() as u32).max(1);
+        let pos = self.state_pos;
+        // 旧表面已经死了，先拆掉：presenter 持有它的 `Arc`，留着会让旧连接悬着。
+        self.window = None;
+        self.presenter = None;
+        match zouwu_platform::layer::PetSurface::create(logical, logical, (0, 0)) {
+            Ok(surface) => {
+                let (pw, ph) = surface.size();
+                let surface = std::sync::Arc::new(surface);
+                let window = std::sync::Arc::new(crate::host::PetWindow::new(surface.clone()));
+                self.presenter = Some(Box::new(crate::presenter::LayerPresenter::new(surface)));
+                if let Some((x, y)) = pos {
+                    window
+                        .set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+                }
+                self.window = Some(window);
+                self.respawn_at = None;
+                self.dirty = true;
+                self.last_update = now;
+                log::info!("layer surface recreated: {pw}x{ph} px at {pos:?}");
+                Ok(())
+            }
+            Err(err) => {
+                // 失败就退避 3 秒再试：合成器可能正在重启，值得等一等。
+                self.respawn_at = Some(now + Duration::from_secs(3));
+                log::error!("cannot recreate layer surface (will retry): {err}");
+                Err(err)
+            }
+        }
     }
 
     fn viewport(&self) -> Rect {
@@ -1696,10 +1837,10 @@ impl App {
 
     fn update(&mut self, now: Instant) {
         let dt = now
-            .duration_since(self.last_frame)
+            .duration_since(self.last_update)
             .as_secs_f32()
             .clamp(0.0, 0.05);
-        self.last_frame = now;
+        self.last_update = now;
 
         // 0) 输入兜底在 `about_to_wait` 里做（那里每轮都会走一遍，包括定时器唤醒）
 
@@ -1857,10 +1998,23 @@ impl App {
     /// 看不出差别（实测单帧光栅约 0.5ms，30fps 下只占一个核的 1.5%）。
     fn frame_interval(&self, now: Instant) -> Duration {
         if self.interactive_animation(now) {
-            Duration::from_secs_f32(zouwu_core::FRAME_60FPS)
+            Duration::from_secs_f32(1.0 / self.display_hz())
         } else {
             Duration::from_secs_f32(1.0 / AMBIENT_FPS)
         }
+    }
+
+    /// 显示器刷新率（Hz），拿不到就是 60。
+    ///
+    /// 节拍必须**跟着屏幕走**：这块屏是 74.97Hz，按 60fps 的节拍送帧，每 5 帧
+    /// 就会有一次"同一帧被显示两遍"，肉眼看到的就是周期性顿一下。
+    fn display_hz(&self) -> f32 {
+        #[cfg(not(target_os = "windows"))]
+        if let Some(hz) = self.window.as_ref().and_then(|w| w.refresh_hz()) {
+            return hz.clamp(30.0, 240.0);
+        }
+        let _ = zouwu_core::FRAME_60FPS;
+        60.0
     }
 
     /// 下一个"必须醒来"的时刻（None = 可以一直睡下去）。
@@ -1874,25 +2028,46 @@ impl App {
     /// `available_monitors` 的顺序不保证稳定（换一个 DPI、换个版本就可能变），
     /// 而 `home_slot` 把第一个当主屏，所以这里显式把 `primary_monitor` 提到前面。
     fn monitor_rects(event_loop: &ActiveEventLoop) -> Vec<Rect> {
-        fn to_rect(m: &winit::monitor::MonitorHandle) -> Rect {
-            let p = m.position();
-            let s = m.size();
-            Rect::new(p.x as f32, p.y as f32, s.width as f32, s.height as f32)
+        // Linux：**不要**用 winit 的 monitor 数据。分数缩放（比如 1.15）下
+        // 它给的 `position()` 是逻辑坐标、`size()` 却是物理像素，两半混在一起
+        // 用，`visible_ratio` 就会把"明明在屏幕上"的窗口判成 0% 可见，然后把它
+        // 挪到一块根本不存在的屏外面（实测挪到了 x=6286，屏幕总宽才 5121）。
+        //
+        // 平台层给的这套已经乘回过表面像素、并且和 `PetWindow::outer_position`
+        // / `set_outer_position` 用的是同一套换算（逻辑 × wl_output.scale），
+        // 所以两边同一个单位。
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = event_loop;
+            return zouwu_platform::layer::monitors()
+                .into_iter()
+                .map(|(x, y, w, h, _scale)| {
+                    Rect::new(x as f32, y as f32, w as f32, h as f32)
+                })
+                .collect();
         }
-        let mut out = Vec::new();
-        if let Some(m) = event_loop.primary_monitor() {
-            out.push(to_rect(&m));
-        }
-        for m in event_loop.available_monitors() {
-            let r = to_rect(&m);
-            let dup = out
-                .iter()
-                .any(|o| o.x == r.x && o.y == r.y && o.w == r.w && o.h == r.h);
-            if !dup {
-                out.push(r);
+        #[cfg(target_os = "windows")]
+        {
+            fn to_rect(m: &winit::monitor::MonitorHandle) -> Rect {
+                let p = m.position();
+                let s = m.size();
+                Rect::new(p.x as f32, p.y as f32, s.width as f32, s.height as f32)
             }
+            let mut out = Vec::new();
+            if let Some(m) = event_loop.primary_monitor() {
+                out.push(to_rect(&m));
+            }
+            for m in event_loop.available_monitors() {
+                let r = to_rect(&m);
+                let dup = out
+                    .iter()
+                    .any(|o| o.x == r.x && o.y == r.y && o.w == r.w && o.h == r.h);
+                if !dup {
+                    out.push(r);
+                }
+            }
+            out
         }
-        out
     }
 
     /// 窗口自己占的矩形（物理像素）。
@@ -1932,6 +2107,20 @@ impl App {
             return false;
         };
         let ratio = zouwu_core::geom::visible_ratio(me, &monitors);
+        // 坐标单位对不上时，这条日志是唯一能定位问题的地方，值得留着。
+        log::debug!(
+            "ensure_visible_on: self ({:.0},{:.0} {:.0}x{:.0}) on {} monitor(s) {:?} -> {:.0}% visible",
+            me.x,
+            me.y,
+            me.w,
+            me.h,
+            monitors.len(),
+            monitors
+                .iter()
+                .map(|m| format!("({:.0},{:.0} {:.0}x{:.0})", m.x, m.y, m.w, m.h))
+                .collect::<Vec<_>>(),
+            ratio * 100.0
+        );
         if had_position && ratio >= MIN_VISIBLE_RATIO {
             return false;
         }
@@ -2085,8 +2274,109 @@ impl App {
     }
 
     /// 按自适应间隔轮询一次光标，并安排下一次轮询。
+    /// 排空小兽表面上的输入（Wayland 版）。
+    ///
+    /// 和 `poll_pointer` 的分工：Wayland **只把指针位置告诉收事件的表面**，
+    /// 桌面上的全局光标坐标客户端根本查不到（隐私设计）。所以这里不能像
+    /// Windows 那样主动问「光标在哪」，只能处理合成器送来的事件。
+    ///
+    /// 好在精度反而更高：进/出/按下/抬起都是事件，不用靠 300ms 的轮询去猜。
+    #[cfg(not(target_os = "windows"))]
+    fn poll_pet(&mut self) {
+        let now = Instant::now();
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        let events = window.surface().take_input();
+        if events.is_empty() {
+            return;
+        }
+        // 这里必须用**整数**坐标缩放：`PetInput` 给的是全局物理坐标，
+        // `outer_position` 也是物理坐标，两者相减后再除以整数 scale 才是本地逻辑
+        // 坐标。`scale_factor()` 是 buffer 的分数缩放（1.15），拿它去除会把本地
+        // 坐标放大 `整数/分数` 倍（这块屏上是 1.74 倍），本体中心被算到半径外，
+        // 按下时 `on_buddy` 判不中，于是「鼠标拖不动」。
+        let scale = coord_scale(&window) as f32;
+        let mut changed = false;
+        for event in events {
+            match event {
+                zouwu_platform::layer::PetInput::Motion { x, y } => {
+                    let origin = window.outer_position().unwrap_or_default();
+                    let p = Point::new(
+                        (x - origin.x) as f32 / scale,
+                        (y - origin.y) as f32 / scale,
+                    );
+                    self.on_cursor_moved(p, now);
+                    changed = true;
+                    // 拖动：表面跟着走，指针就一直在本体上，这是 Wayland 唯一的拖动办法。
+                    if let Some(mut drag) = self.drag.take() {
+                        match drag.track((x, y)) {
+                            Some((nx, ny)) => {
+                                log::trace!("pet: drag -> {nx},{ny}");
+                                window.set_outer_position(PhysicalPosition::new(nx, ny));
+                                self.state_pos = Some((nx, ny));
+                            }
+                            None => log::debug!("pet: drag under threshold"),
+                        }
+                        self.drag = Some(drag);
+                    }
+                }
+                zouwu_platform::layer::PetInput::Leave => {
+                    self.on_cursor_left();
+                    changed = true;
+                }
+                zouwu_platform::layer::PetInput::Press(button) => {
+                    log::debug!("pet: press {button:?} cursor {:?}", self.cursor);
+                    let button = match button {
+                        zouwu_platform::layer::PointerButton::Left => MouseButton::Left,
+                        zouwu_platform::layer::PointerButton::Right => MouseButton::Right,
+                        zouwu_platform::layer::PointerButton::Middle => MouseButton::Middle,
+                        zouwu_platform::layer::PointerButton::Other => continue,
+                    };
+                    self.buttons_down = (
+                        button == MouseButton::Left,
+                        button == MouseButton::Right,
+                    );
+                    self.click(button, now);
+                    changed = true;
+                }
+                zouwu_platform::layer::PetInput::Release(button) => {
+                    self.buttons_down = (false, false);
+                    if button == zouwu_platform::layer::PointerButton::Left {
+                        // 和 Windows 的松手分支同一个意思：拖动结束要归位。
+                        if let Some(drag) = self.drag.take() {
+                            let last = window.outer_position().unwrap_or_default();
+                            match drag.finish((last.x, last.y)) {
+                                DragOutcome::Moved { x, y } => {
+                                    self.state_pos = Some((x, y));
+                                    self.state_pending = true;
+                                }
+                                DragOutcome::Click => self.toggle_from_click(now),
+                            }
+                        }
+                    }
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.dirty = true;
+            self.update(now);
+            if self.needs_render(now) {
+                if let Err(err) = self.render_frame(now) {
+                    log::error!("render failed: {err}");
+                }
+            }
+        }
+    }
+
     fn poll_now(&mut self, now: Instant) {
+        // Windows 靠主动轮询光标 + 按键；Wayland 的指针状态是事件驱动的，
+        // 由 `poll_pet` 维护，这里只要知道「本体现在有没有被指着」就够了。
+        #[cfg(target_os = "windows")]
         let inside = self.poll_pointer(now);
+        #[cfg(not(target_os = "windows"))]
+        let inside = self.cursor.is_some();
         self.poll_clipboard(now);
         self.trace_input(now, inside);
         // 窗口内高频（不漏点击）、窗口外低频（省 CPU）
@@ -2180,6 +2470,8 @@ impl App {
             );
             return;
         }
+        #[cfg(not(target_os = "windows"))]
+        raise_panels();
         let window = HistoryWindow::new(
             event_loop,
             entries,
@@ -2220,31 +2512,46 @@ impl App {
             self.close_skin_menu(now);
             return;
         }
+        let Some(at) = zouwu_platform::layer::cursor_position() else {
+            log::warn!("skin menu: no cursor position");
+            return;
+        };
+        self.open_skin_menu_at(event_loop, at);
+    }
+
+    /// 在 `at`（UI 的物理坐标，鼠标右键的位置）打开形象菜单。
+    ///
+    /// 单独抽出来是给 `ZOUWU_SKIN_MENU=1` 回归用的：右键没法脚本化，但菜单
+    /// 摆在哪里必须能一键复现。
+    fn open_skin_menu_at(&mut self, event_loop: &ActiveEventLoop, at: (i32, i32)) {
         let choices = zouwu_platform::assets::skin_choices(&self.i18n);
         if choices.is_empty() {
             log::warn!("skin menu: no skins to show");
             return;
         }
-        let Some((x, y)) = zouwu_platform::layer::cursor_position() else {
-            log::warn!("skin menu: no cursor position");
-            return;
-        };
         let current = self.config.appearance.skin.clone();
         let title = self.i18n.t("skin.menu.title");
         // 菜单要贴着火圈外面长出来，所以把本体的视觉半径一起传进去。
-        let scale = self
-            .window
-            .as_ref()
-            .map(|w| w.scale_factor() as f32)
-            .unwrap_or(1.0);
-        let pad = self.config.buddy.radius * scale;
+        //
+        // Linux/Wayland 的 `at` 是 UI 的“物理”坐标，半径是逻辑像素；换算成
+        // compositor 逻辑坐标由 `skin_menu::place_wayland` 统一做，这里不要先乘
+        // 那个 1.15 的 buffer 缩放（乘了会变成两套单位）。
+        #[cfg(target_os = "windows")]
+        let pad = self.config.buddy.radius
+            * self
+                .window
+                .as_ref()
+                .map(|w| w.scale_factor() as f32)
+                .unwrap_or(1.0);
+        #[cfg(not(target_os = "windows"))]
+        let pad = self.config.buddy.radius;
         match SkinMenuWindow::new(
             event_loop,
             choices,
             current,
             self.theme.clone(),
             title,
-            (x, y),
+            at,
             pad,
         ) {
             Ok(window) => self.skin_menu = Some(window),
@@ -2313,6 +2620,8 @@ impl App {
             if let Some(window) = self.history_window.as_mut() {
                 window.close();
             }
+            #[cfg(not(target_os = "windows"))]
+            close_for_good(&mut self.retired, &mut self.history_window);
             self.last_child_closed_at = Instant::now();
             self.buttons_down = (
                 zouwu_platform::layer::left_button_down(),
@@ -2338,7 +2647,7 @@ impl App {
         let cursor = zouwu_platform::layer::cursor_position();
         let window = self.window.clone();
         let (origin, scale) = match window.as_ref() {
-            Some(w) => (w.outer_position().unwrap_or_default(), w.scale_factor()),
+            Some(w) => (w.outer_position().unwrap_or_default(), coord_scale(w)),
             None => (PhysicalPosition::new(0, 0), 1.0),
         };
         log::info!(
@@ -2359,6 +2668,7 @@ impl App {
     ///
     /// 返回光标是否落在窗口矩形内。坐标换算：`GetCursorPos` 给的是屏幕物理像素，
     /// 减去窗口左上角（也是物理像素）再除以 DPI 缩放就是本地逻辑坐标。
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     fn poll_pointer(&mut self, now: Instant) -> bool {
         if !self.visible {
             // 窗口藏着的时候，光标相对窗口的位置没有意义（也不该触发悬停/点击）。
@@ -2498,13 +2808,29 @@ impl App {
         self.hover_since = None;
         self.hover_locked = true;
 
-        let (Some((sx, sy)), Some(window)) = (
-            zouwu_platform::layer::cursor_position(),
-            self.window.clone(),
-        ) else {
+        let Some(window) = self.window.clone() else {
             return;
         };
         let origin = window.outer_position().unwrap_or_default();
+        // Wayland 不给全局光标坐标（只有指针在自己表面上时才知道它在哪）。
+        // 平时 `layer::cursor_position()` 有值（表面在收集 Motion）；万一没有
+        // （例如按下先于第一次 Motion 到达），就用“本地光标 + 窗口原点”推出来，
+        // 否则拖动会**静静地不开始**。
+        // 同 `poll_pet`：本地逻辑 → 全局物理要乘整数坐标缩放，不是 buffer 的
+        // 分数缩放（1.15）。混用会让拖动起点差出几十像素。
+        let scale = coord_scale(&window);
+        let cursor = zouwu_platform::layer::cursor_position().or_else(|| {
+            self.cursor.map(|p| {
+                (
+                    (origin.x as f64 + p.x as f64 * scale).round() as i32,
+                    (origin.y as f64 + p.y as f64 * scale).round() as i32,
+                )
+            })
+        });
+        let Some((sx, sy)) = cursor else {
+            log::warn!("drag start: no cursor position yet");
+            return;
+        };
         self.drag = Some(Drag::begin((sx, sy), (origin.x, origin.y)));
         // 手动介入 = 解除钉住：拖动时环会收起来（见上），之后照常自动收起。
         log::debug!(
@@ -2513,7 +2839,7 @@ impl App {
             window.inner_size().height,
             origin.x,
             origin.y,
-            window.scale_factor()
+            coord_scale(&window)
         );
     }
 
@@ -2584,8 +2910,27 @@ impl App {
         }
     }
 
-    fn render_frame(&mut self, now: Instant) -> Result<(), String> {
-        crate::watchdog::enter(crate::watchdog::stage::RENDER);
+    /// 表面报的尺寸和手上的画布是不是对不上了。
+    ///
+    /// Wayland 的分数缩放（`wp_fractional_scale_v1`）是异步的：表面先以整数
+    /// 缩放建出来，`preferred_scale` 到了才会变成 1.15 这种值，buffer 尺寸跟着变。
+    /// 这时必须重建画布。`pending_extent`（自动缩放）那条路自己管尺寸，不参与。
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    fn canvas_is_stale(&self) -> bool {
+        if self.pending_extent.is_some() {
+            return false;
+        }
+        let Some(win) = self.window_arc() else {
+            return false;
+        };
+        let size = win.inner_size();
+        match self.pixmap.as_ref() {
+            Some(p) => p.width() != size.width.max(1) || p.height() != size.height.max(1),
+            None => false,
+        }
+    }
+
+    fn render_frame(&mut self, now: Instant) -> Result<(), String> {        crate::watchdog::enter(crate::watchdog::stage::RENDER);
         let Some(win) = self.window_arc() else {
             return Ok(());
         };
@@ -2653,12 +2998,23 @@ impl App {
         let Some(pixmap) = self.pixmap.as_mut() else {
             return Err("pixmap alloc failed".into());
         };
+        let t0 = Instant::now();
         render(&scene, pixmap);
-
+        let raster = t0.elapsed();
         if let Some(presenter) = self.presenter.as_mut() {
             presenter.present(pixmap)?;
         }
+        if perf_on() {
+            log::info!(
+                "perf: raster {:.2}ms, present {:.2}ms, {pw}x{ph}, {} bubble(s)",
+                raster.as_secs_f64() * 1000.0,
+                t0.elapsed().as_secs_f64() * 1000.0 - raster.as_secs_f64() * 1000.0,
+                paints.len()
+            );
+        }
         self.dirty = false;
+        // 帧节拍锚在“真的出了一帧”，`next_deadline` 靠它算下一个 16.7ms。
+        self.last_frame = now;
 
         self.perf_trace_frame(now);
         Ok(())
@@ -2708,7 +3064,69 @@ fn apply_hotkey_setting(
     registrar.set(slot, &spec)
 }
 
-impl ApplicationHandler for App {
+/// 事件循环的 user event 类型。
+///
+/// Windows 没有「从别的线程叫醒事件循环」的需求（分层窗口自己收消息），
+/// 所以是 `()`；Linux 的 Wayland 线程只能靠它戳主线程。
+#[cfg(target_os = "windows")]
+type UserEvent = ();
+#[cfg(not(target_os = "windows"))]
+use crate::host::UserEvent;
+
+/// 屏幕物理坐标与本地逻辑坐标之间的缩放。
+///
+/// Linux 的 `PetWindow` 有**两套**缩放：`scale_factor()` 是 buffer 的分数缩放
+/// （1.15 这种），`monitor_scale()` 是坐标空间的整数缩放（`wl_output.scale`）。
+/// 光标、窗口原点、`Drag` 全在整数那套里，用它换算才对。Windows 的窗口就是
+/// winit，DPI 缩放本身就是坐标缩放。
+fn coord_scale(window: &Window) -> f64 {
+    #[cfg(not(target_os = "windows"))]
+    {
+        window.monitor_scale()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        window.scale_factor()
+    }
+}
+
+impl ApplicationHandler<UserEvent> for App {
+    /// 小兽表面上的输入由 Wayland 线程收，主线程被叫醒后在这里排空。
+    #[cfg(not(target_os = "windows"))]
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+        match event {
+            UserEvent::Input => {
+                self.poll_pet();
+                // 分数缩放是**异步到达**的（`preferred_scale` 可能比第一帧还晚），
+                // 表面尺寸会在已经显示之后变。尺寸一变画布就得重做，否则新 buffer
+                // 与旧画布错位（画出来是花的）。这里不看 `needs_render`：动画停了
+                // 也得重画这一帧。
+                if self.canvas_is_stale() {
+                    if let Err(err) = self.render_frame(Instant::now()) {
+                        log::error!("render failed: {err}");
+                    }
+                }
+            }
+            UserEvent::Redraw => {
+                // **必须**先把"已排队"标志清掉：`PetWindow::request_redraw` 只在
+                // 标志从 false 翻到 true 时才叫醒事件循环，用来合并同一帧里的多
+                // 次请求。清的地方只在这里——不然后面每一次 `request_redraw()`
+                // 都会被这个常驻的 true 吞掉，动画第二帧就再也不动（用户看到的是
+                // "气泡啪一下弹出来"，而不是冒出来）。
+                if let Some(window) = self.window.clone() {
+                    window.take_redraw();
+                }
+                let now = Instant::now();
+                self.update(now);
+                if self.needs_render(now) {
+                    if let Err(err) = self.render_frame(now) {
+                        log::error!("render failed: {err}");
+                    }
+                }
+            }
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -2732,6 +3150,7 @@ impl ApplicationHandler for App {
         } else {
             size as f64
         };
+        #[cfg(target_os = "windows")]
         let attrs = Window::default_attributes()
             .with_title("zouwu")
             .with_inner_size(LogicalSize::new(logical, logical))
@@ -2742,6 +3161,7 @@ impl ApplicationHandler for App {
             .with_skip_taskbar(true)
             .with_visible(true);
 
+        #[cfg(target_os = "windows")]
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(err) => {
@@ -2749,6 +3169,31 @@ impl ApplicationHandler for App {
                 event_loop.exit();
                 return;
             }
+        };
+
+        // Wayland：自建 layer 表面。位置先给 (0,0)，紧接着的
+        // `ensure_visible_on` 会把它摆到「宠物位」——第一次 `present` 之前
+        // 表面没有缓冲区，所以这个中间位置用户看不见。
+        #[cfg(not(target_os = "windows"))]
+        let window = {
+            // `create` 收的是**逻辑**尺寸，物理缓冲区由它按所在屏的缩放算。
+            let logical_px = (logical.round() as u32).max(1);
+            let surface =
+                match zouwu_platform::layer::PetSurface::create(logical_px, logical_px, (0, 0)) {
+                    Ok(surface) => Arc::new(surface),
+                    Err(err) => {
+                        log::error!("layer surface failed: {err}");
+                        event_loop.exit();
+                        return;
+                    }
+                };
+            let (pw, ph) = surface.size();
+            log::info!(
+                "layer surface ready: {pw}x{ph} px at {}x (surface {})",
+                surface.scale(),
+                surface.id()
+            );
+            Arc::new(crate::host::PetWindow::new(surface))
         };
 
         // 位置：优先回到上次的位置；没有记录时停在主屏右侧偏下的「宠物位」。
@@ -2764,8 +3209,16 @@ impl ApplicationHandler for App {
         }
         self.ensure_visible_on(event_loop, &window, saved.is_some());
 
-        let physical = window.inner_size();
-        match crate::presenter::create(&window, physical.width, physical.height) {
+        #[cfg(target_os = "windows")]
+        let presenter = {
+            let physical = window.inner_size();
+            crate::presenter::create(&window, physical.width, physical.height)
+        };
+        #[cfg(not(target_os = "windows"))]
+        let presenter: Result<Box<dyn Presenter>, String> = Ok(Box::new(
+            crate::presenter::LayerPresenter::new(window.surface().clone()),
+        ));
+        match presenter {
             Ok(p) => self.presenter = Some(p),
             Err(err) => {
                 log::error!("presenter init failed: {err}");
@@ -2777,6 +3230,7 @@ impl ApplicationHandler for App {
         self.window = Some(window);
         self.relayout();
         self.last_frame = Instant::now();
+        self.last_update = self.last_frame;
         self.dirty = true;
 
         // 窗口存在之后才能拿 HWND：托盘、隐藏态、置前都依赖它。
@@ -2811,6 +3265,9 @@ impl ApplicationHandler for App {
         zouwu_platform::eyecare::shutdown();
         // 鼠标钩子同理：给钩子线程投个退出消息，让它自己卸钩子。
         zouwu_platform::altdrag::shutdown();
+        // KWin 里的“抬窗口”脚本也要停掉，别在用户会话里留东西。
+        #[cfg(not(target_os = "windows"))]
+        zouwu_platform::activate::shutdown();
         log::info!("zouwu exiting");
     }
 
@@ -2968,12 +3425,33 @@ impl ApplicationHandler for App {
         }
         let now = Instant::now();
 
+        // SIGTERM/SIGINT/SIGHUP：走正常退出，别让退出清理（还原 kwinrc 的
+        // Alt 拖动、收护眼遮罩）被信号直接跳过。
+        #[cfg(not(target_os = "windows"))]
+        if zouwu_platform::signal::terminate_requested() {
+            // cleanup 交给 winit 的 `exiting()`（`exit()` 之后一定会调），
+            // 这里自己再调一遍会双份保存/双份日志。
+            event_loop.exit();
+            return;
+        }
+
         // 清墓地：这里已经出了事件派发（不在窗口过程里），析构 `Window` 不会重入。
         // 见 `retired` 字段的注释——这是修“开过二维码窗再开历史窗就卡死”的关键。
         if !self.retired.is_empty() {
             log::info!("app: draining {} retired window(s)", self.retired.len());
             self.retired.clear();
             log::info!("app: drain done");
+        }
+
+        // Wayland：合成器可能把我们的 layer 表面关掉（越界 margin 触发的协议错误、
+        // KWin 重启、输出热插拔都会）。表面一死就再也收不到指针事件和 frame 回调，
+        // 但进程还活着——表现就是「小兽不见了」而托盘菜单还在。
+        #[cfg(not(target_os = "windows"))]
+        if self.window.as_ref().is_some_and(|w| w.closed()) {
+            if self.respawn_at.is_none_or(|at| now >= at) {
+                log::warn!("layer surface is gone (closed by the compositor); recreating it");
+                let _ = self.respawn_pet(now);
+            }
         }
 
         // 轮询只是一种"叫醒输入"，它本身不应该产生任何重绘：
@@ -3042,6 +3520,12 @@ impl ApplicationHandler for App {
         // 面板后它会被立刻重新打开，看起来就像关不掉。
         // 只认非空值：`ZOUWU_SETTINGS=`（空字符串）在 shell 里很常见，
         // 不该因此弹出一个用户没要的面板。
+        // `ZOUWU_EXPAND=1` 启动即展开整圈：悬停/点击都没法脚本化，而"展开动画
+        // 流不流畅"是唯一只能靠眼睛验的东西，留个把手给 perf 测量用。
+        if !self.expanded && std::env::var_os("ZOUWU_EXPAND").is_some_and(|v| !v.is_empty()) {
+            self.set_expanded(true, now);
+            self.pinned = true;
+        }
         let want_panel = std::env::var_os("ZOUWU_SETTINGS").is_some_and(|v| !v.is_empty());
         if !self.scan_env_done && std::env::var_os("ZOUWU_SCAN").is_some_and(|v| !v.is_empty()) {
             self.scan_env_done = true;
@@ -3064,6 +3548,24 @@ impl ApplicationHandler for App {
             self.sysfont_env_done = true;
             self.pending_sysfont = true;
         }
+        // `ZOUWU_SKIN_MENU=1`：右键没法脚本化，就在宠物中心开一次。
+        if !self.skin_menu_env_done
+            && std::env::var_os("ZOUWU_SKIN_MENU").is_some_and(|v| !v.is_empty())
+        {
+            self.skin_menu_env_done = true;
+            if let Some(window) = self.window.clone() {
+                let origin = window.outer_position().unwrap_or_default();
+                let center = self.center();
+                let scale = coord_scale(&window) as f32;
+                self.open_skin_menu_at(
+                    event_loop,
+                    (
+                        origin.x + (center.x * scale).round() as i32,
+                        origin.y + (center.y * scale).round() as i32,
+                    ),
+                );
+            }
+        }
         if std::mem::take(&mut self.pending_settings) {
             self.open_settings(event_loop, now);
         }
@@ -3074,13 +3576,40 @@ impl ApplicationHandler for App {
 
         match self.next_deadline(now) {
             Some(t) if t <= now => {
+                // **帧节拍闸门**：dirty 只表示"有东西要画"，不表示"立刻画"。
+                // 少了这道闸，脏标记每一帧都会把 `request_redraw` 直接投进事件
+                // 队列（那是立刻唤醒，不等定时器），于是渲染循环退化成"画完就
+                // 立刻画下一帧"——实测 3~4ms 一帧连刷十几帧（≈300fps），紧接着
+                // 掉到 50ms 一帧，看上去就是"一卡一卡的"。
+                let next = self.last_frame + self.frame_interval(now);
+                if next > now {
+                    if perf_pacing() {
+                        log::info!(
+                            "perf: pacing wait {:.1}ms (dirty={}, since frame {:.1}ms)",
+                            (next - now).as_secs_f64() * 1000.0,
+                            self.dirty,
+                            now.duration_since(self.last_frame).as_secs_f64() * 1000.0
+                        );
+                    }
+                    event_loop.set_control_flow(ControlFlow::WaitUntil(next));
+                    return;
+                }
+                if perf_pacing() {
+                    log::info!(
+                        "perf: pacing frame (dirty={}, since frame {:.1}ms)",
+                        self.dirty,
+                        now.duration_since(self.last_frame).as_secs_f64() * 1000.0
+                    );
+                }
                 if let Some(w) = self.window_arc() {
                     w.request_redraw();
                 }
                 // 不用 Wait：万一有哪个 deadline 因为状态没推进而反复到期，
-                // 16ms 的军底定时器能把最坏情况钳在 ~60Hz，不会空转转满一个核。
+                // 兜底定时器能把最坏情况钳在一帧，不会空转转满一个核。
+                // 间隔按当前动画档位取（不是写死的 16ms）：环境动画是 20fps，
+                // 写 16ms 会让空闲时白醒两次。
                 event_loop
-                    .set_control_flow(ControlFlow::WaitUntil(now + Duration::from_millis(16)));
+                    .set_control_flow(ControlFlow::WaitUntil(now + self.frame_interval(now)));
             }
             Some(t) => event_loop.set_control_flow(ControlFlow::WaitUntil(t)),
             None => event_loop.set_control_flow(ControlFlow::Wait),

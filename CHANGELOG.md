@@ -5,7 +5,78 @@
 
 ## Unreleased
 
-（暂无）
+### 新增
+
+- **Alt 手势补齐了滚轮和最小化**（Linux/KDE Wayland）：之前只把 KWin 的 Meta 拖动借给
+  Alt，双击和滚轮都没接上。现在同时写 `CommandAllWheel=Maximize/Restore`（Alt+滚轮
+  上滚最大化、下滚还原）和 `CommandAll2=Minimize`（Alt+中键最小化），原值照样记在
+  `altdrag.state`、退出时还回——旧标记文件里没有这两项的话，下次启动会补齐，且不会把
+  我们刚写的值当成“原值”。KWin 的滚轮动作里没有“最小化”，所以滚轮下滚只能是还原；
+  带 Alt 的双击在 Wayland 下拦不到（合成器不把带修饰键的点击交给客户端），双击标题栏
+  最大化是 KWin 自带的。设置页的 Linux 提示改成了这套实际行为。
+
+### 修复
+
+- **跨屏拖动不再一卡一卡**：`Cmd::Move` 明明已经按重叠面积挑定了目标屏（缝上小兽大半在
+  新屏、左上角还在旧屏），`create_surface` 却又按左上角自己挑了一次，而 `surface_enter`
+  还会把 `attached_output` 改回合成器认为的那块屏——于是“决定”和“建出来的表面”每一步都
+  打架，缝上每来一个 motion 事件就重建一次表面（8ms 一步的冲刺实测：150 步 24 次重建，
+  每次都是一个 configure 往返）。现在目标屏一路传下去，`surface_enter` 不再覆盖；
+  同一条冲刺只剩 **1 次**重建。顺带两件事：重建时旧表面留到新表面 configure 到、
+  并且已经提交了一帧之后才丢（以前先销毁再重建，缝上必然闪一帧空），换屏阈值也从
+  “新屏占到 60%”改成**一半**（小兽被裁掉大半才跳过去看着很卡）（ADR-077）。
+- **右键形象菜单回到了小兽旁边**（Wayland）：菜单是普通 `xdg_toplevel`，而 Wayland 的
+  toplevel **没有位置**——winit 的 `set_outer_position()` 在 Wayland 后端是空实现，
+  于是菜单一直由 KWin 按自己的默认策略摆放，可能跑到屏幕另一头。现在按「光标所在的
+  输出 + 光标逻辑坐标 + 菜单逻辑尺寸」算出目标位置，再让 KWin 的一次性脚本
+  `windowAdded` / `windowList` 把 `frameGeometry` 搬过去（脚本 1.5 秒后自动卸载）。
+  同时修掉 `pad` 的单位混用：原来拿 1.15 的 buffer 缩放去乘 56 逻辑像素的半径，
+  而光标在 `wl_output.scale`（整数 2）的坐标空间里。顺手加了 `ZOUWU_SKIN_MENU=1`
+  回归钩子——右键没法脚本化，但菜单摆在哪里现在能一键复现。
+- **鼠标又能拖着小兽走了**（Wayland 分数缩放）：`poll_pet` 把全局物理光标换算成本地逻辑
+  坐标时用的是 `scale_factor()` —— 那是 buffer 的分数缩放（1.15）。可窗口原点、光标和
+  `Drag` 都在 `wl_output.scale` 的整数坐标空间里（这块屏是 2），两套一混，算出来的本地
+  坐标被放大 1.74 倍：按在小兽正中心，`on_buddy` 却判定半径 56 之外，左键既不能拖动也
+  不能点击（右键没有位置判定，所以换形象还能用）。现在统一走 `coord_scale()`（Linux 取
+  `monitor_scale()`，Windows 取 DPI 缩放），拖动起点和命中判定回到同一套坐标。
+- **热键现在真的一键显示 / 隐藏**（Wayland）：隐藏时 UI 侧只把 `Cmd::Visible(false)` 塞进
+  命令队列，然后叫醒的是 **UI 线程**的 waker；可隐藏之后 UI 没有帧要画、不会再调用
+  `present()`，那条命令就一直躺在队列里，表面停在最后一张不透明的 buffer 上。表现是日志
+  写着 `zouwu hidden to tray`，小兽却纹丝不动地留在屏幕上，下一次按热键（“显示”）才顺带
+  把队列清掉——看起来就像热键只会显示、不会隐藏。现在 `layer::set_visible` 在入队后直接用
+  `wl_display.sync` + flush 戳醒 Wayland 线程，隐藏那一帧（全透明 buffer、空输入区域）
+  立刻提交；顺手给 `ZOUWU_PERF` 的帧日志补上输入矩形数量，隐藏后应看到 `0 input rect(s)`。
+  启动即隐藏（`show_on_start = false`）走的是同一条路，一起修好。
+- **呼出热键真的能看见小兽了**（Wayland）：隐藏走的是 `attach(None)`，也就是把 layer 表面**卸下**。
+  KWin 收到之后会立刻回一个 `closed` 事件，而且此后任何一帧都踩“configure 之前不许 attach buffer”那颗雷
+  （`wl_display.error(zwlr_layer_surface_v1, 0, "a buffer has been attached … prior to the first
+  layer_surface.configure event")`）。结果就是「日志写着 `zouwu shown`，屏幕上什么都没有」，然后
+  重建表面、再死、再重建。现在隐藏 = 提交一帧**全透明**的 buffer：表面一直 map 着，全透明时
+  输入区域本来就是空的（鼠标照样整个穿透），协议上零风险。顺手修掉重建时的单位错误——
+  `PetSurface::create` 收的是**逻辑**尺寸，两个调用方传的都是乘过缩放的物理值，于是每次重建都
+  再乘一遍缩放（1.15x 屏上 680→1360→2720→5440），几轮之后整只飞到屏幕外，还把那个坐标存进了
+  `state.toml`，下次启动就再也找不回来（ADR-075）。
+- **分数缩放的屏上小兽不再被糊一遍**：Wayland 只给整数 `wl_output.scale`，1.15 的屏上 KWin 报
+  `2`，于是 340 逻辑像素的小兽得先画成 680×680 的 buffer，再由合成器缩回 391 像素——三次多余的
+  重采样、三倍的带宽。现在接上 `wp_fractional_scale_v1` 与 `wp_viewporter`：`preferred_scale`（单位
+  1/120）一到就按 1.15 出 buffer，`viewport.set_destination` 负责映射，拿不到协议时照旧退回整数
+  缩放。同时把「表面尺寸」拆成两套坐标：`monitors()`/光标/位置留在整数尺度，只有 buffer 用分数，
+  免得 1.15 渗进拖动和命中判定。顺手修掉输入区域横向多算一格（`ax1 - ax0 + 1`）的老账（ADR-076）。
+- **运行期改热键真的生效了**：`setShortcutKeys` 的 `flags` 一直传的是 `2`——一个
+  kglobalaccel 不认识的标志值，行为等同 autoloading：动作只要登记过，KDE 就保留旧键、
+  把新键当没看见，回包还照样是非空的（回的是旧键）。于是只有首次注册能上，之后改配置、
+  换键位全部静默不生效（`kglobalshortcutsrc` 和 `shortcutKeys` 都还是旧键），日志却写着
+  `hotkey registered`。现在按 KF6 头文件传 `NoAutoloading = 0x4`，并核对回包里的键是不是
+  我们要的那颗——不是就报错，不再假装成功（ADR-073）。
+- **装到系统后菜单里不再是个灰方块**：Linux 的 `--install` 只写了 `.desktop`，图标却去
+  `~/.config/zouwu/icons/` 里找（那是**球的自定义图标**目录，跟程序自己的图标不是一回事），
+  于是 `Icon=` 一直空着。现在内嵌的 `assets/zouwu-icon.png` 会落到
+  `~/.local/share/icons/hicolor/128x128/apps/zouwu.png`，`.desktop` 和自启项都写主题名
+  `zouwu`；卸载时一并删掉。
+- **热键写错时面板会说话**：热键串解析不出来（例如只写了 `Ctrl+Alt`，KDE 不认纯修饰键），
+  呼出热键那一行和对应的气泡球行整行标红，行内直接写清原因，并按运行期的实际行为补一句
+  “当前已回退到 Alt+Space” / “这颗球不会响应热键”——之前只在日志里留一条 WARN，用户看到
+  的是一个“明明配了却按不动”的输入框（ADR-074）。
 
 ## 1.0.10 · 2026-11-10
 

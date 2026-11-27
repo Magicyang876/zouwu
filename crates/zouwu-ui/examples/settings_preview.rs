@@ -225,6 +225,37 @@ fn main() {
     m3.set_tab(Tab::Bubbles);
     shoot("settings-bubbles-empty.png", 760.0, 600.0, &mut m3, 1.0);
 
+    // 热键写错：呼出行与对应的球行都要标红、行内写清原因（ADR-074）。
+    // 同时拍中文和英文两张：原因那句话来自 i18n，不能把日志的中文口径搬进来。
+    for (lang, name) in [
+        ("zh-CN", "settings-hotkey-invalid.png"),
+        ("en-US", "settings-hotkey-invalid-en.png"),
+    ] {
+        let mut bad = Config::default();
+        bad.general.language = lang.to_string();
+        bad.general.hotkey = "Ctrl+Alt".into();
+        bad.ring.items[0].hotkey = "Ctrl+Shift".into();
+        let mut m6 = Model::new(
+            bad,
+            Vec::new(),
+            Vec::new(),
+            Paths {
+                config: String::new(),
+                log: String::new(),
+            },
+        );
+        m6.set_tab(Tab::General);
+        shoot(name, 760.0, 600.0, &mut m6, 1.0);
+        m6.set_tab(Tab::Bubbles);
+        shoot(
+            &name.replace(".png", "-bubbles.png"),
+            760.0,
+            600.0,
+            &mut m6,
+            1.0,
+        );
+    }
+
     // 环上到底几颗球：配置几个启用的就几颗，且均匀分布。
     let mut ring_items = Vec::new();
     for n in 0..6 {
