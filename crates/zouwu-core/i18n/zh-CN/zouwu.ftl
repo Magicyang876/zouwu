@@ -47,6 +47,12 @@ settings-hotkey = 呼出热键
 settings-hotkey-hint = 点击后按下组合键；Esc 取消，Backspace 清除
 settings-hotkey-capturing = 正在捕获按键…
 settings-hotkey-empty = 未设置
+settings-hotkey-fallback = { $reason }，已回退到 { $fallback }
+settings-hotkey-item-invalid = { $reason }，不会响应热键
+settings-hotkey-err-empty = 热键为空
+settings-hotkey-err-missing-key = `{ $text }` 缺少主键
+settings-hotkey-err-unknown-token = `{ $token }` 认不出
+settings-hotkey-err-no-modifier = `{ $key }` 至少带一个 Ctrl/Alt/Shift
 settings-start-on-boot = 开机自启
 settings-show-on-start = 启动时显示
 settings-bring-to-front = 呼出时置于最前
@@ -179,6 +185,7 @@ settings-eye-care-strength-hint = 越大越暖；开到最大约 55% 的暖色�
 settings-section-alt-drag = 窗口拖动
 settings-alt-drag = 按住 Alt 拖动窗口
 settings-alt-drag-hint = 按住 Alt 拖左键可移动光标下的窗口；双击最大化（再双击还原）；滚轮上滚最大化、下滚最小化
+settings-alt-drag-hint-linux = 按住 Alt 拖左键移动光标下的窗口；Alt+滚轮上滚最大化、下滚还原；Alt+中键最小化（由 KWin 代劳，退出时自动还原本来的鼠标绑定；带 Alt 的双击在 Wayland 下无法拦截，双击标题栏可最大化）
 
 # ── 剪贴板历史 ────────────────────────────────────────────
 settings-count = {$count} 条

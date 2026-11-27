@@ -374,8 +374,9 @@ extern "system" {
 
 /// `YYYY-MM-DD HH:MM:SS.mmm`（本地时间）。
 ///
-/// 非 Windows 平台退回 Unix epoch 秒：v1 只发 Windows（ADR-001），
-/// 结论性的一行仍需可读，这里不做完整移植。
+/// Windows 直接问 `GetLocalTime`；Linux 走 `localtime_r`（照 `TZ`/`/etc/localtime`
+/// 算本地时间，夏令时也由 libc 处理）。**不要退回 epoch 秒**：日志里一列
+/// 难读的数字比没有时间戳更糟，何况 `zouwu.log` 是用户唯一能贴给我们的东西。
 pub fn timestamp() -> String {
     #[cfg(target_os = "windows")]
     {
@@ -388,11 +389,27 @@ pub fn timestamp() -> String {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        format!("{secs}")
+        let now = std::time::SystemTime::now();
+        let Ok(since) = now.duration_since(std::time::UNIX_EPOCH) else {
+            return "0000-00-00 00:00:00.000".to_string();
+        };
+        let secs = since.as_secs() as libc::time_t;
+        let millis = since.subsec_millis();
+        // SAFETY: `localtime_r` 只写我们提供的 `tm`，返回空指针时交给下面的兜底。
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        if unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
+            return format!("{secs}");
+        }
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
+            tm.tm_year + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min,
+            tm.tm_sec,
+            millis
+        )
     }
 }
 

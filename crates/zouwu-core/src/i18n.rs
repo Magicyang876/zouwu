@@ -246,6 +246,17 @@ mod tests {
     }
 
     #[test]
+    fn platform_specific_hints_exist_in_every_language() {
+        // 设置面板按平台选 key（`cfg!`），漏一个就会在界面上把 key 名字直接显出来。
+        for lang in LANGUAGES {
+            let i18n = I18n::new(lang);
+            for key in ["settings.alt-drag.hint", "settings.alt-drag.hint-linux"] {
+                assert_ne!(i18n.t(key), key, "{lang} 缺少 {key}");
+            }
+        }
+    }
+
+    #[test]
     fn system_tag_matches_by_primary_language() {
         assert_eq!(match_supported("zh-Hans-CN"), "zh-CN");
         assert_eq!(match_supported("zh"), "zh-CN");

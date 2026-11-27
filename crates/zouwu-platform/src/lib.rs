@@ -4,12 +4,21 @@
 //! 都必须待在本 crate 里，UI 与领域层通过这里的函数/ trait 使用。
 
 pub mod assets;
+/// 把面板窗口抬到最前（仅 KDE）：Wayland 没有 raise 接口，靠 KWin 脚本代劳。
+#[cfg(target_os = "linux")]
+#[path = "activate_linux.rs"]
+pub mod activate;
 #[cfg(target_os = "windows")]
+pub mod autostart;
+/// 开机自启：Windows 写 `HKCU\...\Run`，Linux 写 XDG autostart 的 `.desktop`。
+#[cfg(not(target_os = "windows"))]
+#[path = "autostart_linux.rs"]
 pub mod autostart;
 #[cfg(target_os = "windows")]
 pub mod clipboard;
+/// 剪贴板：Windows 读剪贴板序号，Linux 走 wl_data_device（惰性读 + 缓存）。
 #[cfg(not(target_os = "windows"))]
-#[path = "clipboard_stub.rs"]
+#[path = "clipboard_linux.rs"]
 pub mod clipboard;
 /// 控制台：GUI 子系统的 exe 怎么才能「恰好」在终端里打印。
 #[cfg(target_os = "windows")]
@@ -20,40 +29,87 @@ pub mod console;
 /// 字体文件的 `name` 表解析（纯 Rust，可测）。
 pub mod fontfile;
 pub mod fontpack;
-#[cfg(target_os = "windows")]
+/// 全局热键：注册器（槽位/回退逻辑）与平台无关，只有后端换。
+/// Windows 走 `RegisterHotKey`；Linux 走 global-hotkey 的 X11 后端
+/// （在 KWin Wayland 会话里就是 XWayland，KWin 会把 X11 客户端的
+/// `XGrabKey` 当全局快捷键处理）。
+#[cfg(not(target_os = "linux"))]
 pub mod hotkey;
+/// Linux 的全局热键：走 KDE 的 `kglobalaccel`（Wayland 下唯一不打扰用户的路径）。
+///
+/// 纯 X11 会话或非 KDE 桌面上仍然需要 `XGrabKey`，所以旧的实现留着当后端，
+/// 也顺便提供 `Slot` 的定义。
+#[cfg(target_os = "linux")]
+#[path = "hotkey.rs"]
+pub(crate) mod hotkey_x11;
+#[cfg(target_os = "linux")]
+#[path = "hotkey_linux.rs"]
+pub mod hotkey;
+
 #[cfg(target_os = "windows")]
 pub mod install;
+/// 安装/卸载：Windows 走 Program Files + 注册表，Linux 走 XDG 目录。
+#[cfg(not(target_os = "windows"))]
+#[path = "install_linux.rs"]
+pub mod install;
+/// 分层窗口：Windows 走 `UpdateLayeredWindow`，Linux 走 `zwlr_layer_shell_v1` + `wl_shm`。
 #[cfg(target_os = "windows")]
+pub mod layer;
+#[cfg(not(target_os = "windows"))]
+#[path = "layer_linux.rs"]
 pub mod layer;
 pub mod logging;
 #[cfg(target_os = "windows")]
 pub(crate) mod reg;
 #[cfg(target_os = "windows")]
 pub mod single_instance;
+/// 终止信号：让 `SIGTERM` 也走正常退出（退出时要还原 KDE 的拖动修饰键等）。
+#[cfg(target_os = "linux")]
+#[path = "signal_linux.rs"]
+pub mod signal;
+/// 单实例：Windows 用命名内核事件，Linux 用 flock + unix socket。
+#[cfg(not(target_os = "windows"))]
+#[path = "single_instance_linux.rs"]
+pub mod single_instance;
 
 /// 系统字体：改 Windows 自己的界面字体（读/写 `NONCLIENTMETRICS`、拍快照、导 `.reg`）。
 pub mod sysfont;
-/// 文本栅格化：Windows 走 GDI（系统共享字体，常驻内存≈0）。
+/// 文本栅格化：Windows 走 GDI，Linux 走 fontconfig + FreeType（都是系统共享字体，
+/// 常驻内存≈0）；其余平台留占位。
 #[cfg(target_os = "windows")]
 pub mod text_gdi;
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+#[path = "text_gdi_linux.rs"]
+pub mod text_gdi;
+#[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
 #[path = "text_gdi_stub.rs"]
 pub mod text_gdi;
 #[cfg(target_os = "windows")]
+pub mod tray;
+/// 系统托盘：Windows 走通知区域，Linux 走 StatusNotifierItem（D-Bus，KDE 原生）。
+#[cfg(not(target_os = "windows"))]
+#[path = "tray_linux.rs"]
 pub mod tray;
 
 /// Alt 拖动窗口（AltSnap 的最小集：拖动 / 双击最大化 / 滚轮最大最小化）。
 #[cfg(target_os = "windows")]
 pub mod altdrag;
-#[cfg(not(target_os = "windows"))]
+/// Linux：不自己实现钩子，改为把 KWin 的"按住 Alt 拖动"打开（见模块文档）。
+#[cfg(target_os = "linux")]
+#[path = "altdrag_linux.rs"]
+pub mod altdrag;
+#[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
 #[path = "altdrag_stub.rs"]
 pub mod altdrag;
 pub mod dialogs;
 /// 护眼遮罩（蓝光过滤）：一层点击穿透的暖色窗口。
 #[cfg(target_os = "windows")]
 pub mod eyecare;
-#[cfg(not(target_os = "windows"))]
+/// Linux：每块屏一个 layer-shell 的 overlay 表面（合成器保证层序，不需要 hook）。
+#[cfg(target_os = "linux")]
+#[path = "eyecare_linux.rs"]
+pub mod eyecare;
+#[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
 #[path = "eyecare_stub.rs"]
 pub mod eyecare;
 /// 跑一条用户写的命令 / 打开一个程序（自定义气泡球的执行端）。

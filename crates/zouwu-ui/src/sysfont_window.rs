@@ -1128,7 +1128,13 @@ mod tests {
     fn entries_cover_every_target_with_the_same_face() {
         let state = state_with(&["Sarasa Gothic SC"]);
         let entries = state.entries();
-        assert_eq!(entries.len(), Target::ALL.len());
+        // 标题栏那一项只在支持它的系统上才列出（见 `caption_supported`），
+        // 所以期望数量也得按同一个条件算。
+        let expected = Target::ALL
+            .iter()
+            .filter(|target| **target != Target::Caption || sysfont::caption_supported())
+            .count();
+        assert_eq!(entries.len(), expected);
         for (target, entry) in entries {
             assert!(Target::ALL.contains(&target));
             assert_eq!(entry.face, "Sarasa Gothic SC");

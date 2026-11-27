@@ -75,6 +75,42 @@ mod windows_layer {
 #[cfg(target_os = "windows")]
 pub use windows_layer::LayeredPresenter;
 
+/// Wayland 后端：`zwlr_layer_shell_v1` 表面 + `wl_shm`。
+///
+/// 和 Windows 的分层窗口是**同构**的：UI 线程出一张预乘 RGBA，后端把它贴到
+/// 一个逐像素 alpha 的表面上。区别只在通道（这里是共享内存缓冲区，不是
+/// `UpdateLayeredWindow`），所以 `Presenter` 这个抽象不用改。
+#[cfg(not(target_os = "windows"))]
+mod linux_layer {
+    use super::Presenter;
+    use std::sync::Arc;
+    use tiny_skia::Pixmap;
+    use zouwu_platform::layer::PetSurface;
+
+    pub struct LayerPresenter {
+        surface: Arc<PetSurface>,
+    }
+
+    impl LayerPresenter {
+        pub fn new(surface: Arc<PetSurface>) -> Self {
+            Self { surface }
+        }
+    }
+
+    impl Presenter for LayerPresenter {
+        fn resize(&mut self, width: u32, height: u32) {
+            self.surface.resize(width, height);
+        }
+
+        fn present(&mut self, pixmap: &Pixmap) -> Result<(), String> {
+            self.surface.present(pixmap.data())
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub use linux_layer::LayerPresenter;
+
 /// 取出 winit 窗口的原生句柄（Windows 下是 HWND）。
 #[cfg(target_os = "windows")]
 fn win32_hwnd(window: &winit::window::Window) -> Result<isize, String> {
@@ -102,7 +138,9 @@ pub fn create(
     #[cfg(not(target_os = "windows"))]
     {
         let _ = (window, width, height);
-        Err("M0 只实现了 Windows 呈现后端".to_string())
+        // Linux 的呈现后端绑在 layer 表面上，而表面不归 winit 管：
+        // 调用方（`App::resumed`）直接建 `LayerPresenter`。
+        Err("Linux 用 presenter::LayerPresenter（绑在 layer 表面上）".to_string())
     }
 }
 
