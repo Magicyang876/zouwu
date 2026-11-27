@@ -3,6 +3,13 @@
 版本号只有一处真相：`Cargo.toml` 的 `[workspace.package] version`。打包脚本（不随仓库发布）
 从那里读，zip 名字跟着变；发版时打 `v<version>` 标签。
 
+## Unreleased
+
+### 变更
+- **启动器的热键改成开关**：搜索框开着时再按 `Ctrl+Alt+Space` 就是关掉它，和
+  Flow Launcher / Spotlight 的手感一致。以前这一下只会把搜索词清掉、窗口闪一下，
+  看着像没反应（ADR-076）。
+
 ## 1.0.11 · 2026-11-27
 
 ### 变更

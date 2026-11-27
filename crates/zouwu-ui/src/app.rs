@@ -2525,6 +2525,13 @@ impl App {
     /// 目录遍历是毫秒级的事，不值得为它维护缓存与失效策略。
     fn open_launcher(&mut self, event_loop: &ActiveEventLoop) {
         crate::watchdog::enter(crate::watchdog::stage::OPEN_HISTORY);
+        // 热键是开关：开着就关。不然第二下只会把同一份清单重扫一遍塞回窗口，
+        // 搜索词被清掉、窗口闪一下，看着像“按了没反应”。
+        if self.launcher.as_ref().is_some_and(|w| w.is_visible()) {
+            log::info!("app: close launcher (hotkey toggled)");
+            self.close_launcher();
+            return;
+        }
         let programs = zouwu_platform::programs::installed(&self.config.launcher.dirs);
         log::info!(
             "app: open launcher ({} programs, was open: {})",
@@ -2561,6 +2568,25 @@ impl App {
         }
     }
 
+    /// 关掉启动器：Esc、回车启动、再按一次热键都走这里。
+    ///
+    /// 窗口**不销毁**（只 `set_visible(false)`）：销毁一个 winit 窗口要走
+    /// USER32 的同步通知，在事件回调里做就是卡死（ADR-053）。`last_child_closed_at`
+    /// 与 `buttons_down` 的刷新手不能省，否则选完程序鼠标还按着时小兽会一直以
+    /// “指针已离开”的状态抖。
+    fn close_launcher(&mut self) {
+        crate::watchdog::enter(crate::watchdog::stage::CLOSE_WINDOW);
+        if let Some(window) = self.launcher.as_mut() {
+            window.close();
+        }
+        self.last_child_closed_at = Instant::now();
+        self.buttons_down = (
+            zouwu_platform::layer::left_button_down(),
+            zouwu_platform::layer::right_button_down(),
+        );
+        self.next_poll = Instant::now();
+    }
+
     /// 启动器的事件：开程序（顺带关窗）或关窗。
     ///
     /// 先关窗再 spawn：开程序可能拖几百毫秒，不能让搜索框僵在那里。
@@ -2585,16 +2611,7 @@ impl App {
             }
         }
         if close {
-            crate::watchdog::enter(crate::watchdog::stage::CLOSE_WINDOW);
-            if let Some(window) = self.launcher.as_mut() {
-                window.close();
-            }
-            self.last_child_closed_at = Instant::now();
-            self.buttons_down = (
-                zouwu_platform::layer::left_button_down(),
-                zouwu_platform::layer::right_button_down(),
-            );
-            self.next_poll = Instant::now();
+            self.close_launcher();
         }
         if let Some(program) = launch {
             if let Err(err) = zouwu_platform::programs::open(&program.path) {
